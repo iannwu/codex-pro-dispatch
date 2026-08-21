@@ -208,7 +208,7 @@ On macOS:
 
 ```bash
 for file in bin/cgpt-*; do
-  swiftc -typecheck "$file"
+  swiftc -frontend -typecheck "$file"
 done
 ```
 
