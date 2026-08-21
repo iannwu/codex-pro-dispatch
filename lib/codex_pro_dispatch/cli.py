@@ -180,11 +180,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         config = load_config(paths)
-        socket_path = Path(
-            args.socket_path
-            if getattr(args, "socket_path", None)
-            else configured_socket_path(config, paths)
-        ).expanduser()
+        socket_path = configured_socket_path(
+            config,
+            paths,
+            override=getattr(args, "socket_path", None),
+        )
 
         if args.command == "doctor":
             checks: list[dict[str, Any]] = []
@@ -250,7 +250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 flush=True,
             )
-            serve(target=config, socket_path=socket_path)
+            serve(target=config, socket_path=socket_path, paths=paths)
             return 0
 
         if args.command == "ping":
