@@ -29,6 +29,23 @@ from .common import (
     wrap_prompt,
 )
 
+
+def _target_identity(target: TargetConfig) -> tuple[str, str, str]:
+    return (target.bundle_id, target.app_name, target.window_title)
+
+
+def _receipt_target(receipt: Mapping[str, Any]) -> TargetConfig:
+    raw = receipt.get("target")
+    if not isinstance(raw, Mapping):
+        raise ConfigurationError("Receipt is missing its target")
+    return TargetConfig(
+        bundle_id=str(raw.get("bundle_id", "")),
+        app_name=str(raw.get("app_name", "")),
+        window_title=str(raw.get("window_title", "")),
+        transport=str(raw.get("transport", "direct")),
+        socket_path=str(raw.get("socket_path", "")),
+    ).validate()
+
 class Dispatcher:
     def __init__(
         self,
@@ -55,6 +72,11 @@ class Dispatcher:
         wrapped_prompt = wrap_prompt(prompt, identity)
 
         with dispatch_lock(self.paths):
+            receipt_file = receipt_path(identity, self.paths)
+            if receipt_file.exists():
+                raise ConfigurationError(
+                    f"Assignment already exists: {identity}. Use collect instead of resending."
+                )
             baseline = self.backend.read(target)
             if baseline.input_value.strip():
                 raise DraftPresentError(
@@ -175,6 +197,24 @@ class Dispatcher:
         identity = validate_assignment_id(assignment_id)
         with dispatch_lock(self.paths):
             receipt = load_receipt(identity, self.paths)
+            expected_target = _receipt_target(receipt)
+            if _target_identity(target) != _target_identity(expected_target):
+                raise ConfigurationError(
+                    "Configured ChatGPT target differs from the assignment receipt. "
+                    "Restore the original app and window target before collecting.",
+                    details={
+                        "expected": {
+                            "bundle_id": expected_target.bundle_id,
+                            "app_name": expected_target.app_name,
+                            "window_title": expected_target.window_title,
+                        },
+                        "configured": {
+                            "bundle_id": target.bundle_id,
+                            "app_name": target.app_name,
+                            "window_title": target.window_title,
+                        },
+                    },
+                )
             baseline = receipt.get("baseline")
             if not isinstance(baseline, Mapping):
                 raise ConfigurationError("Receipt is missing its baseline")
