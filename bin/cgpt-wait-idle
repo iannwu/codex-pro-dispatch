@@ -55,7 +55,7 @@ func normalizedButtonText(_ element: AXUIElement) -> String {
     return ""
 }
 
-let sendLabels: Set<String> = [
+let sendPrefixes = [
     "send", "skicka", "envoyer", "senden", "invia", "enviar",
     "送信", "发送", "傳送", "전송"
 ]
@@ -63,6 +63,12 @@ let stopFragments = [
     "stop", "stoppa", "arrêter", "stopp", "interrompi", "detener",
     "停止", "중지"
 ]
+
+func isSendLabel(_ text: String) -> Bool {
+    sendPrefixes.contains { prefix in
+        text == prefix || text.hasPrefix("\(prefix) ")
+    }
+}
 
 struct Options {
     var bundleID = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_BUNDLE_ID"] ?? "com.openai.chat"
@@ -170,7 +176,7 @@ func snapshot(window: AXUIElement) -> Snapshot {
     var buttons: [AXUIElement] = []
     findAll(window, role: "AXButton", into: &buttons)
     let buttonTexts = buttons.map(normalizedButtonText)
-    let sendExists = buttonTexts.contains { sendLabels.contains($0) }
+    let sendExists = buttonTexts.contains(where: isSendLabel)
     let stopExists = buttonTexts.contains { text in
         stopFragments.contains { text.contains($0) }
     }
@@ -212,24 +218,20 @@ let pollInterval: useconds_t = 350_000
 var previousCharacters = -1
 var previousGroups = -1
 var stableSince: Date? = nil
-var activityObserved = false
+var generationObserved = false
 
 while Date().timeIntervalSince(start) < options.timeout {
     let current = snapshot(window: window)
     let now = Date()
     let changed = current.staticCharacters != previousCharacters || current.groupCount != previousGroups
     if changed {
-        if previousCharacters >= 0 { activityObserved = true }
         previousCharacters = current.staticCharacters
         previousGroups = current.groupCount
         stableSince = nil
     } else if stableSince == nil {
         stableSince = now
     }
-    if current.stopExists || !current.sendExists { activityObserved = true }
-    if options.baselineGroups >= 0 && current.groupCount > options.baselineGroups {
-        activityObserved = true
-    }
+    if current.stopExists || !current.sendExists { generationObserved = true }
 
     let stableFor = stableSince.map { now.timeIntervalSince($0) } ?? 0
     if !options.quiet {
@@ -238,8 +240,15 @@ while Date().timeIntervalSince(start) < options.timeout {
         FileHandle.standardError.write(line.data(using: .utf8)!)
     }
 
-    let hasNewGroup = options.baselineGroups < 0 || current.groupCount > options.baselineGroups
-    if activityObserved && hasNewGroup && current.sendExists && !current.stopExists && stableFor >= stableNeeded {
+    // One new group may be only the submitted user turn. Require the user turn
+    // and a subsequent assistant turn before returning a completed dispatch.
+    let hasAssistantGroup = options.baselineGroups < 0
+        || current.groupCount >= options.baselineGroups + 2
+    if generationObserved
+        && hasAssistantGroup
+        && current.sendExists
+        && !current.stopExists
+        && stableFor >= stableNeeded {
         emit(Success(
             ok: true,
             elapsed_ms: Int(Date().timeIntervalSince(start) * 1000),
