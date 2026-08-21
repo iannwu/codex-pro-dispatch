@@ -53,7 +53,9 @@ jobs:
           {
             for file in bin/cgpt-*; do
               echo "Typechecking $file"
-              swiftc -typecheck "$file"
+              temp="$RUNNER_TEMP/$(basename "$file").swift"
+              cp "$file" "$temp"
+              swiftc -typecheck "$temp"
             done
           } 2>&1 | tee verification/swift-typecheck.txt
 
