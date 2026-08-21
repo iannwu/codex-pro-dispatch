@@ -22,6 +22,6 @@ test_sender_verifies_the_complete_input_before_pressing_send (test_swift_contrac
 test_waiter_requires_user_and_assistant_groups (test_swift_contracts.SwiftContractTests.test_waiter_requires_user_and_assistant_groups) ... ok
 
 ----------------------------------------------------------------------
-Ran 22 tests in 0.679s
+Ran 22 tests in 0.627s
 
 OK
