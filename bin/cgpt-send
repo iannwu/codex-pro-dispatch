@@ -56,13 +56,20 @@ func normalizedButtonText(_ element: AXUIElement) -> String {
     return ""
 }
 
-let sendLabels: Set<String> = [
+let sendPrefixes = [
     "send", "skicka", "envoyer", "senden", "invia", "enviar",
     "送信", "发送", "傳送", "전송"
 ]
 
+func isSendLabel(_ text: String) -> Bool {
+    sendPrefixes.contains { prefix in
+        text == prefix || text.hasPrefix("\(prefix) ")
+    }
+}
+
 func findSendButton(_ element: AXUIElement) -> AXUIElement? {
-    if axString(element, kAXRoleAttribute) == "AXButton" && sendLabels.contains(normalizedButtonText(element)) {
+    if axString(element, kAXRoleAttribute) == "AXButton"
+        && isSendLabel(normalizedButtonText(element)) {
         return element
     }
     for child in children(element) {
@@ -207,7 +214,7 @@ guard let app = selectApplication(options) else {
         error: "Target app is not running: \(options.appName.isEmpty ? options.bundleID : options.appName)"
     ), code: 3)
 }
-app.activate(options: [])
+app.activate(options: [.activateIgnoringOtherApps])
 usleep(250_000)
 
 let appElement = AXUIElementCreateApplication(app.processIdentifier)
@@ -246,17 +253,25 @@ if directResult != .success || directValue != options.message || sendButton == n
     pasteboard.setString(options.message, forType: .string)
     usleep(80_000)
     commandV()
-    usleep(250_000)
+    usleep(300_000)
     snapshot.restore(pasteboard)
     sendButton = findSendButton(window)
 }
 
+let populatedValue = axString(input, kAXValueAttribute) ?? ""
+if populatedValue != options.message {
+    emit(Failure(
+        ok: false,
+        error: "The full message was not present in the input; refusing to send."
+    ), code: 7)
+}
+
 guard let button = sendButton else {
-    emit(Failure(ok: false, error: "Send button not found after filling the input"), code: 7)
+    emit(Failure(ok: false, error: "Send button not found after filling the input"), code: 8)
 }
 let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
 if result != .success {
-    emit(Failure(ok: false, error: "Could not press the Send button (\(result.rawValue))"), code: 8)
+    emit(Failure(ok: false, error: "Could not press the Send button (\(result.rawValue))"), code: 9)
 }
 
 emit(Success(
