@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from .common import (
     DEFAULT_TIMEOUT_SECONDS,
     MAX_DAEMON_REQUEST_BYTES,
+    ConfigurationError,
     DaemonError,
     DispatchError,
     RuntimePaths,
@@ -24,11 +25,26 @@ from .dispatcher import Dispatcher
 def configured_socket_path(
     config: TargetConfig | None,
     paths: RuntimePaths | None = None,
+    *,
+    override: str | None = None,
 ) -> Path:
     runtime = paths or default_paths()
-    if config and config.socket_path:
-        return Path(config.socket_path).expanduser()
-    return runtime.default_socket
+    raw = override or (config.socket_path if config else "")
+    candidate = Path(raw).expanduser() if raw else runtime.default_socket
+    if not candidate.is_absolute():
+        candidate = runtime.state_dir / candidate
+
+    state_root = runtime.state_dir.expanduser().resolve(strict=False)
+    resolved = candidate.resolve(strict=False)
+    if not resolved.is_relative_to(state_root):
+        raise ConfigurationError(
+            "The daemon socket must be inside the private state directory",
+            details={
+                "socket_path": str(resolved),
+                "state_directory": str(state_root),
+            },
+        )
+    return resolved
 
 def _socket_request(
     socket_path: Path,
@@ -146,7 +162,15 @@ def serve(
     target: TargetConfig,
     socket_path: Path,
     dispatcher: Dispatcher | None = None,
+    paths: RuntimePaths | None = None,
 ) -> None:
+    runtime = paths or default_paths()
+    socket_path = configured_socket_path(
+        target,
+        runtime,
+        override=str(socket_path),
+    )
+    _secure_directory(runtime.state_dir)
     _secure_directory(socket_path.parent)
     _remove_stale_socket(socket_path)
     old_umask = os.umask(0o077)
