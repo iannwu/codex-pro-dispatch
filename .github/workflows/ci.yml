@@ -24,44 +24,79 @@ jobs:
           python-version: "3.11"
 
       - name: Python unit tests
-        run: python3 -m unittest discover -s tests -v
+        id: python_tests
+        continue-on-error: true
+        run: |
+          mkdir -p verification
+          set -o pipefail
+          python3 -m unittest discover -s tests -v 2>&1 | tee verification/python-tests.log
 
       - name: Python syntax
-        run: python3 -m py_compile bin/pro-dispatch $(find lib/codex_pro_dispatch -name '*.py' -print)
+        id: python_syntax
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 -m py_compile bin/pro-dispatch $(find lib/codex_pro_dispatch -name '*.py' -print) 2>&1 | tee verification/python-syntax.log
 
       - name: Shell syntax
-        run: bash -n install.sh uninstall.sh
+        id: shell_syntax
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          bash -n install.sh uninstall.sh 2>&1 | tee verification/shell-syntax.log
 
       - name: Swift helper typecheck
+        id: swift_typecheck
+        continue-on-error: true
         run: |
-          for file in bin/cgpt-*; do
-            echo "Typechecking $file"
-            swiftc -frontend -typecheck "$file"
-          done
+          set -o pipefail
+          {
+            for file in bin/cgpt-*; do
+              echo "Typechecking $file"
+              swiftc -frontend -typecheck "$file"
+            done
+          } 2>&1 | tee verification/swift-typecheck.log
 
       - name: CLI help
-        run: ./bin/pro-dispatch --help
+        id: cli_help
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./bin/pro-dispatch --help 2>&1 | tee verification/cli-help.log
 
-      - name: Record successful branch verification
-        if: github.event_name == 'push' && github.ref == 'refs/heads/codex/v0.1-poc'
+      - name: Record branch verification
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/codex/v0.1-poc'
         env:
           VERIFIED_SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
+          PYTHON_TESTS: ${{ steps.python_tests.outcome }}
+          PYTHON_SYNTAX: ${{ steps.python_syntax.outcome }}
+          SHELL_SYNTAX: ${{ steps.shell_syntax.outcome }}
+          SWIFT_TYPECHECK: ${{ steps.swift_typecheck.outcome }}
+          CLI_HELP: ${{ steps.cli_help.outcome }}
         run: |
-          mkdir -p verification
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
+          checks = {
+              "python_tests": os.environ["PYTHON_TESTS"],
+              "python_syntax": os.environ["PYTHON_SYNTAX"],
+              "shell_syntax": os.environ["SHELL_SYNTAX"],
+              "swift_typecheck": os.environ["SWIFT_TYPECHECK"],
+              "cli_help": os.environ["CLI_HELP"],
+          }
+          status = "passed" if all(value == "success" for value in checks.values()) else "failed"
           payload = {
               "schema_version": 1,
-              "status": "passed",
+              "status": status,
               "verified_sha": os.environ["VERIFIED_SHA"],
               "workflow": "CI",
               "run_id": os.environ["RUN_ID"],
               "runner": "macos-latest",
               "python": "3.11",
+              "checks": checks,
           }
           Path("verification/ci.json").write_text(
               json.dumps(payload, indent=2, sort_keys=True) + "\n",
@@ -70,6 +105,29 @@ jobs:
           PY
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add verification/ci.json
+          git add verification
           git commit -m "ci: attest ${VERIFIED_SHA:0:12}"
           git push origin HEAD:codex/v0.1-poc
+
+      - name: Enforce verification result
+        if: always()
+        env:
+          PYTHON_TESTS: ${{ steps.python_tests.outcome }}
+          PYTHON_SYNTAX: ${{ steps.python_syntax.outcome }}
+          SHELL_SYNTAX: ${{ steps.shell_syntax.outcome }}
+          SWIFT_TYPECHECK: ${{ steps.swift_typecheck.outcome }}
+          CLI_HELP: ${{ steps.cli_help.outcome }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+
+          checks = [
+              os.environ["PYTHON_TESTS"],
+              os.environ["PYTHON_SYNTAX"],
+              os.environ["SHELL_SYNTAX"],
+              os.environ["SWIFT_TYPECHECK"],
+              os.environ["CLI_HELP"],
+          ]
+          raise SystemExit(0 if all(value == "success" for value in checks) else 1)
+          PY
