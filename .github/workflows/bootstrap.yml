@@ -1,0 +1,13 @@
+name: Bootstrap source (staging)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Source archive is being staged."
