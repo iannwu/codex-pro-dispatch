@@ -1,0 +1,16 @@
+{
+  "checks": {
+    "cli_help": "success",
+    "python_syntax": "success",
+    "python_tests": "success",
+    "shell_syntax": "success",
+    "swift_typecheck": "failure"
+  },
+  "python": "3.11",
+  "run_id": "32440599340",
+  "runner": "macos-latest",
+  "schema_version": 1,
+  "status": "failed",
+  "verified_sha": "1f0046d5b2278773ccdd5080157695caad20d09d",
+  "workflow": "CI"
+}
