@@ -1,0 +1,27 @@
+test_help (test_cli.CliTests.test_help) ... ok
+test_missing_config_is_structured_error (test_cli.CliTests.test_missing_config_is_structured_error) ... ok
+test_app_name_resolution_requires_one_exact_running_match (test_codex_pro_dispatch.CodexProDispatchTests.test_app_name_resolution_requires_one_exact_running_match) ... ok
+test_assignment_id_rejects_path_traversal (test_codex_pro_dispatch.CodexProDispatchTests.test_assignment_id_rejects_path_traversal) ... ok
+test_atomic_receipt_write_is_private_and_valid_json (test_codex_pro_dispatch.CodexProDispatchTests.test_atomic_receipt_write_is_private_and_valid_json) ... ok
+test_collect_refuses_a_different_app_or_window_target (test_codex_pro_dispatch.CodexProDispatchTests.test_collect_refuses_a_different_app_or_window_target) ... ok
+test_config_roundtrip_and_private_mode (test_codex_pro_dispatch.CodexProDispatchTests.test_config_roundtrip_and_private_mode) ... ok
+test_daemon_rejects_unknown_action (test_codex_pro_dispatch.CodexProDispatchTests.test_daemon_rejects_unknown_action) ... ok
+test_daemon_roundtrip_and_socket_permissions (test_codex_pro_dispatch.CodexProDispatchTests.test_daemon_roundtrip_and_socket_permissions) ... ok
+test_draft_refusal_occurs_before_send (test_codex_pro_dispatch.CodexProDispatchTests.test_draft_refusal_occurs_before_send) ... ok
+test_existing_assignment_receipt_blocks_resubmission_before_read (test_codex_pro_dispatch.CodexProDispatchTests.test_existing_assignment_receipt_blocks_resubmission_before_read) ... ok
+test_extract_response_preserves_code_and_diff_text (test_codex_pro_dispatch.CodexProDispatchTests.test_extract_response_preserves_code_and_diff_text) ... ok
+test_nonblocking_lock_rejects_concurrent_dispatch (test_codex_pro_dispatch.CodexProDispatchTests.test_nonblocking_lock_rejects_concurrent_dispatch) ... ok
+test_response_unavailable_does_not_resend (test_codex_pro_dispatch.CodexProDispatchTests.test_response_unavailable_does_not_resend) ... ok
+test_socket_path_is_confined_to_private_state_directory (test_codex_pro_dispatch.CodexProDispatchTests.test_socket_path_is_confined_to_private_state_directory) ... ok
+test_successful_dispatch_sends_once_and_writes_complete_receipt (test_codex_pro_dispatch.CodexProDispatchTests.test_successful_dispatch_sends_once_and_writes_complete_receipt) ... ok
+test_timeout_never_resends_and_can_be_collected_later (test_codex_pro_dispatch.CodexProDispatchTests.test_timeout_never_resends_and_can_be_collected_later) ... ok
+test_wrap_prompt_identifies_assignment_without_claiming_tests (test_codex_pro_dispatch.CodexProDispatchTests.test_wrap_prompt_identifies_assignment_without_claiming_tests) ... ok
+test_send_button_matching_accepts_descriptive_labels (test_swift_contracts.SwiftContractTests.test_send_button_matching_accepts_descriptive_labels) ... ok
+test_sender_restores_the_pasteboard (test_swift_contracts.SwiftContractTests.test_sender_restores_the_pasteboard) ... ok
+test_sender_verifies_the_complete_input_before_pressing_send (test_swift_contracts.SwiftContractTests.test_sender_verifies_the_complete_input_before_pressing_send) ... ok
+test_waiter_requires_user_and_assistant_groups (test_swift_contracts.SwiftContractTests.test_waiter_requires_user_and_assistant_groups) ... ok
+
+----------------------------------------------------------------------
+Ran 22 tests in 0.679s
+
+OK

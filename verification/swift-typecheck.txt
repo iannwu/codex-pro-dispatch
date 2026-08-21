@@ -1,0 +1,2 @@
+Typechecking bin/cgpt-list-apps
+<unknown>:0: error: unable to load standard library for target 'arm64-apple-macosx26.0'

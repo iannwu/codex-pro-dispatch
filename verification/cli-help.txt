@@ -1,0 +1,18 @@
+usage: pro-dispatch [-h]
+                    {apps,configure,doctor,send,collect,smoke,serve,ping} ...
+
+Dispatch assignments from Codex to a native ChatGPT Pro thread on macOS.
+
+positional arguments:
+  {apps,configure,doctor,send,collect,smoke,serve,ping}
+    apps                List running ChatGPT/OpenAI applications
+    configure           Save target application settings
+    doctor              Validate configuration and Accessibility access
+    send                Send one assignment exactly once
+    collect             Collect a response after an earlier timeout
+    smoke               Run a nonce roundtrip against the configured thread
+    serve               Run the Accessibility bridge over a local Unix socket
+    ping                Ping the local bridge daemon
+
+options:
+  -h, --help            show this help message and exit
