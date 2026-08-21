@@ -30,6 +30,7 @@ class FakeBackend:
         self.snapshots = list(snapshots)
         self.wait_error = wait_error
         self.apps = list(apps or [])
+        self.read_count = 0
         self.send_count = 0
         self.sent_messages: list[str] = []
         self.wait_count = 0
@@ -38,6 +39,7 @@ class FakeBackend:
         return {"ok": True, "accessibility_trusted": True, "apps": self.apps}
 
     def read(self, target: cpd.TargetConfig) -> cpd.Snapshot:
+        self.read_count += 1
         if not self.snapshots:
             raise AssertionError("No fake snapshot remains")
         return self.snapshots.pop(0)
@@ -169,6 +171,21 @@ class CodexProDispatchTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "complete")
         self.assertEqual(receipt["response_sha256"], cpd.sha256_text(response))
 
+    def test_existing_assignment_receipt_blocks_resubmission_before_read(self) -> None:
+        cpd.save_receipt("dispatch-existing", {"status": "sent"}, self.paths)
+        backend = FakeBackend([self.snapshot(1)])
+        dispatcher = cpd.Dispatcher(backend=backend, paths=self.paths)
+
+        with self.assertRaises(cpd.ConfigurationError):
+            dispatcher.send(
+                "Do not resend",
+                target=self.target,
+                assignment_id="dispatch-existing",
+            )
+
+        self.assertEqual(backend.read_count, 0)
+        self.assertEqual(backend.send_count, 0)
+
     def test_draft_refusal_occurs_before_send(self) -> None:
         backend = FakeBackend([self.snapshot(3, draft="unfinished local note")])
         dispatcher = cpd.Dispatcher(backend=backend, paths=self.paths)
@@ -207,6 +224,28 @@ class CodexProDispatchTests(unittest.TestCase):
         self.assertTrue(collected["ok"])
         self.assertEqual(collected["response"], "finished later")
         self.assertEqual(backend.send_count, 1)
+
+    def test_collect_refuses_a_different_app_or_window_target(self) -> None:
+        backend = FakeBackend(
+            [self.snapshot(8)],
+            wait_error=cpd.BridgeTimeout("timeout"),
+        )
+        dispatcher = cpd.Dispatcher(backend=backend, paths=self.paths)
+        dispatcher.send(
+            "Long task",
+            target=self.target,
+            timeout_seconds=1,
+            assignment_id="dispatch-target",
+        )
+
+        wrong_target = cpd.TargetConfig(
+            bundle_id=self.target.bundle_id,
+            app_name=self.target.app_name,
+            window_title="Different Worker",
+        )
+        with self.assertRaises(cpd.ConfigurationError):
+            dispatcher.collect("dispatch-target", target=wrong_target)
+        self.assertEqual(backend.read_count, 1)
 
     def test_response_unavailable_does_not_resend(self) -> None:
         backend = FakeBackend([self.snapshot(1), self.snapshot(3, [])])
@@ -289,6 +328,23 @@ class CodexProDispatchTests(unittest.TestCase):
         server.target = self.target  # type: ignore[attr-defined]
         with self.assertRaises(cpd.DaemonError):
             server.handle_payload({"action": "destroy-everything"})
+
+    def test_socket_path_is_confined_to_private_state_directory(self) -> None:
+        nested = cpd.TargetConfig(
+            bundle_id=self.target.bundle_id,
+            socket_path="sockets/worker.sock",
+        )
+        self.assertEqual(
+            cpd.configured_socket_path(nested, self.paths),
+            (self.paths.state_dir / "sockets" / "worker.sock").resolve(),
+        )
+
+        escaped = cpd.TargetConfig(
+            bundle_id=self.target.bundle_id,
+            socket_path="/tmp/codex-pro-dispatch.sock",
+        )
+        with self.assertRaises(cpd.ConfigurationError):
+            cpd.configured_socket_path(escaped, self.paths)
 
 
 if __name__ == "__main__":
