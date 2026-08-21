@@ -1,0 +1,202 @@
+#!/usr/bin/env swift
+import Cocoa
+import ApplicationServices
+import Foundation
+
+struct Message: Codable {
+    let index: Int
+    let kind: String
+    let text: String
+}
+
+struct Success: Codable {
+    let ok: Bool
+    let bundle_id: String
+    let app_name: String
+    let pid: Int32
+    let window_title: String
+    let messages: [Message]
+    let input_value: String
+    let group_count: Int
+}
+
+struct Failure: Codable {
+    let ok: Bool
+    let error: String
+}
+
+func emit<T: Encodable>(_ value: T, code: Int32 = 0) -> Never {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = try! encoder.encode(value)
+    print(String(decoding: data, as: UTF8.self))
+    exit(code)
+}
+
+func axString(_ element: AXUIElement, _ attribute: String) -> String? {
+    var value: AnyObject?
+    let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    return result == .success ? value as? String : nil
+}
+
+func children(_ element: AXUIElement) -> [AXUIElement] {
+    var value: AnyObject?
+    if AXUIElementCopyAttributeValue(
+        element,
+        kAXChildrenAttribute as CFString,
+        &value
+    ) == .success, let values = value as? [AXUIElement] {
+        return values
+    }
+    return []
+}
+
+func findAll(_ element: AXUIElement, role: String, into output: inout [AXUIElement]) {
+    if axString(element, kAXRoleAttribute) == role { output.append(element) }
+    for child in children(element) { findAll(child, role: role, into: &output) }
+}
+
+func collectText(_ element: AXUIElement) -> [String] {
+    var output: [String] = []
+    let role = axString(element, kAXRoleAttribute) ?? ""
+    if role == "AXStaticText" || role == "AXTextArea" {
+        for attribute in [kAXDescriptionAttribute, kAXValueAttribute] {
+            if let text = axString(element, attribute), !text.isEmpty, output.last != text {
+                output.append(text)
+            }
+        }
+    }
+    for child in children(element) { output.append(contentsOf: collectText(child)) }
+    return output
+}
+
+struct Options {
+    var bundleID = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_BUNDLE_ID"] ?? "com.openai.chat"
+    var appName = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_APP_NAME"] ?? ""
+    var windowTitle = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_WINDOW_TITLE"] ?? ""
+}
+
+func parseOptions() -> Options {
+    var options = Options()
+    let args = Array(CommandLine.arguments.dropFirst())
+    var index = 0
+    while index < args.count {
+        switch args[index] {
+        case "--bundle-id" where index + 1 < args.count:
+            options.bundleID = args[index + 1]
+            index += 2
+        case "--app-name" where index + 1 < args.count:
+            options.appName = args[index + 1]
+            index += 2
+        case "--window-title" where index + 1 < args.count:
+            options.windowTitle = args[index + 1]
+            index += 2
+        default:
+            emit(Failure(ok: false, error: "Unknown or incomplete argument: \(args[index])"), code: 2)
+        }
+    }
+    return options
+}
+
+func selectApplication(_ options: Options) -> NSRunningApplication? {
+    return NSWorkspace.shared.runningApplications.first { app in
+        guard app.bundleIdentifier == options.bundleID else { return false }
+        if options.appName.isEmpty { return true }
+        return (app.localizedName ?? "").caseInsensitiveCompare(options.appName) == .orderedSame
+    }
+}
+
+func messageGroups(in window: AXUIElement) -> [AXUIElement] {
+    var scrollAreas: [AXUIElement] = []
+    findAll(window, role: "AXScrollArea", into: &scrollAreas)
+    var best: [AXUIElement] = []
+    for scrollArea in scrollAreas {
+        var lists: [AXUIElement] = []
+        findAll(scrollArea, role: "AXList", into: &lists)
+        for list in lists {
+            let groups = children(list).filter { axString($0, kAXRoleAttribute) == "AXGroup" }
+            if groups.count > best.count { best = groups }
+        }
+    }
+    return best
+}
+
+func isConversationWindow(_ window: AXUIElement) -> Bool {
+    var textAreas: [AXUIElement] = []
+    findAll(window, role: "AXTextArea", into: &textAreas)
+    var scrollAreas: [AXUIElement] = []
+    findAll(window, role: "AXScrollArea", into: &scrollAreas)
+    return !textAreas.isEmpty && !scrollAreas.isEmpty
+}
+
+func selectWindow(appElement: AXUIElement, titleContains: String) -> AXUIElement? {
+    var value: AnyObject?
+    guard AXUIElementCopyAttributeValue(
+        appElement,
+        kAXWindowsAttribute as CFString,
+        &value
+    ) == .success, let windows = value as? [AXUIElement] else { return nil }
+    return windows.first { window in
+        let title = axString(window, kAXTitleAttribute) ?? ""
+        let titleMatches = titleContains.isEmpty || title.localizedCaseInsensitiveContains(titleContains)
+        return titleMatches && isConversationWindow(window)
+    }
+}
+
+let options = parseOptions()
+guard AXIsProcessTrusted() else {
+    emit(Failure(
+        ok: false,
+        error: "Accessibility permission required for the process running this helper."
+    ), code: 2)
+}
+
+guard let app = selectApplication(options) else {
+    emit(Failure(
+        ok: false,
+        error: "Target app is not running: \(options.appName.isEmpty ? options.bundleID : options.appName)"
+    ), code: 3)
+}
+
+let appElement = AXUIElementCreateApplication(app.processIdentifier)
+guard let window = selectWindow(appElement: appElement, titleContains: options.windowTitle) else {
+    let detail = options.windowTitle.isEmpty ? "" : " matching title: \(options.windowTitle)"
+    emit(Failure(ok: false, error: "No conversation window found\(detail)"), code: 4)
+}
+
+let groups = messageGroups(in: window)
+var messages: [Message] = []
+for (groupIndex, group) in groups.enumerated() {
+    let texts = collectText(group)
+    var previous = ""
+    for (textIndex, raw) in texts.enumerated() {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty || text == previous { continue }
+        previous = text
+        let lower = text.lowercased()
+        let isThinking = textIndex == 0 && texts.count > 1 && text.count < 100 && (
+            lower.contains("seconds") || lower.contains("sekunder") ||
+            lower.hasPrefix("thought") || lower.hasPrefix("tänkte")
+        )
+        messages.append(Message(
+            index: groupIndex,
+            kind: isThinking ? "thinking" : "text",
+            text: text
+        ))
+    }
+}
+
+var textAreas: [AXUIElement] = []
+findAll(window, role: "AXTextArea", into: &textAreas)
+let inputValue = textAreas.last.flatMap { axString($0, kAXValueAttribute) } ?? ""
+
+emit(Success(
+    ok: true,
+    bundle_id: options.bundleID,
+    app_name: app.localizedName ?? "",
+    pid: app.processIdentifier,
+    window_title: axString(window, kAXTitleAttribute) ?? "",
+    messages: messages,
+    input_value: inputValue,
+    group_count: groups.count
+))

@@ -1,0 +1,60 @@
+#!/usr/bin/env swift
+import Cocoa
+import ApplicationServices
+import Foundation
+
+struct Candidate: Codable {
+    let name: String
+    let bundle_id: String
+    let pid: Int32
+    let window_titles: [String]
+}
+
+struct Output: Codable {
+    let ok: Bool
+    let accessibility_trusted: Bool
+    let apps: [Candidate]
+}
+
+func axString(_ element: AXUIElement, _ attribute: String) -> String? {
+    var value: AnyObject?
+    let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    return result == .success ? value as? String : nil
+}
+
+func windowTitles(pid: pid_t) -> [String] {
+    guard AXIsProcessTrusted() else { return [] }
+    let appElement = AXUIElementCreateApplication(pid)
+    var value: AnyObject?
+    guard AXUIElementCopyAttributeValue(
+        appElement,
+        kAXWindowsAttribute as CFString,
+        &value
+    ) == .success, let windows = value as? [AXUIElement] else { return [] }
+    return windows.compactMap { axString($0, kAXTitleAttribute) }
+}
+
+let candidates = NSWorkspace.shared.runningApplications.compactMap { app -> Candidate? in
+    let name = app.localizedName ?? ""
+    let bundleID = app.bundleIdentifier ?? ""
+    let searchable = "\(name) \(bundleID)".lowercased()
+    guard searchable.contains("chatgpt") || searchable.contains("openai") else { return nil }
+    return Candidate(
+        name: name,
+        bundle_id: bundleID,
+        pid: app.processIdentifier,
+        window_titles: windowTitles(pid: app.processIdentifier)
+    )
+}.sorted { left, right in
+    if left.name == right.name { return left.pid < right.pid }
+    return left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
+}
+
+let encoder = JSONEncoder()
+encoder.outputFormatting = [.sortedKeys]
+let data = try encoder.encode(Output(
+    ok: true,
+    accessibility_trusted: AXIsProcessTrusted(),
+    apps: candidates
+))
+print(String(decoding: data, as: UTF8.self))

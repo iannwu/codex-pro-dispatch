@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python unit tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Python syntax
+        run: python3 -m py_compile bin/pro-dispatch $(find lib/codex_pro_dispatch -name '*.py' -print)
+
+      - name: Shell syntax
+        run: bash -n install.sh uninstall.sh
+
+      - name: Swift helper typecheck
+        run: |
+          for file in bin/cgpt-*; do
+            echo "Typechecking $file"
+            swiftc -typecheck "$file"
+          done
+
+      - name: CLI help
+        run: ./bin/pro-dispatch --help
