@@ -109,14 +109,17 @@ func selectApplication(_ options: Options) -> NSRunningApplication? {
 func messageGroups(in window: AXUIElement) -> [AXUIElement] {
     var scrollAreas: [AXUIElement] = []
     findAll(window, role: "AXScrollArea", into: &scrollAreas)
+    guard let conversationScroll = scrollAreas.first else { return [] }
+
+    // ChatGPT Classic exposes the conversation as the first scroll area in
+    // the main window. Restricting the search to it avoids mistaking the
+    // usually longer sidebar chat list for the message history.
+    var lists: [AXUIElement] = []
+    findAll(conversationScroll, role: "AXList", into: &lists)
     var best: [AXUIElement] = []
-    for scrollArea in scrollAreas {
-        var lists: [AXUIElement] = []
-        findAll(scrollArea, role: "AXList", into: &lists)
-        for list in lists {
-            let groups = children(list).filter { axString($0, kAXRoleAttribute) == "AXGroup" }
-            if groups.count > best.count { best = groups }
-        }
+    for list in lists {
+        let groups = children(list).filter { axString($0, kAXRoleAttribute) == "AXGroup" }
+        if groups.count > best.count { best = groups }
     }
     return best
 }
@@ -129,14 +132,17 @@ func isConversationWindow(_ window: AXUIElement) -> Bool {
     return !textAreas.isEmpty && !scrollAreas.isEmpty
 }
 
-func selectWindow(appElement: AXUIElement, titleContains: String) -> AXUIElement? {
+func matchingConversationWindows(
+    appElement: AXUIElement,
+    titleContains: String
+) -> [AXUIElement] {
     var value: AnyObject?
     guard AXUIElementCopyAttributeValue(
         appElement,
         kAXWindowsAttribute as CFString,
         &value
-    ) == .success, let windows = value as? [AXUIElement] else { return nil }
-    return windows.first { window in
+    ) == .success, let windows = value as? [AXUIElement] else { return [] }
+    return windows.filter { window in
         let title = axString(window, kAXTitleAttribute) ?? ""
         let titleMatches = titleContains.isEmpty || title.localizedCaseInsensitiveContains(titleContains)
         return titleMatches && isConversationWindow(window)
@@ -159,9 +165,18 @@ guard let app = selectApplication(options) else {
 }
 
 let appElement = AXUIElementCreateApplication(app.processIdentifier)
-guard let window = selectWindow(appElement: appElement, titleContains: options.windowTitle) else {
-    let detail = options.windowTitle.isEmpty ? "" : " matching title: \(options.windowTitle)"
-    emit(Failure(ok: false, error: "No conversation window found\(detail)"), code: 4)
+let matchingWindows = matchingConversationWindows(
+    appElement: appElement,
+    titleContains: options.windowTitle
+)
+guard matchingWindows.count == 1, let window = matchingWindows.first else {
+    let hint = options.windowTitle.isEmpty
+        ? " Configure --window-title when more than one conversation window is open."
+        : " Narrow --window-title to one conversation window."
+    emit(Failure(
+        ok: false,
+        error: "Expected exactly one target conversation window; found \(matchingWindows.count).\(hint)"
+    ), code: 4)
 }
 
 let groups = messageGroups(in: window)
