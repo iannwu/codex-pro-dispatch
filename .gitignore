@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local bridge state and potentially sensitive dispatch content
+runs/
+receipts/
+transcripts/
+*.log
+.env
+.env.*
+.local/

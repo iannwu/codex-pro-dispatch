@@ -1,0 +1,283 @@
+#!/usr/bin/env swift
+import Cocoa
+import ApplicationServices
+import Foundation
+
+struct Success: Codable {
+    let ok: Bool
+    let bundle_id: String
+    let app_name: String
+    let pid: Int32
+    let window_title: String
+}
+
+struct Failure: Codable {
+    let ok: Bool
+    let error: String
+}
+
+func emit<T: Encodable>(_ value: T, code: Int32 = 0) -> Never {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = try! encoder.encode(value)
+    print(String(decoding: data, as: UTF8.self))
+    exit(code)
+}
+
+func axString(_ element: AXUIElement, _ attribute: String) -> String? {
+    var value: AnyObject?
+    let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    return result == .success ? value as? String : nil
+}
+
+func children(_ element: AXUIElement) -> [AXUIElement] {
+    var value: AnyObject?
+    if AXUIElementCopyAttributeValue(
+        element,
+        kAXChildrenAttribute as CFString,
+        &value
+    ) == .success, let values = value as? [AXUIElement] {
+        return values
+    }
+    return []
+}
+
+func findAll(_ element: AXUIElement, role: String, into output: inout [AXUIElement]) {
+    if axString(element, kAXRoleAttribute) == role { output.append(element) }
+    for child in children(element) { findAll(child, role: role, into: &output) }
+}
+
+func normalizedButtonText(_ element: AXUIElement) -> String {
+    for attribute in [kAXDescriptionAttribute, kAXTitleAttribute, kAXValueAttribute] {
+        if let text = axString(element, attribute), !text.isEmpty {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+    }
+    return ""
+}
+
+let sendPrefixes = [
+    "send", "skicka", "envoyer", "senden", "invia", "enviar",
+    "送信", "发送", "傳送", "전송"
+]
+
+func isSendLabel(_ text: String) -> Bool {
+    sendPrefixes.contains { prefix in
+        text == prefix || text.hasPrefix("\(prefix) ")
+    }
+}
+
+func findSendButton(_ element: AXUIElement) -> AXUIElement? {
+    if axString(element, kAXRoleAttribute) == "AXButton"
+        && isSendLabel(normalizedButtonText(element)) {
+        return element
+    }
+    for child in children(element) {
+        if let found = findSendButton(child) { return found }
+    }
+    return nil
+}
+
+struct Options {
+    var bundleID = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_BUNDLE_ID"] ?? "com.openai.chat"
+    var appName = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_APP_NAME"] ?? ""
+    var windowTitle = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_WINDOW_TITLE"] ?? ""
+    var force = false
+    var message = ""
+}
+
+func parseOptions() -> Options {
+    var options = Options()
+    let args = Array(CommandLine.arguments.dropFirst())
+    var messageSource: String? = nil
+    var index = 0
+    while index < args.count {
+        switch args[index] {
+        case "--bundle-id" where index + 1 < args.count:
+            options.bundleID = args[index + 1]
+            index += 2
+        case "--app-name" where index + 1 < args.count:
+            options.appName = args[index + 1]
+            index += 2
+        case "--window-title" where index + 1 < args.count:
+            options.windowTitle = args[index + 1]
+            index += 2
+        case "--force":
+            options.force = true
+            index += 1
+        case "-":
+            if messageSource != nil {
+                emit(Failure(ok: false, error: "Multiple message sources supplied"), code: 2)
+            }
+            messageSource = "-"
+            index += 1
+        default:
+            if messageSource == nil {
+                messageSource = args[index]
+                index += 1
+            } else {
+                emit(Failure(ok: false, error: "Unexpected argument: \(args[index])"), code: 2)
+            }
+        }
+    }
+    if messageSource == "-" || messageSource == nil {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        options.message = String(data: data, encoding: .utf8) ?? ""
+    } else {
+        options.message = messageSource ?? ""
+    }
+    options.message = options.message.trimmingCharacters(in: .whitespacesAndNewlines)
+    if options.message.isEmpty {
+        emit(Failure(ok: false, error: "Message is empty"), code: 2)
+    }
+    return options
+}
+
+func selectApplication(_ options: Options) -> NSRunningApplication? {
+    return NSWorkspace.shared.runningApplications.first { app in
+        guard app.bundleIdentifier == options.bundleID else { return false }
+        if options.appName.isEmpty { return true }
+        return (app.localizedName ?? "").caseInsensitiveCompare(options.appName) == .orderedSame
+    }
+}
+
+func isConversationWindow(_ window: AXUIElement) -> Bool {
+    var textAreas: [AXUIElement] = []
+    findAll(window, role: "AXTextArea", into: &textAreas)
+    var scrollAreas: [AXUIElement] = []
+    findAll(window, role: "AXScrollArea", into: &scrollAreas)
+    return !textAreas.isEmpty && !scrollAreas.isEmpty
+}
+
+func selectWindow(appElement: AXUIElement, titleContains: String) -> AXUIElement? {
+    var value: AnyObject?
+    guard AXUIElementCopyAttributeValue(
+        appElement,
+        kAXWindowsAttribute as CFString,
+        &value
+    ) == .success, let windows = value as? [AXUIElement] else { return nil }
+    return windows.first { window in
+        let title = axString(window, kAXTitleAttribute) ?? ""
+        let titleMatches = titleContains.isEmpty || title.localizedCaseInsensitiveContains(titleContains)
+        return titleMatches && isConversationWindow(window)
+    }
+}
+
+struct PasteboardSnapshot {
+    let items: [[NSPasteboard.PasteboardType: Data]]
+
+    static func capture(_ pasteboard: NSPasteboard) -> PasteboardSnapshot {
+        let captured = (pasteboard.pasteboardItems ?? []).map { item -> [NSPasteboard.PasteboardType: Data] in
+            var values: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) { values[type] = data }
+            }
+            return values
+        }
+        return PasteboardSnapshot(items: captured)
+    }
+
+    func restore(_ pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        guard !items.isEmpty else { return }
+        let restored = items.map { values -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (type, data) in values { item.setData(data, forType: type) }
+            return item
+        }
+        pasteboard.writeObjects(restored)
+    }
+}
+
+func commandV() {
+    let source = CGEventSource(stateID: .hidSystemState)
+    let key: CGKeyCode = 0x09
+    let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)
+    let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
+    down?.flags = .maskCommand
+    up?.flags = .maskCommand
+    down?.post(tap: .cghidEventTap)
+    up?.post(tap: .cghidEventTap)
+}
+
+let options = parseOptions()
+guard AXIsProcessTrusted() else {
+    emit(Failure(
+        ok: false,
+        error: "Accessibility permission required for the process running this helper."
+    ), code: 2)
+}
+
+guard let app = selectApplication(options) else {
+    emit(Failure(
+        ok: false,
+        error: "Target app is not running: \(options.appName.isEmpty ? options.bundleID : options.appName)"
+    ), code: 3)
+}
+app.activate(options: [.activateIgnoringOtherApps])
+usleep(250_000)
+
+let appElement = AXUIElementCreateApplication(app.processIdentifier)
+guard let window = selectWindow(appElement: appElement, titleContains: options.windowTitle) else {
+    emit(Failure(ok: false, error: "Target conversation window was not found"), code: 4)
+}
+
+var textAreas: [AXUIElement] = []
+findAll(window, role: "AXTextArea", into: &textAreas)
+guard let input = textAreas.last else {
+    emit(Failure(ok: false, error: "No input text area found"), code: 5)
+}
+let existing = axString(input, kAXValueAttribute) ?? ""
+if !options.force && !existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    emit(Failure(
+        ok: false,
+        error: "Target input contains an unsent draft. Clear it before dispatching."
+    ), code: 6)
+}
+
+AXUIElementSetAttributeValue(input, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+let directResult = AXUIElementSetAttributeValue(
+    input,
+    kAXValueAttribute as CFString,
+    options.message as CFString
+)
+usleep(180_000)
+
+let directValue = axString(input, kAXValueAttribute) ?? ""
+var sendButton = findSendButton(window)
+if directResult != .success || directValue != options.message || sendButton == nil {
+    AXUIElementSetAttributeValue(input, kAXValueAttribute as CFString, "" as CFString)
+    let pasteboard = NSPasteboard.general
+    let snapshot = PasteboardSnapshot.capture(pasteboard)
+    pasteboard.clearContents()
+    pasteboard.setString(options.message, forType: .string)
+    usleep(80_000)
+    commandV()
+    usleep(300_000)
+    snapshot.restore(pasteboard)
+    sendButton = findSendButton(window)
+}
+
+let populatedValue = axString(input, kAXValueAttribute) ?? ""
+if populatedValue != options.message {
+    emit(Failure(
+        ok: false,
+        error: "The full message was not present in the input; refusing to send."
+    ), code: 7)
+}
+
+guard let button = sendButton else {
+    emit(Failure(ok: false, error: "Send button not found after filling the input"), code: 8)
+}
+let result = AXUIElementPerformAction(button, kAXPressAction as CFString)
+if result != .success {
+    emit(Failure(ok: false, error: "Could not press the Send button (\(result.rawValue))"), code: 9)
+}
+
+emit(Success(
+    ok: true,
+    bundle_id: options.bundleID,
+    app_name: app.localizedName ?? "",
+    pid: app.processIdentifier,
+    window_title: axString(window, kAXTitleAttribute) ?? ""
+))

@@ -1,0 +1,265 @@
+#!/usr/bin/env swift
+import Cocoa
+import ApplicationServices
+import Foundation
+
+struct Success: Codable {
+    let ok: Bool
+    let elapsed_ms: Int
+    let group_count: Int
+}
+
+struct Failure: Codable {
+    let ok: Bool
+    let error: String
+    let elapsed_ms: Int
+}
+
+func emit<T: Encodable>(_ value: T, code: Int32 = 0) -> Never {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let data = try! encoder.encode(value)
+    print(String(decoding: data, as: UTF8.self))
+    exit(code)
+}
+
+func axString(_ element: AXUIElement, _ attribute: String) -> String? {
+    var value: AnyObject?
+    let result = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    return result == .success ? value as? String : nil
+}
+
+func children(_ element: AXUIElement) -> [AXUIElement] {
+    var value: AnyObject?
+    if AXUIElementCopyAttributeValue(
+        element,
+        kAXChildrenAttribute as CFString,
+        &value
+    ) == .success, let values = value as? [AXUIElement] {
+        return values
+    }
+    return []
+}
+
+func findAll(_ element: AXUIElement, role: String, into output: inout [AXUIElement]) {
+    if axString(element, kAXRoleAttribute) == role { output.append(element) }
+    for child in children(element) { findAll(child, role: role, into: &output) }
+}
+
+func normalizedButtonText(_ element: AXUIElement) -> String {
+    for attribute in [kAXDescriptionAttribute, kAXTitleAttribute, kAXValueAttribute] {
+        if let text = axString(element, attribute), !text.isEmpty {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+    }
+    return ""
+}
+
+let sendPrefixes = [
+    "send", "skicka", "envoyer", "senden", "invia", "enviar",
+    "送信", "发送", "傳送", "전송"
+]
+let stopFragments = [
+    "stop", "stoppa", "arrêter", "stopp", "interrompi", "detener",
+    "停止", "중지"
+]
+
+func isSendLabel(_ text: String) -> Bool {
+    sendPrefixes.contains { prefix in
+        text == prefix || text.hasPrefix("\(prefix) ")
+    }
+}
+
+struct Options {
+    var bundleID = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_BUNDLE_ID"] ?? "com.openai.chat"
+    var appName = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_APP_NAME"] ?? ""
+    var windowTitle = ProcessInfo.processInfo.environment["CODEX_PRO_DISPATCH_WINDOW_TITLE"] ?? ""
+    var timeout: Double = 120
+    var baselineGroups: Int = -1
+    var quiet = false
+}
+
+func parseOptions() -> Options {
+    var options = Options()
+    let args = Array(CommandLine.arguments.dropFirst())
+    var index = 0
+    while index < args.count {
+        switch args[index] {
+        case "--bundle-id" where index + 1 < args.count:
+            options.bundleID = args[index + 1]
+            index += 2
+        case "--app-name" where index + 1 < args.count:
+            options.appName = args[index + 1]
+            index += 2
+        case "--window-title" where index + 1 < args.count:
+            options.windowTitle = args[index + 1]
+            index += 2
+        case "--timeout" where index + 1 < args.count:
+            guard let value = Double(args[index + 1]), value > 0 else {
+                emit(Failure(ok: false, error: "Invalid timeout", elapsed_ms: 0), code: 2)
+            }
+            options.timeout = value
+            index += 2
+        case "--baseline-groups" where index + 1 < args.count:
+            guard let value = Int(args[index + 1]), value >= 0 else {
+                emit(Failure(ok: false, error: "Invalid baseline group count", elapsed_ms: 0), code: 2)
+            }
+            options.baselineGroups = value
+            index += 2
+        case "--quiet":
+            options.quiet = true
+            index += 1
+        default:
+            emit(Failure(
+                ok: false,
+                error: "Unknown or incomplete argument: \(args[index])",
+                elapsed_ms: 0
+            ), code: 2)
+        }
+    }
+    return options
+}
+
+func selectApplication(_ options: Options) -> NSRunningApplication? {
+    return NSWorkspace.shared.runningApplications.first { app in
+        guard app.bundleIdentifier == options.bundleID else { return false }
+        if options.appName.isEmpty { return true }
+        return (app.localizedName ?? "").caseInsensitiveCompare(options.appName) == .orderedSame
+    }
+}
+
+func isConversationWindow(_ window: AXUIElement) -> Bool {
+    var textAreas: [AXUIElement] = []
+    findAll(window, role: "AXTextArea", into: &textAreas)
+    var scrollAreas: [AXUIElement] = []
+    findAll(window, role: "AXScrollArea", into: &scrollAreas)
+    return !textAreas.isEmpty && !scrollAreas.isEmpty
+}
+
+func selectWindow(appElement: AXUIElement, titleContains: String) -> AXUIElement? {
+    var value: AnyObject?
+    guard AXUIElementCopyAttributeValue(
+        appElement,
+        kAXWindowsAttribute as CFString,
+        &value
+    ) == .success, let windows = value as? [AXUIElement] else { return nil }
+    return windows.first { window in
+        let title = axString(window, kAXTitleAttribute) ?? ""
+        let titleMatches = titleContains.isEmpty || title.localizedCaseInsensitiveContains(titleContains)
+        return titleMatches && isConversationWindow(window)
+    }
+}
+
+func messageGroupCount(in window: AXUIElement) -> Int {
+    var scrollAreas: [AXUIElement] = []
+    findAll(window, role: "AXScrollArea", into: &scrollAreas)
+    var best = 0
+    for scrollArea in scrollAreas {
+        var lists: [AXUIElement] = []
+        findAll(scrollArea, role: "AXList", into: &lists)
+        for list in lists {
+            let count = children(list).filter { axString($0, kAXRoleAttribute) == "AXGroup" }.count
+            if count > best { best = count }
+        }
+    }
+    return best
+}
+
+struct Snapshot {
+    let sendExists: Bool
+    let stopExists: Bool
+    let staticCharacters: Int
+    let groupCount: Int
+}
+
+func snapshot(window: AXUIElement) -> Snapshot {
+    var buttons: [AXUIElement] = []
+    findAll(window, role: "AXButton", into: &buttons)
+    let buttonTexts = buttons.map(normalizedButtonText)
+    let sendExists = buttonTexts.contains(where: isSendLabel)
+    let stopExists = buttonTexts.contains { text in
+        stopFragments.contains { text.contains($0) }
+    }
+
+    var statics: [AXUIElement] = []
+    findAll(window, role: "AXStaticText", into: &statics)
+    let staticCharacters = statics.reduce(0) { total, element in
+        total + (axString(element, kAXDescriptionAttribute)?.count ?? 0)
+            + (axString(element, kAXValueAttribute)?.count ?? 0)
+    }
+
+    return Snapshot(
+        sendExists: sendExists,
+        stopExists: stopExists,
+        staticCharacters: staticCharacters,
+        groupCount: messageGroupCount(in: window)
+    )
+}
+
+let options = parseOptions()
+guard AXIsProcessTrusted() else {
+    emit(Failure(
+        ok: false,
+        error: "Accessibility permission required for the process running this helper.",
+        elapsed_ms: 0
+    ), code: 2)
+}
+guard let app = selectApplication(options) else {
+    emit(Failure(ok: false, error: "Target app is not running", elapsed_ms: 0), code: 3)
+}
+let appElement = AXUIElementCreateApplication(app.processIdentifier)
+guard let window = selectWindow(appElement: appElement, titleContains: options.windowTitle) else {
+    emit(Failure(ok: false, error: "Target conversation window was not found", elapsed_ms: 0), code: 4)
+}
+
+let start = Date()
+let stableNeeded: TimeInterval = 2.0
+let pollInterval: useconds_t = 350_000
+var previousCharacters = -1
+var previousGroups = -1
+var stableSince: Date? = nil
+var generationObserved = false
+
+while Date().timeIntervalSince(start) < options.timeout {
+    let current = snapshot(window: window)
+    let now = Date()
+    let changed = current.staticCharacters != previousCharacters || current.groupCount != previousGroups
+    if changed {
+        previousCharacters = current.staticCharacters
+        previousGroups = current.groupCount
+        stableSince = nil
+    } else if stableSince == nil {
+        stableSince = now
+    }
+    if current.stopExists || !current.sendExists { generationObserved = true }
+
+    let stableFor = stableSince.map { now.timeIntervalSince($0) } ?? 0
+    if !options.quiet {
+        let formatted = String(format: "%.1f", stableFor)
+        let line = "poll send=\(current.sendExists) stop=\(current.stopExists) groups=\(current.groupCount) chars=\(current.staticCharacters) stable=\(formatted)s\n"
+        FileHandle.standardError.write(line.data(using: .utf8)!)
+    }
+
+    // One new group may be only the submitted user turn. Require the user turn
+    // and a subsequent assistant turn before returning a completed dispatch.
+    let hasAssistantGroup = options.baselineGroups < 0
+        || current.groupCount >= options.baselineGroups + 2
+    if generationObserved
+        && hasAssistantGroup
+        && current.sendExists
+        && !current.stopExists
+        && stableFor >= stableNeeded {
+        emit(Success(
+            ok: true,
+            elapsed_ms: Int(Date().timeIntervalSince(start) * 1000),
+            group_count: current.groupCount
+        ))
+    }
+    usleep(pollInterval)
+}
+
+emit(Failure(
+    ok: false,
+    error: "timeout",
+    elapsed_ms: Int(options.timeout * 1000)
+), code: 1)
