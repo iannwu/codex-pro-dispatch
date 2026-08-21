@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -150,10 +151,13 @@ def default_paths() -> RuntimePaths:
 
 def _secure_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        path.chmod(0o700)
-    except PermissionError:
-        pass
+    path.chmod(0o700)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        raise ConfigurationError(
+            f"Directory is not private: {path}",
+            details={"mode": oct(mode)},
+        )
 
 def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     _secure_directory(path.parent)
