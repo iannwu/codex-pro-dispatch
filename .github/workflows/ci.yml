@@ -6,7 +6,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -37,3 +41,35 @@ jobs:
 
       - name: CLI help
         run: ./bin/pro-dispatch --help
+
+      - name: Record successful branch verification
+        if: github.event_name == 'push' && github.ref == 'refs/heads/codex/v0.1-poc'
+        env:
+          VERIFIED_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p verification
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "schema_version": 1,
+              "status": "passed",
+              "verified_sha": os.environ["VERIFIED_SHA"],
+              "workflow": "CI",
+              "run_id": os.environ["RUN_ID"],
+              "runner": "macos-latest",
+              "python": "3.11",
+          }
+          Path("verification/ci.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add verification/ci.json
+          git commit -m "ci: attest ${VERIFIED_SHA:0:12}"
+          git push origin HEAD:codex/v0.1-poc
