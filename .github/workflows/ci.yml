@@ -29,21 +29,21 @@ jobs:
         run: |
           mkdir -p verification
           set -o pipefail
-          python3 -m unittest discover -s tests -v 2>&1 | tee verification/python-tests.log
+          python3 -m unittest discover -s tests -v 2>&1 | tee verification/python-tests.txt
 
       - name: Python syntax
         id: python_syntax
         continue-on-error: true
         run: |
           set -o pipefail
-          python3 -m py_compile bin/pro-dispatch $(find lib/codex_pro_dispatch -name '*.py' -print) 2>&1 | tee verification/python-syntax.log
+          python3 -m py_compile bin/pro-dispatch $(find lib/codex_pro_dispatch -name '*.py' -print) 2>&1 | tee verification/python-syntax.txt
 
       - name: Shell syntax
         id: shell_syntax
         continue-on-error: true
         run: |
           set -o pipefail
-          bash -n install.sh uninstall.sh 2>&1 | tee verification/shell-syntax.log
+          bash -n install.sh uninstall.sh 2>&1 | tee verification/shell-syntax.txt
 
       - name: Swift helper typecheck
         id: swift_typecheck
@@ -55,14 +55,14 @@ jobs:
               echo "Typechecking $file"
               swiftc -frontend -typecheck "$file"
             done
-          } 2>&1 | tee verification/swift-typecheck.log
+          } 2>&1 | tee verification/swift-typecheck.txt
 
       - name: CLI help
         id: cli_help
         continue-on-error: true
         run: |
           set -o pipefail
-          ./bin/pro-dispatch --help 2>&1 | tee verification/cli-help.log
+          ./bin/pro-dispatch --help 2>&1 | tee verification/cli-help.txt
 
       - name: Record branch verification
         if: always() && github.event_name == 'push' && github.ref == 'refs/heads/codex/v0.1-poc'
@@ -120,7 +120,6 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
-          import sys
 
           checks = [
               os.environ["PYTHON_TESTS"],
