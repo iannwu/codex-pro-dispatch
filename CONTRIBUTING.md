@@ -21,7 +21,7 @@ bash -n install.sh uninstall.sh
 On macOS:
 
 ```bash
-for file in bin/cgpt-*; do swiftc -typecheck "$file"; done
+for file in bin/cgpt-*; do swiftc -frontend -typecheck "$file"; done
 ```
 
 Keep pull requests narrow. Do not include private prompts, receipts, screenshots, account data, absolute personal paths, or proprietary repository contents.
