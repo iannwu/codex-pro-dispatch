@@ -1,31 +1,13 @@
-name: Bootstrap source
+name: Bootstrap source (disabled)
 
 on:
-  push:
-    branches:
-      - codex/v0.1-poc
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  bootstrap:
+  disabled:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Reconstruct source archive
-        run: |
-          cat .bootstrap/part-* | base64 --decode > /tmp/codex-pro-dispatch.tar.xz
-          tar -xJf /tmp/codex-pro-dispatch.tar.xz -C .
-      - name: Remove one-time bootstrap material
-        run: |
-          rm -rf .bootstrap
-          rm -f .github/workflows/bootstrap.yml
-          chmod +x bin/pro-dispatch bin/cgpt-* install.sh uninstall.sh
-      - name: Commit source
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "feat: implement native Pro dispatch POC"
-          git push origin HEAD:codex/v0.1-poc
+      - run: echo "Superseded by the committed v0.1 source tree."
