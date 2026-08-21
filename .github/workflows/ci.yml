@@ -27,7 +27,7 @@ jobs:
         run: |
           for file in bin/cgpt-*; do
             echo "Typechecking $file"
-            swiftc -typecheck "$file"
+            swiftc -frontend -typecheck "$file"
           done
 
       - name: CLI help
