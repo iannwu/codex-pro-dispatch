@@ -4,13 +4,13 @@
     "python_syntax": "success",
     "python_tests": "success",
     "shell_syntax": "success",
-    "swift_typecheck": "failure"
+    "swift_typecheck": "success"
   },
   "python": "3.11",
-  "run_id": "32440732553",
+  "run_id": "32440801339",
   "runner": "macos-latest",
   "schema_version": 1,
-  "status": "failed",
-  "verified_sha": "d553dd6dfc0b247d442949a3b0c7764ee731eef6",
+  "status": "passed",
+  "verified_sha": "798838fe53d29e6876addf242123ffd65d725c9f",
   "workflow": "CI"
 }

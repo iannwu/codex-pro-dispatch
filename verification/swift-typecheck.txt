@@ -1,2 +1,13 @@
 Typechecking bin/cgpt-list-apps
-error: unexpected input file: bin/cgpt-list-apps
+Typechecking bin/cgpt-read-app
+Typechecking bin/cgpt-send
+/Users/runner/work/_temp/cgpt-send.swift:217:25: warning: 'activateIgnoringOtherApps' was deprecated in macOS 14.0: ignoringOtherApps is deprecated in macOS 14 and will have no effect. [#DeprecatedDeclaration]
+215 |     ), code: 3)
+216 | }
+217 | app.activate(options: [.activateIgnoringOtherApps])
+    |                         `- warning: 'activateIgnoringOtherApps' was deprecated in macOS 14.0: ignoringOtherApps is deprecated in macOS 14 and will have no effect. [#DeprecatedDeclaration]
+218 | usleep(250_000)
+219 | 
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+Typechecking bin/cgpt-wait-idle
