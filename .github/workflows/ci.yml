@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Python syntax
+        run: python3 -m py_compile bin/pro-dispatch src/codex_pro_dispatch/*.py
+      - name: Shell syntax
+        run: bash -n install.sh uninstall.sh
+      - name: CLI help
+        run: ./bin/pro-dispatch --help

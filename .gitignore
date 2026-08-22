@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Private local dispatch state must never enter the repository.
+.codex-pro-dispatch/
+receipts/
+transcripts/
+*.log
