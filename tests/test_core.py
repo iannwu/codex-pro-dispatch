@@ -133,6 +133,64 @@ class CoreTests(unittest.TestCase):
                 prepared.assignment_id, prepared.wrapped_prompt, self.paths
             )
 
+    def test_trailing_newline_readback_artifact_can_be_corrected_without_resend(self) -> None:
+        prepared = self.prepare()
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_submitted(
+                prepared.assignment_id, prepared.wrapped_prompt + "\n", self.paths
+            )
+
+        mismatched = cpd.load_assignment(prepared.assignment_id, self.paths)
+        self.assertEqual(mismatched["status"], "indeterminate")
+        self.assertEqual(mismatched["submission_count"], 1)
+        self.assertTrue(mismatched["no_resend"])
+        self.assertTrue(mismatched["readback_correction_allowed"])
+
+        corrected = cpd.mark_submitted(
+            prepared.assignment_id, prepared.wrapped_prompt, self.paths
+        )
+
+        self.assertEqual(corrected["status"], "submitted")
+        self.assertEqual(corrected["submission_count"], 1)
+        self.assertTrue(corrected["outbound_prompt_verified"])
+        self.assertTrue(corrected["no_resend"])
+        self.assertEqual(corrected["readback_verification_attempt_count"], 2)
+        self.assertEqual(corrected["submission_recovered_from"], "indeterminate")
+        self.assertEqual(corrected["readback_correction_kind"], "single-trailing-newline")
+        self.assertIn("readback_artifact_sha256", corrected)
+        self.assertNotIn("readback_correction_allowed", corrected)
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_submitted(
+                prepared.assignment_id, prepared.wrapped_prompt, self.paths
+            )
+
+    def test_legacy_newline_mismatch_receipt_can_be_corrected_from_stored_hash(self) -> None:
+        prepared = self.prepare()
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_submitted(
+                prepared.assignment_id, prepared.wrapped_prompt + "\n", self.paths
+            )
+
+        legacy_receipt = json.loads(prepared.receipt_path.read_text(encoding="utf-8"))
+        legacy_receipt.pop("readback_correction_allowed", None)
+        legacy_receipt.pop("readback_correction_kind", None)
+        legacy_receipt.pop("readback_artifact_sha256", None)
+        legacy_receipt.pop("readback_verification_attempt_count", None)
+        prepared.receipt_path.write_text(
+            json.dumps(legacy_receipt), encoding="utf-8"
+        )
+
+        corrected = cpd.mark_submitted(
+            prepared.assignment_id, prepared.wrapped_prompt, self.paths
+        )
+
+        self.assertEqual(corrected["status"], "submitted")
+        self.assertEqual(corrected["submission_count"], 1)
+        self.assertTrue(corrected["outbound_prompt_verified"])
+        self.assertEqual(corrected["readback_verification_attempt_count"], 2)
+        self.assertEqual(corrected["readback_correction_kind"], "single-trailing-newline")
+        self.assertEqual(corrected["submission_recovered_from"], "indeterminate")
+
     def test_indeterminate_state_blocks_resend_and_supports_recovery(self) -> None:
         prepared = self.prepare()
         value = cpd.mark_indeterminate(

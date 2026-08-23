@@ -67,7 +67,9 @@ pro-dispatch submitted '<assignment-id>' \
   --sent-prompt-file '<native-read-back-file>'
 ```
 
-The helper compares the read-back bytes with the prepared `wrapped_prompt` hash. If they differ by any byte, including whitespace or a newline, it records one observed send as `indeterminate`, sets `no_resend`, returns an error, and requires collection-only recovery. Never repair the text by resending it.
+The helper compares the read-back bytes with the prepared `wrapped_prompt` hash. If they differ by any byte, including whitespace or a newline, it records one observed send as `indeterminate`, sets `no_resend`, and returns an error. Never repair the text by resending it.
+
+If the error reports `readback_correction_allowed: true`, the temporary read-back file was proven to equal the expected prompt plus exactly one trailing newline. Re-extract the same existing native user message without adding that file artifact, then run `pro-dispatch submitted` once more against the corrected file. This is read-back verification, not a second submission; `submission_count` remains one. Do not strip, normalize, or retry any other mismatch.
 
 If the send may have occurred but confirmation failed, do not retry. Run:
 
@@ -107,7 +109,7 @@ pro-dispatch submitted '<assignment-id>' \
   --sent-prompt-file '<native-read-back-file>'
 ```
 
-This recovery command verifies the already-existing message; it does not send anything. It is allowed from `indeterminate` or `ambiguous` only while `submission_count` is zero. Never call the native send control during this recovery step.
+This recovery command verifies the already-existing message; it does not send anything. It is allowed from `indeterminate` or `ambiguous` while `submission_count` is zero. It is also allowed with `submission_count` one only when the receipt explicitly has `readback_correction_allowed: true`, or an older receipt's stored mismatch hash proves the same single-trailing-newline artifact, and the corrected read-back exactly matches the prepared hash. Never call the native send control during this recovery step.
 
 5. Read the newest completed assistant response.
 6. Validate it with `pro-dispatch complete`.

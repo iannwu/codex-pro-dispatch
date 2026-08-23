@@ -129,7 +129,7 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(second.returncode, 4)
 
-    def test_submitted_rejects_newline_drift(self) -> None:
+    def test_submitted_allows_correcting_newline_readback_artifact(self) -> None:
         prepared = self.configure_and_prepare("dispatch-newline-drift-7319")
         submitted = self.run_cli(
             "submitted",
@@ -145,6 +145,22 @@ class CliTests(unittest.TestCase):
         )["assignment"]
         self.assertEqual(receipt["status"], "indeterminate")
         self.assertTrue(receipt["no_resend"])
+        self.assertEqual(receipt["submission_count"], 1)
+        self.assertTrue(receipt["readback_correction_allowed"])
+
+        corrected = self.run_cli(
+            "submitted",
+            "dispatch-newline-drift-7319",
+            "--sent-prompt-file",
+            "-",
+            input_text=str(prepared["wrapped_prompt"]),
+        )
+        self.assertEqual(corrected.returncode, 0, corrected.stderr)
+        corrected_receipt = json.loads(corrected.stdout)["assignment"]
+        self.assertEqual(corrected_receipt["status"], "submitted")
+        self.assertEqual(corrected_receipt["submission_count"], 1)
+        self.assertTrue(corrected_receipt["outbound_prompt_verified"])
+        self.assertTrue(corrected_receipt["no_resend"])
 
     def test_late_readback_verification_completes_existing_response(self) -> None:
         assignment_id = "dispatch-late-readback-7319"

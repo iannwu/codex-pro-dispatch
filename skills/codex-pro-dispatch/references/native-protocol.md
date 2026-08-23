@@ -41,7 +41,7 @@ Native send acknowledgement may become visible through read-back after a delay. 
 
 1. Open the worker by exact conversation ID.
 2. Wait until the loaded conversation ID equals the configured worker ID.
-3. If outbound verification is incomplete, locate the existing user message by assignment marker and run `pro-dispatch submitted --sent-prompt-file` on its exact native read-back. This is verification, not a new send.
+3. If outbound verification is incomplete, locate the existing user message by assignment marker and run `pro-dispatch submitted --sent-prompt-file` on its exact native read-back. This is verification, not a new send. If the first temporary file added exactly one trailing newline and the receipt reports `readback_correction_allowed: true`, re-extract the same native message without that artifact and verify it once more. Never normalize or retry other mismatches.
 4. Read the newest completed assistant response.
 5. Validate the first nonempty line against the assignment's exact result marker.
 6. Reject stale or mismatched markers.
@@ -67,7 +67,8 @@ The clipboard must remain unchanged.
 | --- | --- |
 | Send confirmed and exact read-back available | `pro-dispatch submitted --sent-prompt-file '<native-read-back-file>'` |
 | Send acknowledged but read-back temporarily absent | `pro-dispatch indeterminate`; wait and late-verify the existing message without resend |
-| Read-back differs by any byte | Keep the helper's `indeterminate` state; never resend |
+| Read-back file equals expected prompt plus one trailing newline | Re-extract the same native message without the file artifact and verify again; never resend |
+| Read-back differs by any other byte | Keep the helper's `indeterminate` state; do not retry verification or resend |
 | Send may have happened | `pro-dispatch indeterminate`; never resend |
 | Worker unchanged | Keep waiting within the bounded timeout |
 | Thread not loaded | Open exact worker ID and wait |

@@ -503,12 +503,34 @@ def mark_submitted(
         value = load_assignment(assignment_id, runtime)
         current = str(value.get("status"))
         submission_count = int(value.get("submission_count", 0))
+        expected_hash = str(value.get("wrapped_prompt_sha256", ""))
+        sent_hash = sha256_text(sent_prompt)
+        prior_sent_hash = str(value.get("sent_prompt_sha256", ""))
         is_late_verification = (
             current in {"indeterminate", "ambiguous"}
             and submission_count == 0
             and value.get("no_resend") is True
         )
-        if current != "prepared" and not is_late_verification:
+        is_legacy_single_trailing_newline_correction = (
+            sent_hash == expected_hash
+            and sha256_text(sent_prompt + "\n") == prior_sent_hash
+        )
+        is_readback_correction = (
+            current in {"indeterminate", "ambiguous"}
+            and submission_count == 1
+            and value.get("no_resend") is True
+            and value.get("outbound_prompt_verified") is False
+            and (
+                value.get("readback_correction_allowed") is True
+                or is_legacy_single_trailing_newline_correction
+            )
+            and sent_hash == expected_hash
+        )
+        if (
+            current != "prepared"
+            and not is_late_verification
+            and not is_readback_correction
+        ):
             raise StateError(
                 "Submission may be recorded only once",
                 details={
@@ -518,18 +540,34 @@ def mark_submitted(
                 },
             )
 
-        expected_hash = str(value.get("wrapped_prompt_sha256", ""))
-        sent_hash = sha256_text(sent_prompt)
         verified_at = utc_now()
-        value["submitted_at"] = verified_at
+        if not is_readback_correction:
+            value["submitted_at"] = verified_at
         value["submission_count"] = 1
         value["sent_prompt_sha256"] = sent_hash
         value["no_resend"] = True
+        value["readback_verification_attempt_count"] = int(
+            value.get(
+                "readback_verification_attempt_count",
+                1 if is_legacy_single_trailing_newline_correction else 0,
+            )
+        ) + 1
 
         if sent_hash != expected_hash:
+            is_single_trailing_newline_artifact = (
+                sent_prompt.endswith("\n")
+                and sha256_text(sent_prompt[:-1]) == expected_hash
+            )
             value["status"] = "indeterminate"
             value["outbound_prompt_verified"] = False
             value["submission_may_have_occurred"] = True
+            value["readback_artifact_sha256"] = sent_hash
+            if is_single_trailing_newline_artifact:
+                value["readback_correction_allowed"] = True
+                value["readback_correction_kind"] = "single-trailing-newline"
+            else:
+                value.pop("readback_correction_allowed", None)
+                value.pop("readback_correction_kind", None)
             value["last_error"] = (
                 "Native read-back prompt does not exactly match the prepared wrapped_prompt"
             )
@@ -542,6 +580,7 @@ def mark_submitted(
                     "expected_sha256": expected_hash,
                     "actual_sha256": sent_hash,
                     "no_resend": True,
+                    "readback_correction_allowed": is_single_trailing_newline_artifact,
                 },
             )
 
@@ -551,7 +590,13 @@ def mark_submitted(
         value["submission_observed"] = True
         value.pop("last_error", None)
         value.pop("submission_may_have_occurred", None)
-        if is_late_verification:
+        if is_readback_correction:
+            if is_legacy_single_trailing_newline_correction:
+                value["readback_artifact_sha256"] = prior_sent_hash
+                value["readback_correction_kind"] = "single-trailing-newline"
+            value["readback_correction_applied_at"] = verified_at
+            value.pop("readback_correction_allowed", None)
+        if is_late_verification or is_readback_correction:
             value["submission_recovered_from"] = current
         _save_assignment(assignment_id, value, runtime)
         return value
