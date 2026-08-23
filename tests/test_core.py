@@ -147,6 +147,52 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(recovery["worker_conversation_id"], self.worker_id)
         self.assertEqual(recovery["parent_task_id"], self.parent_id)
 
+    def test_late_readback_verifies_indeterminate_submission_without_resend(self) -> None:
+        prepared = self.prepare()
+        cpd.mark_indeterminate(
+            prepared.assignment_id,
+            reason="native read-back was temporarily stale",
+            paths=self.paths,
+        )
+
+        value = cpd.mark_submitted(
+            prepared.assignment_id, prepared.wrapped_prompt, self.paths
+        )
+
+        self.assertEqual(value["status"], "submitted")
+        self.assertEqual(value["submission_count"], 1)
+        self.assertTrue(value["outbound_prompt_verified"])
+        self.assertTrue(value["no_resend"])
+        self.assertEqual(value["submission_recovered_from"], "indeterminate")
+        self.assertNotIn("last_error", value)
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_submitted(
+                prepared.assignment_id, prepared.wrapped_prompt, self.paths
+            )
+
+    def test_late_readback_verifies_ambiguous_submission_without_resend(self) -> None:
+        prepared = self.prepare()
+        cpd.mark_indeterminate(
+            prepared.assignment_id,
+            reason="native read-back was temporarily stale",
+            paths=self.paths,
+        )
+        cpd.mark_ambiguous(
+            prepared.assignment_id,
+            reason="collection completed before native read-back converged",
+            paths=self.paths,
+        )
+
+        value = cpd.mark_submitted(
+            prepared.assignment_id, prepared.wrapped_prompt, self.paths
+        )
+
+        self.assertEqual(value["status"], "submitted")
+        self.assertEqual(value["submission_count"], 1)
+        self.assertTrue(value["outbound_prompt_verified"])
+        self.assertEqual(value["submission_recovered_from"], "ambiguous")
+        self.assertNotIn("last_error", value)
+
     def test_result_marker_must_be_first_nonempty_line(self) -> None:
         prepared = self.prepare()
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)

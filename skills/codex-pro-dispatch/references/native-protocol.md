@@ -35,14 +35,17 @@ Use a bounded poll of native conversation metadata. An update signal is only per
 
 Do not reopen the worker repeatedly during generation. Do not retry a message because the UI is slow.
 
+Native send acknowledgement may become visible through read-back after a delay. If the exact user message is temporarily absent, record `indeterminate`, wait, and recover without resending. Absence in an immediate read is not proof that the send failed.
+
 ## Collection
 
 1. Open the worker by exact conversation ID.
 2. Wait until the loaded conversation ID equals the configured worker ID.
-3. Read the newest completed assistant response.
-4. Validate the first nonempty line against the assignment's exact result marker.
-5. Reject stale or mismatched markers.
-6. Restore the exact parent Codex task ID in a `finally`-style cleanup path.
+3. If outbound verification is incomplete, locate the existing user message by assignment marker and run `pro-dispatch submitted --sent-prompt-file` on its exact native read-back. This is verification, not a new send.
+4. Read the newest completed assistant response.
+5. Validate the first nonempty line against the assignment's exact result marker.
+6. Reject stale or mismatched markers.
+7. Restore the exact parent Codex task ID in a `finally`-style cleanup path.
 
 If the native control reports `thread not loaded`, explicitly open the worker by ID and wait. Do not resend.
 
@@ -63,6 +66,7 @@ The clipboard must remain unchanged.
 | Native result | Required action |
 | --- | --- |
 | Send confirmed and exact read-back available | `pro-dispatch submitted --sent-prompt-file '<native-read-back-file>'` |
+| Send acknowledged but read-back temporarily absent | `pro-dispatch indeterminate`; wait and late-verify the existing message without resend |
 | Read-back differs by any byte | Keep the helper's `indeterminate` state; never resend |
 | Send may have happened | `pro-dispatch indeterminate`; never resend |
 | Worker unchanged | Keep waiting within the bounded timeout |

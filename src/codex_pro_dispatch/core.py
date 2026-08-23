@@ -501,19 +501,27 @@ def mark_submitted(
     runtime = paths or default_paths()
     with state_lock(runtime):
         value = load_assignment(assignment_id, runtime)
-        if value.get("status") != "prepared":
+        current = str(value.get("status"))
+        submission_count = int(value.get("submission_count", 0))
+        is_late_verification = (
+            current in {"indeterminate", "ambiguous"}
+            and submission_count == 0
+            and value.get("no_resend") is True
+        )
+        if current != "prepared" and not is_late_verification:
             raise StateError(
                 "Submission may be recorded only once",
                 details={
                     "assignment_id": assignment_id,
-                    "status": value.get("status"),
-                    "submission_count": value.get("submission_count"),
+                    "status": current,
+                    "submission_count": submission_count,
                 },
             )
 
         expected_hash = str(value.get("wrapped_prompt_sha256", ""))
         sent_hash = sha256_text(sent_prompt)
-        value["submitted_at"] = utc_now()
+        verified_at = utc_now()
+        value["submitted_at"] = verified_at
         value["submission_count"] = 1
         value["sent_prompt_sha256"] = sent_hash
         value["no_resend"] = True
@@ -539,6 +547,12 @@ def mark_submitted(
 
         value["status"] = "submitted"
         value["outbound_prompt_verified"] = True
+        value["outbound_prompt_verified_at"] = verified_at
+        value["submission_observed"] = True
+        value.pop("last_error", None)
+        value.pop("submission_may_have_occurred", None)
+        if is_late_verification:
+            value["submission_recovered_from"] = current
         _save_assignment(assignment_id, value, runtime)
         return value
 

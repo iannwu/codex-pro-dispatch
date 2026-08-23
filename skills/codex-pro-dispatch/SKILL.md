@@ -100,9 +100,18 @@ pro-dispatch recover '<assignment-id>'
 
 2. Open the saved worker conversation ID directly.
 3. Wait for that exact thread to load.
-4. Read the newest completed assistant response.
-5. Validate it with `pro-dispatch complete`.
-6. Restore the saved parent task ID.
+4. If `outbound_prompt_verified` is not true, locate the existing submitted user message by its exact assignment marker. Save that native read-back to a temporary UTF-8 file and run:
+
+```bash
+pro-dispatch submitted '<assignment-id>' \
+  --sent-prompt-file '<native-read-back-file>'
+```
+
+This recovery command verifies the already-existing message; it does not send anything. It is allowed from `indeterminate` or `ambiguous` only while `submission_count` is zero. Never call the native send control during this recovery step.
+
+5. Read the newest completed assistant response.
+6. Validate it with `pro-dispatch complete`.
+7. Restore the saved parent task ID.
 
 Never send the original assignment again. If the response cannot be matched to the exact result marker, record the issue and stop:
 

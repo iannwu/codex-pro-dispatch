@@ -146,6 +146,49 @@ class CliTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "indeterminate")
         self.assertTrue(receipt["no_resend"])
 
+    def test_late_readback_verification_completes_existing_response(self) -> None:
+        assignment_id = "dispatch-late-readback-7319"
+        prepared = self.configure_and_prepare(assignment_id)
+        indeterminate = self.run_cli(
+            "indeterminate",
+            assignment_id,
+            "--reason",
+            "native read-back was temporarily stale",
+        )
+        self.assertEqual(indeterminate.returncode, 0, indeterminate.stderr)
+        ambiguous = self.run_cli(
+            "ambiguous",
+            assignment_id,
+            "--reason",
+            "response was not visible during the first collection attempt",
+        )
+        self.assertEqual(ambiguous.returncode, 0, ambiguous.stderr)
+
+        submitted = self.run_cli(
+            "submitted",
+            assignment_id,
+            "--sent-prompt-file",
+            "-",
+            input_text=str(prepared["wrapped_prompt"]),
+        )
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        receipt = json.loads(submitted.stdout)["assignment"]
+        self.assertEqual(receipt["status"], "submitted")
+        self.assertEqual(receipt["submission_count"], 1)
+        self.assertTrue(receipt["outbound_prompt_verified"])
+        self.assertEqual(receipt["submission_recovered_from"], "ambiguous")
+
+        completed = self.run_cli(
+            "complete",
+            assignment_id,
+            input_text=(
+                f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
+                "RECOVERED"
+            ),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["payload"], "RECOVERED")
+
 
 if __name__ == "__main__":
     unittest.main()
