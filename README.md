@@ -106,7 +106,7 @@ The CLI manages private local state and deterministic validation. It does not co
 pro-dispatch worker set --conversation-id '<id>' --confirm-pro
 pro-dispatch worker show
 pro-dispatch prepare --parent-task-id '<id>' --prompt-file assignment.md
-pro-dispatch submitted '<assignment-id>'
+pro-dispatch submitted '<assignment-id>' --sent-prompt-file native-read-back.txt
 pro-dispatch indeterminate '<assignment-id>' --reason '<error>'
 pro-dispatch complete '<assignment-id>' --response-file response.txt
 pro-dispatch recover '<assignment-id>'

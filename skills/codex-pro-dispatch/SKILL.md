@@ -59,11 +59,15 @@ pro-dispatch prepare \
 ```
 
 4. Read the JSON result. Send `wrapped_prompt` exactly once to `worker_conversation_id` using native conversation controls.
-5. After native submission is confirmed, run:
+5. After native submission is confirmed, read back the exact submitted user message from that worker conversation using native controls and save those bytes to a temporary UTF-8 file. Do not reconstruct it from the prepared JSON.
+6. Verify the read-back before recording submission:
 
 ```bash
-pro-dispatch submitted '<assignment-id>'
+pro-dispatch submitted '<assignment-id>' \
+  --sent-prompt-file '<native-read-back-file>'
 ```
+
+The helper compares the read-back bytes with the prepared `wrapped_prompt` hash. If they differ by any byte, including whitespace or a newline, it records one observed send as `indeterminate`, sets `no_resend`, returns an error, and requires collection-only recovery. Never repair the text by resending it.
 
 If the send may have occurred but confirmation failed, do not retry. Run:
 
@@ -71,18 +75,18 @@ If the send may have occurred but confirmation failed, do not retry. Run:
 pro-dispatch indeterminate '<assignment-id>' --reason '<exact error>'
 ```
 
-6. Wait using the worker conversation's native metadata or timestamp. Do not repeatedly reopen the worker while it is generating.
-7. When the worker has updated, open the worker by its exact conversation ID and wait until that exact thread is loaded.
-8. Read only the newest completed assistant response associated with the assignment. Save it to a temporary UTF-8 file.
-9. Validate and complete:
+7. Wait using the worker conversation's native metadata or timestamp. Do not repeatedly reopen the worker while it is generating.
+8. When the worker has updated, open the worker by its exact conversation ID and wait until that exact thread is loaded.
+9. Read only the newest completed assistant response associated with the assignment. Save it to a temporary UTF-8 file.
+10. Validate and complete:
 
 ```bash
 pro-dispatch complete '<assignment-id>' --response-file '<response-file>'
 ```
 
-10. Use the returned `payload` as the worker result.
-11. Restore the exact saved parent Codex task.
-12. If the worker reported GitHub mutations, follow [references/github-verification.md](references/github-verification.md).
+11. Use the returned `payload` as the worker result.
+12. Restore the exact saved parent Codex task.
+13. If the worker reported GitHub mutations, follow [references/github-verification.md](references/github-verification.md).
 
 ## Recovery without resending
 

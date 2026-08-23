@@ -39,6 +39,12 @@ def read_text_source(path: str | None) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def read_exact_text_source(path: str) -> str:
+    if path == "-":
+        return sys.stdin.buffer.read().decode("utf-8")
+    return Path(path).read_bytes().decode("utf-8")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pro-dispatch",
@@ -69,8 +75,15 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--continuation-of")
     prepare.add_argument("--assignment-id")
 
-    submitted = subparsers.add_parser("submitted", help="Record one successful submission")
+    submitted = subparsers.add_parser(
+        "submitted", help="Verify the native read-back and record one submission"
+    )
     submitted.add_argument("assignment_id")
+    submitted.add_argument(
+        "--sent-prompt-file",
+        required=True,
+        help="Exact UTF-8 native read-back of the submitted user message, or - for stdin",
+    )
 
     pending = subparsers.add_parser("pending", help="Record that the worker is still running")
     pending.add_argument("assignment_id")
@@ -162,7 +175,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     if args.command == "submitted":
-        value = mark_submitted(args.assignment_id, paths)
+        sent_prompt = read_exact_text_source(args.sent_prompt_file)
+        value = mark_submitted(args.assignment_id, sent_prompt, paths)
         return {"ok": True, "assignment": value}
 
     if args.command == "pending":

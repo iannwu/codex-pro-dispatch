@@ -30,6 +30,27 @@ class CliTests(unittest.TestCase):
             check=False,
         )
 
+    def configure_and_prepare(self, assignment_id: str) -> dict[str, object]:
+        worker = self.run_cli(
+            "worker",
+            "set",
+            "--conversation-id",
+            "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e",
+            "--confirm-pro",
+        )
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+
+        prepared = self.run_cli(
+            "prepare",
+            "--parent-task-id",
+            "parent-7319",
+            "--assignment-id",
+            assignment_id,
+            input_text="Task",
+        )
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        return json.loads(prepared.stdout)
+
     def test_help(self) -> None:
         completed = self.run_cli("--help")
         self.assertEqual(completed.returncode, 0)
@@ -50,28 +71,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["error_type"], "ConfigurationError")
 
     def test_end_to_end_cli_state_flow(self) -> None:
-        worker = self.run_cli(
-            "worker",
-            "set",
-            "--conversation-id",
-            "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e",
-            "--confirm-pro",
-        )
-        self.assertEqual(worker.returncode, 0, worker.stderr)
-
-        prepared = self.run_cli(
-            "prepare",
-            "--parent-task-id",
-            "parent-7319",
-            "--assignment-id",
-            "dispatch-cli-7319",
-            input_text="Task",
-        )
-        self.assertEqual(prepared.returncode, 0, prepared.stderr)
-        prepared_payload = json.loads(prepared.stdout)
+        prepared_payload = self.configure_and_prepare("dispatch-cli-7319")
         self.assertIn("CODEX_PRO_DISPATCH_RESULT", prepared_payload["wrapped_prompt"])
 
-        submitted = self.run_cli("submitted", "dispatch-cli-7319")
+        read_back_path = Path(self.temporary.name) / "native-read-back.txt"
+        read_back_path.write_bytes(str(prepared_payload["wrapped_prompt"]).encode("utf-8"))
+
+        submitted = self.run_cli(
+            "submitted",
+            "dispatch-cli-7319",
+            "--sent-prompt-file",
+            str(read_back_path),
+        )
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
 
         completed = self.run_cli(
@@ -84,6 +95,56 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["payload"], "READY")
+
+    def test_submitted_rejects_leading_character_drift_and_blocks_resend(self) -> None:
+        prepared = self.configure_and_prepare("dispatch-leading-drift-7319")
+        submitted = self.run_cli(
+            "submitted",
+            "dispatch-leading-drift-7319",
+            "--sent-prompt-file",
+            "-",
+            input_text="+" + str(prepared["wrapped_prompt"]),
+        )
+
+        self.assertEqual(submitted.returncode, 4)
+        error = json.loads(submitted.stderr)
+        self.assertEqual(error["error_type"], "StateError")
+        self.assertEqual(error["details"]["status"], "indeterminate")
+        self.assertTrue(error["details"]["no_resend"])
+
+        status = self.run_cli("status", "dispatch-leading-drift-7319")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        receipt = json.loads(status.stdout)["assignment"]
+        self.assertEqual(receipt["status"], "indeterminate")
+        self.assertEqual(receipt["submission_count"], 1)
+        self.assertTrue(receipt["no_resend"])
+        self.assertFalse(receipt["outbound_prompt_verified"])
+
+        second = self.run_cli(
+            "submitted",
+            "dispatch-leading-drift-7319",
+            "--sent-prompt-file",
+            "-",
+            input_text=str(prepared["wrapped_prompt"]),
+        )
+        self.assertEqual(second.returncode, 4)
+
+    def test_submitted_rejects_newline_drift(self) -> None:
+        prepared = self.configure_and_prepare("dispatch-newline-drift-7319")
+        submitted = self.run_cli(
+            "submitted",
+            "dispatch-newline-drift-7319",
+            "--sent-prompt-file",
+            "-",
+            input_text=str(prepared["wrapped_prompt"]) + "\n",
+        )
+
+        self.assertEqual(submitted.returncode, 4)
+        receipt = json.loads(
+            self.run_cli("status", "dispatch-newline-drift-7319").stdout
+        )["assignment"]
+        self.assertEqual(receipt["status"], "indeterminate")
+        self.assertTrue(receipt["no_resend"])
 
 
 if __name__ == "__main__":

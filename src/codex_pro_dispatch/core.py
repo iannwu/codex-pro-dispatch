@@ -494,7 +494,9 @@ def _transition(
 
 
 def mark_submitted(
-    assignment_id: str, paths: RuntimePaths | None = None
+    assignment_id: str,
+    sent_prompt: str,
+    paths: RuntimePaths | None = None,
 ) -> dict[str, Any]:
     runtime = paths or default_paths()
     with state_lock(runtime):
@@ -508,9 +510,35 @@ def mark_submitted(
                     "submission_count": value.get("submission_count"),
                 },
             )
-        value["status"] = "submitted"
+
+        expected_hash = str(value.get("wrapped_prompt_sha256", ""))
+        sent_hash = sha256_text(sent_prompt)
         value["submitted_at"] = utc_now()
         value["submission_count"] = 1
+        value["sent_prompt_sha256"] = sent_hash
+        value["no_resend"] = True
+
+        if sent_hash != expected_hash:
+            value["status"] = "indeterminate"
+            value["outbound_prompt_verified"] = False
+            value["submission_may_have_occurred"] = True
+            value["last_error"] = (
+                "Native read-back prompt does not exactly match the prepared wrapped_prompt"
+            )
+            _save_assignment(assignment_id, value, runtime)
+            raise StateError(
+                "Submitted prompt failed exact read-back verification; never resend",
+                details={
+                    "assignment_id": assignment_id,
+                    "status": "indeterminate",
+                    "expected_sha256": expected_hash,
+                    "actual_sha256": sent_hash,
+                    "no_resend": True,
+                },
+            )
+
+        value["status"] = "submitted"
+        value["outbound_prompt_verified"] = True
         _save_assignment(assignment_id, value, runtime)
         return value
 

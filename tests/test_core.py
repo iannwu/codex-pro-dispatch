@@ -97,11 +97,41 @@ class CoreTests(unittest.TestCase):
 
     def test_submission_is_recorded_exactly_once(self) -> None:
         prepared = self.prepare()
-        value = cpd.mark_submitted(prepared.assignment_id, self.paths)
+        value = cpd.mark_submitted(
+            prepared.assignment_id, prepared.wrapped_prompt, self.paths
+        )
         self.assertEqual(value["status"], "submitted")
         self.assertEqual(value["submission_count"], 1)
+        self.assertTrue(value["outbound_prompt_verified"])
+        self.assertTrue(value["no_resend"])
         with self.assertRaises(cpd.StateError):
-            cpd.mark_submitted(prepared.assignment_id, self.paths)
+            cpd.mark_submitted(
+                prepared.assignment_id, prepared.wrapped_prompt, self.paths
+            )
+
+    def test_submission_mismatch_is_collect_only_and_cannot_be_retried(self) -> None:
+        prepared = self.prepare()
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_submitted(
+                prepared.assignment_id, "+" + prepared.wrapped_prompt, self.paths
+            )
+
+        value = cpd.load_assignment(prepared.assignment_id, self.paths)
+        self.assertEqual(value["status"], "indeterminate")
+        self.assertEqual(value["submission_count"], 1)
+        self.assertFalse(value["outbound_prompt_verified"])
+        self.assertTrue(value["no_resend"])
+        self.assertNotEqual(
+            value["sent_prompt_sha256"], value["wrapped_prompt_sha256"]
+        )
+        self.assertNotIn("Implement the approved repair", json.dumps(value))
+        recovery = cpd.recovery_info(prepared.assignment_id, self.paths)
+        self.assertEqual(recovery["status"], "indeterminate")
+        self.assertTrue(recovery["no_resend"])
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_submitted(
+                prepared.assignment_id, prepared.wrapped_prompt, self.paths
+            )
 
     def test_indeterminate_state_blocks_resend_and_supports_recovery(self) -> None:
         prepared = self.prepare()
@@ -119,7 +149,7 @@ class CoreTests(unittest.TestCase):
 
     def test_result_marker_must_be_first_nonempty_line(self) -> None:
         prepared = self.prepare()
-        cpd.mark_submitted(prepared.assignment_id, self.paths)
+        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
                 prepared.assignment_id,
@@ -129,7 +159,7 @@ class CoreTests(unittest.TestCase):
 
     def test_result_marker_rejects_surrounding_whitespace(self) -> None:
         prepared = self.prepare()
-        cpd.mark_submitted(prepared.assignment_id, self.paths)
+        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
                 prepared.assignment_id,
@@ -139,7 +169,7 @@ class CoreTests(unittest.TestCase):
 
     def test_mismatched_result_marker_is_rejected(self) -> None:
         prepared = self.prepare()
-        cpd.mark_submitted(prepared.assignment_id, self.paths)
+        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
                 prepared.assignment_id,
@@ -149,7 +179,7 @@ class CoreTests(unittest.TestCase):
 
     def test_complete_validates_marker_and_is_idempotent(self) -> None:
         prepared = self.prepare()
-        cpd.mark_submitted(prepared.assignment_id, self.paths)
+        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         response = (
             "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\n\n"
             "commit_sha=abc123\nbranch=feature/test"
@@ -167,7 +197,7 @@ class CoreTests(unittest.TestCase):
 
     def test_completed_receipt_cannot_be_rewritten(self) -> None:
         prepared = self.prepare()
-        cpd.mark_submitted(prepared.assignment_id, self.paths)
+        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         cpd.complete_assignment(
             prepared.assignment_id,
             "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nOriginal",
@@ -182,7 +212,7 @@ class CoreTests(unittest.TestCase):
 
     def test_continuation_uses_same_worker_after_completion(self) -> None:
         first = self.prepare()
-        cpd.mark_submitted(first.assignment_id, self.paths)
+        cpd.mark_submitted(first.assignment_id, first.wrapped_prompt, self.paths)
         cpd.complete_assignment(
             first.assignment_id,
             "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone",
