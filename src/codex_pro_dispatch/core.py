@@ -17,7 +17,9 @@ from typing import Any, Iterable, Mapping
 APP_NAME = "codex-pro-dispatch"
 SCHEMA_VERSION = 1
 
-ACTIVE_STATUSES = frozenset({"prepared", "submitted", "pending", "indeterminate", "ambiguous"})
+ACTIVE_STATUSES = frozenset(
+    {"prepared", "armed", "submitted", "pending", "indeterminate", "ambiguous"}
+)
 TERMINAL_STATUSES = frozenset({"complete", "abandoned", "failed"})
 ALL_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
 
@@ -493,6 +495,19 @@ def _transition(
         return value
 
 
+def arm_assignment(
+    assignment_id: str, paths: RuntimePaths | None = None
+) -> dict[str, Any]:
+    """Durably prohibit resends immediately before the one native send attempt."""
+    return _transition(
+        assignment_id,
+        allowed={"prepared"},
+        target="armed",
+        updates={"armed_at": utc_now(), "no_resend": True},
+        paths=paths,
+    )
+
+
 def mark_submitted(
     assignment_id: str,
     sent_prompt: str,
@@ -527,7 +542,7 @@ def mark_submitted(
             and sent_hash == expected_hash
         )
         if (
-            current != "prepared"
+            current != "armed"
             and not is_late_verification
             and not is_readback_correction
         ):
@@ -625,7 +640,7 @@ def mark_indeterminate(
         raise ConfigurationError("Indeterminate reason is empty")
     return _transition(
         assignment_id,
-        allowed={"prepared", "submitted", "pending", "ambiguous", "indeterminate"},
+        allowed={"armed", "submitted", "pending", "ambiguous", "indeterminate"},
         target="indeterminate",
         updates={
             "last_error": cleaned,
@@ -647,7 +662,7 @@ def mark_ambiguous(
         raise ConfigurationError("Ambiguous reason is empty")
     return _transition(
         assignment_id,
-        allowed={"prepared", "submitted", "pending", "indeterminate", "ambiguous"},
+        allowed={"armed", "submitted", "pending", "indeterminate", "ambiguous"},
         target="ambiguous",
         updates={"last_error": cleaned, "no_resend": True},
         paths=paths,
@@ -697,6 +712,21 @@ def complete_assignment(
                 f"Cannot complete an assignment in terminal state {current}",
                 details={"assignment_id": assignment_id},
             )
+        if (
+            int(value.get("submission_count", 0)) != 1
+            or value.get("outbound_prompt_verified") is not True
+        ):
+            raise StateError(
+                "Cannot complete before one exact outbound submission is verified",
+                details={
+                    "assignment_id": assignment_id,
+                    "status": current,
+                    "submission_count": value.get("submission_count", 0),
+                    "outbound_prompt_verified": value.get(
+                        "outbound_prompt_verified", False
+                    ),
+                },
+            )
         value["status"] = "complete"
         value["completed_at"] = utc_now()
         value["response_sha256"] = response_hash
@@ -718,7 +748,17 @@ def recovery_info(
         "parent_task_id": value["parent_task_id"],
         "response_marker": value["response_marker"],
         "submission_count": value.get("submission_count", 0),
-        "no_resend": value.get("status") != "prepared" or value.get("submission_count", 0) > 0,
+        "no_resend": bool(value.get("no_resend"))
+        or value.get("status") != "prepared"
+        or value.get("submission_count", 0) > 0,
+        "outbound_prompt_verified": value.get("outbound_prompt_verified", False),
+        "readback_correction_allowed": value.get(
+            "readback_correction_allowed", False
+        ),
+        "readback_correction_kind": value.get("readback_correction_kind"),
+        "wrapped_prompt_sha256": value.get("wrapped_prompt_sha256"),
+        "sent_prompt_sha256": value.get("sent_prompt_sha256"),
+        "readback_artifact_sha256": value.get("readback_artifact_sha256"),
         "continuation_of": value.get("continuation_of"),
         "last_error": value.get("last_error"),
     }
@@ -729,15 +769,16 @@ def reset_worker(
 ) -> bool:
     runtime = paths or default_paths()
     with state_lock(runtime):
-        current = active_assignment(runtime)
-        if current and not force:
-            raise BusyError(
-                "Cannot reset the worker while an assignment is unresolved",
-                details={
-                    "assignment_id": current.get("assignment_id"),
-                    "status": current.get("status"),
-                },
-            )
+        if not force:
+            current = active_assignment(runtime)
+            if current:
+                raise BusyError(
+                    "Cannot reset the worker while an assignment is unresolved",
+                    details={
+                        "assignment_id": current.get("assignment_id"),
+                        "status": current.get("status"),
+                    },
+                )
         try:
             runtime.worker_file.unlink()
             return True
@@ -750,15 +791,16 @@ def purge_local_state(
 ) -> dict[str, bool]:
     runtime = paths or default_paths()
     with state_lock(runtime):
-        current = active_assignment(runtime)
-        if current and not force:
-            raise BusyError(
-                "Cannot purge local state while an assignment is unresolved",
-                details={
-                    "assignment_id": current.get("assignment_id"),
-                    "status": current.get("status"),
-                },
-            )
+        if not force:
+            current = active_assignment(runtime)
+            if current:
+                raise BusyError(
+                    "Cannot purge local state while an assignment is unresolved",
+                    details={
+                        "assignment_id": current.get("assignment_id"),
+                        "status": current.get("status"),
+                    },
+                )
         worker_removed = False
         assignments_removed = False
         with contextlib.suppress(FileNotFoundError):

@@ -58,9 +58,16 @@ pro-dispatch prepare \
   --prompt-file '<prompt-file>'
 ```
 
-4. Read the JSON result. Send `wrapped_prompt` exactly once to `worker_conversation_id` using native conversation controls.
-5. After native submission is confirmed, read back the exact submitted user message from that worker conversation using native controls and save those bytes to a temporary UTF-8 file. Do not reconstruct it from the prepared JSON.
-6. Verify the read-back before recording submission:
+4. Read the JSON result and resolve `worker_conversation_id`. Immediately before the native send, durably arm the assignment:
+
+```bash
+pro-dispatch arm '<assignment-id>'
+```
+
+Do not call the native send unless arming succeeds. Once arming succeeds, `no_resend` is permanent for that assignment, including across an app crash.
+5. Send `wrapped_prompt` exactly once to `worker_conversation_id` using native conversation controls.
+6. After native submission is confirmed, read back the exact submitted user message from that worker conversation using native controls and save those bytes to a temporary UTF-8 file. Do not reconstruct it from the prepared JSON.
+7. Verify the read-back before recording submission:
 
 ```bash
 pro-dispatch submitted '<assignment-id>' \
@@ -77,18 +84,20 @@ If the send may have occurred but confirmation failed, do not retry. Run:
 pro-dispatch indeterminate '<assignment-id>' --reason '<exact error>'
 ```
 
-7. Wait using the worker conversation's native metadata or timestamp. Do not repeatedly reopen the worker while it is generating.
-8. When the worker has updated, open the worker by its exact conversation ID and wait until that exact thread is loaded.
-9. Read only the newest completed assistant response associated with the assignment. Save it to a temporary UTF-8 file.
-10. Validate and complete:
+If the app stops after `arm`—whether before, during, or after the native send—recover collect-only. Never send that assignment again. Only the user may authorize abandoning it and preparing a fresh assignment after bounded inspection of the exact worker.
+
+8. Wait using the worker conversation's native metadata or timestamp. Do not repeatedly reopen the worker while it is generating.
+9. When the worker has updated, open the worker by its exact conversation ID and wait until that exact thread is loaded.
+10. Read only the newest completed assistant response associated with the assignment. Save it to a temporary UTF-8 file.
+11. Validate and complete:
 
 ```bash
 pro-dispatch complete '<assignment-id>' --response-file '<response-file>'
 ```
 
-11. Use the returned `payload` as the worker result.
-12. Restore the exact saved parent Codex task.
-13. If the worker reported GitHub mutations, follow [references/github-verification.md](references/github-verification.md).
+12. Use the returned `payload` as the worker result.
+13. Restore the exact saved parent Codex task.
+14. If the worker reported GitHub mutations, follow [references/github-verification.md](references/github-verification.md).
 
 ## Recovery without resending
 
@@ -102,7 +111,7 @@ pro-dispatch recover '<assignment-id>'
 
 2. Open the saved worker conversation ID directly.
 3. Wait for that exact thread to load.
-4. If `outbound_prompt_verified` is not true, locate the existing submitted user message by its exact assignment marker. Save that native read-back to a temporary UTF-8 file and run:
+4. Inspect the recovery fields, including `outbound_prompt_verified`, `wrapped_prompt_sha256`, `sent_prompt_sha256`, and `readback_correction_allowed`. If `outbound_prompt_verified` is not true, locate the existing submitted user message by its exact assignment marker. Save that native read-back to a temporary UTF-8 file and run:
 
 ```bash
 pro-dispatch submitted '<assignment-id>' \
@@ -133,6 +142,7 @@ pro-dispatch prepare \
 ```
 
 The follow-up must still be submitted once and validated through its own result marker.
+Run `pro-dispatch arm '<new-assignment-id>'` immediately before its native send.
 
 ## Foreground behavior
 

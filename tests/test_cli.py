@@ -49,7 +49,10 @@ class CliTests(unittest.TestCase):
             input_text="Task",
         )
         self.assertEqual(prepared.returncode, 0, prepared.stderr)
-        return json.loads(prepared.stdout)
+        payload = json.loads(prepared.stdout)
+        armed = self.run_cli("arm", assignment_id)
+        self.assertEqual(armed.returncode, 0, armed.stderr)
+        return payload
 
     def test_help(self) -> None:
         completed = self.run_cli("--help")
@@ -204,6 +207,38 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["payload"], "RECOVERED")
+
+    def test_recover_reports_verified_outbound_state(self) -> None:
+        assignment_id = "dispatch-recover-fields-7319"
+        prepared = self.configure_and_prepare(assignment_id)
+        submitted = self.run_cli(
+            "submitted",
+            assignment_id,
+            "--sent-prompt-file",
+            "-",
+            input_text=str(prepared["wrapped_prompt"]),
+        )
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+
+        recovered = self.run_cli("recover", assignment_id)
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        recovery = json.loads(recovered.stdout)["recovery"]
+        self.assertTrue(recovery["outbound_prompt_verified"])
+        self.assertTrue(recovery["no_resend"])
+        self.assertEqual(
+            recovery["wrapped_prompt_sha256"], recovery["sent_prompt_sha256"]
+        )
+
+    def test_doctor_is_unhealthy_when_assignment_state_is_corrupt(self) -> None:
+        self.configure_and_prepare("dispatch-doctor-corrupt-7319")
+        assignments = Path(self.temporary.name) / "state" / "assignments"
+        (assignments / "broken.json").write_text("not json", encoding="utf-8")
+
+        doctor = self.run_cli("doctor")
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        payload = json.loads(doctor.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertIn("state_error", payload)
 
 
 if __name__ == "__main__":

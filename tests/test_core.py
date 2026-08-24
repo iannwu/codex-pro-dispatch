@@ -45,6 +45,9 @@ class CoreTests(unittest.TestCase):
             paths=self.paths,
         )
 
+    def arm(self, prepared: cpd.PreparedAssignment) -> dict[str, object]:
+        return cpd.arm_assignment(prepared.assignment_id, self.paths)
+
     def test_worker_requires_explicit_pro_confirmation(self) -> None:
         with self.assertRaises(cpd.ConfigurationError):
             cpd.save_worker(
@@ -97,6 +100,7 @@ class CoreTests(unittest.TestCase):
 
     def test_submission_is_recorded_exactly_once(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         value = cpd.mark_submitted(
             prepared.assignment_id, prepared.wrapped_prompt, self.paths
         )
@@ -111,6 +115,7 @@ class CoreTests(unittest.TestCase):
 
     def test_submission_mismatch_is_collect_only_and_cannot_be_retried(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         with self.assertRaises(cpd.StateError):
             cpd.mark_submitted(
                 prepared.assignment_id, "+" + prepared.wrapped_prompt, self.paths
@@ -135,6 +140,7 @@ class CoreTests(unittest.TestCase):
 
     def test_trailing_newline_readback_artifact_can_be_corrected_without_resend(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         with self.assertRaises(cpd.StateError):
             cpd.mark_submitted(
                 prepared.assignment_id, prepared.wrapped_prompt + "\n", self.paths
@@ -166,6 +172,7 @@ class CoreTests(unittest.TestCase):
 
     def test_legacy_newline_mismatch_receipt_can_be_corrected_from_stored_hash(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         with self.assertRaises(cpd.StateError):
             cpd.mark_submitted(
                 prepared.assignment_id, prepared.wrapped_prompt + "\n", self.paths
@@ -193,6 +200,7 @@ class CoreTests(unittest.TestCase):
 
     def test_indeterminate_state_blocks_resend_and_supports_recovery(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         value = cpd.mark_indeterminate(
             prepared.assignment_id,
             reason="native send returned after possible submission",
@@ -207,6 +215,7 @@ class CoreTests(unittest.TestCase):
 
     def test_late_readback_verifies_indeterminate_submission_without_resend(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         cpd.mark_indeterminate(
             prepared.assignment_id,
             reason="native read-back was temporarily stale",
@@ -230,6 +239,7 @@ class CoreTests(unittest.TestCase):
 
     def test_late_readback_verifies_ambiguous_submission_without_resend(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         cpd.mark_indeterminate(
             prepared.assignment_id,
             reason="native read-back was temporarily stale",
@@ -253,6 +263,7 @@ class CoreTests(unittest.TestCase):
 
     def test_result_marker_must_be_first_nonempty_line(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
@@ -263,6 +274,7 @@ class CoreTests(unittest.TestCase):
 
     def test_result_marker_rejects_surrounding_whitespace(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
@@ -273,6 +285,7 @@ class CoreTests(unittest.TestCase):
 
     def test_mismatched_result_marker_is_rejected(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
@@ -283,6 +296,7 @@ class CoreTests(unittest.TestCase):
 
     def test_complete_validates_marker_and_is_idempotent(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         response = (
             "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\n\n"
@@ -301,6 +315,7 @@ class CoreTests(unittest.TestCase):
 
     def test_completed_receipt_cannot_be_rewritten(self) -> None:
         prepared = self.prepare()
+        self.arm(prepared)
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         cpd.complete_assignment(
             prepared.assignment_id,
@@ -316,6 +331,7 @@ class CoreTests(unittest.TestCase):
 
     def test_continuation_uses_same_worker_after_completion(self) -> None:
         first = self.prepare()
+        self.arm(first)
         cpd.mark_submitted(first.assignment_id, first.wrapped_prompt, self.paths)
         cpd.complete_assignment(
             first.assignment_id,
@@ -382,6 +398,99 @@ class CoreTests(unittest.TestCase):
         result = cpd.purge_local_state(force=True, paths=self.paths)
         self.assertTrue(result["worker_removed"])
         self.assertTrue(result["assignments_removed"])
+
+    def test_armed_state_closes_crash_window_and_prohibits_resend(self) -> None:
+        prepared = self.prepare()
+        before = cpd.recovery_info(prepared.assignment_id, self.paths)
+        self.assertFalse(before["no_resend"])
+
+        armed = self.arm(prepared)
+        self.assertEqual(armed["status"], "armed")
+        self.assertTrue(armed["no_resend"])
+        after = cpd.recovery_info(prepared.assignment_id, self.paths)
+        self.assertTrue(after["no_resend"])
+        self.assertFalse(after["outbound_prompt_verified"])
+        with self.assertRaises(cpd.StateError):
+            self.arm(prepared)
+
+    def test_submission_requires_durable_arm(self) -> None:
+        prepared = self.prepare()
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_submitted(
+                prepared.assignment_id, prepared.wrapped_prompt, self.paths
+            )
+        value = cpd.load_assignment(prepared.assignment_id, self.paths)
+        self.assertEqual(value["status"], "prepared")
+        self.assertEqual(value["submission_count"], 0)
+
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_indeterminate(
+                prepared.assignment_id,
+                reason="attempted arming bypass",
+                paths=self.paths,
+            )
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_ambiguous(
+                prepared.assignment_id,
+                reason="attempted arming bypass",
+                paths=self.paths,
+            )
+        value = cpd.load_assignment(prepared.assignment_id, self.paths)
+        self.assertEqual(value["status"], "prepared")
+
+    def test_complete_requires_one_verified_submission(self) -> None:
+        prepared = self.prepare()
+        response = (
+            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone"
+        )
+        with self.assertRaises(cpd.StateError):
+            cpd.complete_assignment(prepared.assignment_id, response, self.paths)
+        self.arm(prepared)
+        with self.assertRaises(cpd.StateError):
+            cpd.complete_assignment(prepared.assignment_id, response, self.paths)
+        cpd.mark_indeterminate(
+            prepared.assignment_id,
+            reason="native send outcome is unknown",
+            paths=self.paths,
+        )
+        with self.assertRaises(cpd.StateError):
+            cpd.complete_assignment(prepared.assignment_id, response, self.paths)
+        value = cpd.load_assignment(prepared.assignment_id, self.paths)
+        self.assertEqual(value["status"], "indeterminate")
+        self.assertEqual(value["submission_count"], 0)
+
+    def test_recovery_exposes_outbound_verification_fields(self) -> None:
+        prepared = self.prepare()
+        self.arm(prepared)
+        submitted = cpd.mark_submitted(
+            prepared.assignment_id, prepared.wrapped_prompt, self.paths
+        )
+        recovery = cpd.recovery_info(prepared.assignment_id, self.paths)
+        self.assertTrue(recovery["outbound_prompt_verified"])
+        self.assertEqual(
+            recovery["wrapped_prompt_sha256"], submitted["wrapped_prompt_sha256"]
+        )
+        self.assertEqual(
+            recovery["sent_prompt_sha256"], submitted["sent_prompt_sha256"]
+        )
+        self.assertFalse(recovery["readback_correction_allowed"])
+
+    def test_force_repairs_corrupt_state(self) -> None:
+        self.configure_worker()
+        self.paths.assignments_dir.mkdir(parents=True, exist_ok=True)
+        broken = self.paths.assignments_dir / "broken.json"
+        broken.write_text("not json", encoding="utf-8")
+
+        with self.assertRaises(cpd.StateError):
+            cpd.reset_worker(paths=self.paths)
+        self.assertTrue(cpd.reset_worker(force=True, paths=self.paths))
+
+        with self.assertRaises(cpd.StateError):
+            cpd.purge_local_state(paths=self.paths)
+        result = cpd.purge_local_state(force=True, paths=self.paths)
+        self.assertFalse(result["worker_removed"])
+        self.assertTrue(result["assignments_removed"])
+        self.assertFalse(broken.exists())
 
 
 if __name__ == "__main__":

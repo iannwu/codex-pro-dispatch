@@ -25,6 +25,8 @@ class SkillContractTests(unittest.TestCase):
             "Do not use ChatGPT Web",
             "Restore the exact parent Codex task",
             "Do not use the clipboard",
+            "pro-dispatch arm '<assignment-id>'",
+            "Do not call the native send unless arming succeeds",
         ]:
             self.assertIn(phrase, text)
 

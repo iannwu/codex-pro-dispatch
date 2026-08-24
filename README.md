@@ -2,7 +2,7 @@
 
 Dispatch bounded work from a Codex task to a dedicated ChatGPT Pro conversation inside the official combined ChatGPT/Codex desktop app, then return the validated result to the exact parent task.
 
-> Status: experimental v0.1 implementation branch. The deterministic state and marker logic is tested. Live native conversation controls still require acceptance testing in Codex Desktop.
+> Status: experimental v0.1 pre-release. An earlier protocol revision passed the live native matrix; the durable pre-send repair in this revision requires a fresh acceptance run before release.
 
 ## Why
 
@@ -45,7 +45,6 @@ Clone the source so every instruction and helper remains inspectable:
 ```bash
 git clone https://github.com/iannwu/codex-pro-dispatch.git
 cd codex-pro-dispatch
-git checkout codex/official-app-skill-v1
 ./install.sh
 ```
 
@@ -57,6 +56,20 @@ ${CODEX_HOME:-~/.codex}/skills/codex-pro-dispatch
 ```
 
 It does not use `sudo`, modify Codex model routing, install a service, or launch at login.
+
+The links point to this checkout by absolute path. Keep the checkout in place while the skill is installed. Before moving or deleting it, uninstall first:
+
+```bash
+./uninstall.sh
+```
+
+To also erase the private worker configuration and assignment receipts:
+
+```bash
+./uninstall.sh --purge-state
+```
+
+Purging state is irreversible and is refused while an assignment is unresolved.
 
 Ensure `~/.local/bin` is on your `PATH`:
 
@@ -106,6 +119,7 @@ The CLI manages private local state and deterministic validation. It does not co
 pro-dispatch worker set --conversation-id '<id>' --confirm-pro
 pro-dispatch worker show
 pro-dispatch prepare --parent-task-id '<id>' --prompt-file assignment.md
+pro-dispatch arm '<assignment-id>'
 pro-dispatch submitted '<assignment-id>' --sent-prompt-file native-read-back.txt
 pro-dispatch indeterminate '<assignment-id>' --reason '<error>'
 pro-dispatch complete '<assignment-id>' --response-file response.txt

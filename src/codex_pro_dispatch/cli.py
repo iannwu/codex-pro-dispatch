@@ -12,6 +12,7 @@ from .core import (
     DispatchError,
     abandon_assignment,
     active_assignment,
+    arm_assignment,
     complete_assignment,
     default_paths,
     list_assignments,
@@ -74,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--prompt-file", default="-", help="UTF-8 prompt file, or - for stdin")
     prepare.add_argument("--continuation-of")
     prepare.add_argument("--assignment-id")
+
+    arm = subparsers.add_parser(
+        "arm", help="Durably prohibit resends immediately before native submission"
+    )
+    arm.add_argument("assignment_id")
 
     submitted = subparsers.add_parser(
         "submitted", help="Verify the native read-back and record one submission"
@@ -179,6 +185,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         value = mark_submitted(args.assignment_id, sent_prompt, paths)
         return {"ok": True, "assignment": value}
 
+    if args.command == "arm":
+        value = arm_assignment(args.assignment_id, paths)
+        return {"ok": True, "assignment": value, "no_resend": True}
+
     if args.command == "pending":
         value = mark_pending(args.assignment_id, paths)
         return {"ok": True, "assignment": value}
@@ -240,7 +250,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         except DispatchError as exc:
             checks["state_error"] = str(exc)
         checks["native_controls"] = "manual acceptance required inside Codex Desktop"
-        checks["ok"] = checks["platform"] == "Darwin" and checks["worker_configured"]
+        checks["ok"] = (
+            checks["platform"] == "Darwin"
+            and checks["worker_configured"]
+            and "worker_error" not in checks
+            and "state_error" not in checks
+        )
         return checks
 
     if args.command == "purge":

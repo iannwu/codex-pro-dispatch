@@ -25,11 +25,12 @@ Submit:
 
 ```text
 Reply with exactly:
-CODEX_TO_CHAT_SOL_OK_7319
+CODEX_TO_CHAT_PRO_OK_7319
 ```
 
 Expected:
 
+- receipt is durably `armed` before the single native send
 - one user message is submitted
 - exact response is collected
 - the exact parent Codex task is restored
@@ -78,11 +79,12 @@ Expected:
 
 ## E. Exactly-once uncertainty
 
-Interrupt or fail native submission confirmation after the message may have been sent.
+Interrupt or terminate the app after `pro-dispatch arm` and before submission recording, including the boundary immediately after the native send.
 
 Expected:
 
-- assignment becomes `indeterminate`
+- after restart the assignment remains `armed`; recovery explicitly records `indeterminate` if the native-send outcome is still unknown
+- the durable receipt already has `no_resend: true` before the native send
 - no automatic resend occurs
 - recovery opens the saved worker and checks for the existing response
 

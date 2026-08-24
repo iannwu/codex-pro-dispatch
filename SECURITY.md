@@ -40,7 +40,9 @@ Config and state directories use mode `0700`. JSON files and lock files use mode
 
 ## Exactly-once behavior
 
-An assignment can be marked submitted only once. A timeout, app restart, retrieval failure, or ambiguous native-control result moves the workflow to collection-only recovery. The skill must never resend automatically.
+Immediately before the native send, an assignment is durably moved from `prepared` to `armed`. The `armed` receipt sets `no_resend` before any send can occur, closing the crash window between native submission and read-back recording. An assignment can then be marked submitted only once. A timeout, app restart, retrieval failure, or ambiguous native-control result remains collection-only. The skill must never resend automatically.
+
+Completion additionally requires exactly one recorded submission and an exact verified outbound-prompt hash. A valid-looking result marker alone cannot complete an unverified assignment.
 
 Completed receipts are immutable. A later or unrelated worker response cannot overwrite an already completed assignment.
 

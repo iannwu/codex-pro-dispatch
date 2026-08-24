@@ -16,7 +16,7 @@ elif [[ $# -gt 0 ]]; then
   exit 2
 fi
 
-remove_owned_link() {
+verify_owned_link() {
   local target="$1"
   local expected="$2"
   if [[ ! -e "$target" && ! -L "$target" ]]; then
@@ -26,9 +26,23 @@ remove_owned_link() {
     echo "Refusing to remove unowned path: $target" >&2
     exit 1
   fi
+}
+
+remove_owned_link() {
+  local target="$1"
+  local expected="$2"
+  verify_owned_link "$target" "$expected"
+  if [[ ! -e "$target" && ! -L "$target" ]]; then
+    return 0
+  fi
   rm "$target"
   echo "Removed $target"
 }
+
+# Validate every target before purging state or removing either link. This keeps
+# an ownership failure from leaving a partially uninstalled installation.
+verify_owned_link "$BIN_TARGET" "$EXPECTED_BIN"
+verify_owned_link "$SKILL_TARGET" "$EXPECTED_SKILL"
 
 if $PURGE_STATE; then
   "$EXPECTED_BIN" purge --yes

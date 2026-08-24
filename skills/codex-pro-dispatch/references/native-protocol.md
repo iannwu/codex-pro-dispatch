@@ -22,10 +22,11 @@ A worker title is a label only. Conversation identity comes from the stable ID.
 1. Capture the parent Codex task ID before leaving it.
 2. Prepare the assignment with `pro-dispatch prepare`.
 3. Resolve the configured worker by ID.
-4. Submit `wrapped_prompt` once.
-5. After confirmation, use native controls to read back the exact submitted user message from the worker and save it as UTF-8 without reconstructing or editing it.
-6. Run `pro-dispatch submitted '<assignment-id>' --sent-prompt-file '<native-read-back-file>'` so the helper compares the read-back bytes with the prepared `wrapped_prompt` hash.
-7. If the hash differs, keep the helper's `indeterminate` collect-only state and never resend. If confirmation itself is indeterminate, record `indeterminate` and switch to collection-only recovery.
+4. Immediately before sending, run `pro-dispatch arm '<assignment-id>'`. Do not send unless it succeeds.
+5. Submit `wrapped_prompt` once. After `arm`, the assignment is permanently collect-only if the app crashes or the send outcome is uncertain.
+6. After confirmation, use native controls to read back the exact submitted user message from the worker and save it as UTF-8 without reconstructing or editing it.
+7. Run `pro-dispatch submitted '<assignment-id>' --sent-prompt-file '<native-read-back-file>'` so the helper compares the read-back bytes with the prepared `wrapped_prompt` hash.
+8. If the hash differs, keep the helper's `indeterminate` collect-only state and never resend. If confirmation itself is indeterminate, record `indeterminate` and switch to collection-only recovery.
 
 The helper intentionally blocks a second unresolved assignment.
 
@@ -65,6 +66,7 @@ The clipboard must remain unchanged.
 
 | Native result | Required action |
 | --- | --- |
+| Crash or interruption after `arm` | Recover the exact worker collect-only; never send that assignment again |
 | Send confirmed and exact read-back available | `pro-dispatch submitted --sent-prompt-file '<native-read-back-file>'` |
 | Send acknowledged but read-back temporarily absent | `pro-dispatch indeterminate`; wait and late-verify the existing message without resend |
 | Read-back file equals expected prompt plus one trailing newline | Re-extract the same native message without the file artifact and verify again; never resend |
