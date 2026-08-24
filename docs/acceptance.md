@@ -4,6 +4,8 @@ The unit tests verify state, markers, privacy, and no-resend behavior. They cann
 
 Run this matrix before merging v0.1.
 
+Latest live result: PASS on 2026-08-24 for the durable pre-send protocol at commit `eaff5feb83d0e78bf92af1120696c0c9445b9b34`. The follow-up reason-file hardening affects CLI input handling only and does not alter the native send, collection, or restoration protocol.
+
 ## A. Setup
 
 ### A1. Worker configuration

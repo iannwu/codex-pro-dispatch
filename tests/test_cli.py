@@ -208,6 +208,44 @@ class CliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["payload"], "RECOVERED")
 
+    def test_reason_file_preserves_untrusted_text_without_shell_interpolation(self) -> None:
+        assignment_id = "dispatch-reason-file-7319"
+        self.configure_and_prepare(assignment_id)
+        reason = "native thread isn't loaded; $(touch should-not-run)"
+        reason_path = Path(self.temporary.name) / "reason.txt"
+        reason_path.write_text(reason + "\n", encoding="utf-8")
+
+        indeterminate = self.run_cli(
+            "indeterminate",
+            assignment_id,
+            "--reason-file",
+            str(reason_path),
+        )
+        self.assertEqual(indeterminate.returncode, 0, indeterminate.stderr)
+        self.assertEqual(
+            json.loads(indeterminate.stdout)["assignment"]["last_error"], reason
+        )
+
+        ambiguous = self.run_cli(
+            "ambiguous",
+            assignment_id,
+            "--reason-file",
+            str(reason_path),
+        )
+        self.assertEqual(ambiguous.returncode, 0, ambiguous.stderr)
+        self.assertEqual(
+            json.loads(ambiguous.stdout)["assignment"]["last_error"], reason
+        )
+
+        abandoned = self.run_cli(
+            "abandon",
+            assignment_id,
+            "--reason-file",
+            str(reason_path),
+        )
+        self.assertEqual(abandoned.returncode, 0, abandoned.stderr)
+        self.assertEqual(json.loads(abandoned.stdout)["assignment"]["reason"], reason)
+
     def test_recover_reports_verified_outbound_state(self) -> None:
         assignment_id = "dispatch-recover-fields-7319"
         prepared = self.configure_and_prepare(assignment_id)

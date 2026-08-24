@@ -46,6 +46,21 @@ def read_exact_text_source(path: str) -> str:
     return Path(path).read_bytes().decode("utf-8")
 
 
+def add_reason_source(parser: argparse.ArgumentParser) -> None:
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--reason")
+    source.add_argument(
+        "--reason-file",
+        help="UTF-8 reason file, or - for stdin; preferred for untrusted text",
+    )
+
+
+def reason_from_args(args: argparse.Namespace) -> str:
+    if args.reason_file is not None:
+        return read_text_source(args.reason_file)
+    return args.reason
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pro-dispatch",
@@ -98,13 +113,13 @@ def build_parser() -> argparse.ArgumentParser:
         "indeterminate", help="Record that submission may have occurred; never resend"
     )
     indeterminate.add_argument("assignment_id")
-    indeterminate.add_argument("--reason", required=True)
+    add_reason_source(indeterminate)
 
     ambiguous = subparsers.add_parser(
         "ambiguous", help="Record an unvalidated response; never resend"
     )
     ambiguous.add_argument("assignment_id")
-    ambiguous.add_argument("--reason", required=True)
+    add_reason_source(ambiguous)
 
     complete = subparsers.add_parser(
         "complete", help="Validate the result marker and complete an assignment"
@@ -119,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     abandon = subparsers.add_parser("abandon", help="Close an unresolved assignment")
     abandon.add_argument("assignment_id")
-    abandon.add_argument("--reason", required=True)
+    add_reason_source(abandon)
 
     status = subparsers.add_parser("status", help="Show one assignment or all local state")
     status.add_argument("assignment_id", nargs="?")
@@ -194,11 +209,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"ok": True, "assignment": value}
 
     if args.command == "indeterminate":
-        value = mark_indeterminate(args.assignment_id, reason=args.reason, paths=paths)
+        value = mark_indeterminate(
+            args.assignment_id, reason=reason_from_args(args), paths=paths
+        )
         return {"ok": True, "assignment": value, "collect_only": True}
 
     if args.command == "ambiguous":
-        value = mark_ambiguous(args.assignment_id, reason=args.reason, paths=paths)
+        value = mark_ambiguous(
+            args.assignment_id, reason=reason_from_args(args), paths=paths
+        )
         return {"ok": True, "assignment": value, "collect_only": True}
 
     if args.command == "complete":
@@ -210,7 +229,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"ok": True, "recovery": recovery_info(args.assignment_id, paths)}
 
     if args.command == "abandon":
-        value = abandon_assignment(args.assignment_id, reason=args.reason, paths=paths)
+        value = abandon_assignment(
+            args.assignment_id, reason=reason_from_args(args), paths=paths
+        )
         return {"ok": True, "assignment": value}
 
     if args.command == "status":

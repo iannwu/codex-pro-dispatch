@@ -81,8 +81,10 @@ If the error reports `readback_correction_allowed: true`, the temporary read-bac
 If the send may have occurred but confirmation failed, do not retry. Run:
 
 ```bash
-pro-dispatch indeterminate '<assignment-id>' --reason '<exact error>'
+pro-dispatch indeterminate '<assignment-id>' --reason-file '<reason-file>'
 ```
+
+Write the exact error to the temporary UTF-8 reason file without interpolating it into a shell command. Use `--reason-file` for native errors and other untrusted text.
 
 If the app stops after `arm`—whether before, during, or after the native send—recover collect-only. Never send that assignment again. Only the user may authorize abandoning it and preparing a fresh assignment after bounded inspection of the exact worker.
 
@@ -127,7 +129,7 @@ This recovery command verifies the already-existing message; it does not send an
 Never send the original assignment again. If the response cannot be matched to the exact result marker, record the issue and stop:
 
 ```bash
-pro-dispatch ambiguous '<assignment-id>' --reason '<exact blocker>'
+pro-dispatch ambiguous '<assignment-id>' --reason-file '<reason-file>'
 ```
 
 ## Same-worker continuation
@@ -171,7 +173,7 @@ Useful commands:
 pro-dispatch worker show
 pro-dispatch status
 pro-dispatch recover '<assignment-id>'
-pro-dispatch abandon '<assignment-id>' --reason 'user cancelled'
+pro-dispatch abandon '<assignment-id>' --reason-file '<reason-file>'
 pro-dispatch worker reset
 pro-dispatch doctor
 ```

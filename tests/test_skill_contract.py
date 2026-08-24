@@ -27,8 +27,11 @@ class SkillContractTests(unittest.TestCase):
             "Do not use the clipboard",
             "pro-dispatch arm '<assignment-id>'",
             "Do not call the native send unless arming succeeds",
+            "--reason-file '<reason-file>'",
+            "without interpolating it into a shell command",
         ]:
             self.assertIn(phrase, text)
+        self.assertNotIn("--reason '<exact", text)
 
     def test_openai_yaml_mentions_explicit_skill_name(self) -> None:
         text = OPENAI_YAML.read_text(encoding="utf-8")

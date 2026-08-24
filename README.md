@@ -2,7 +2,7 @@
 
 Dispatch bounded work from a Codex task to a dedicated ChatGPT Pro conversation inside the official combined ChatGPT/Codex desktop app, then return the validated result to the exact parent task.
 
-> Status: experimental v0.1 pre-release. An earlier protocol revision passed the live native matrix; the durable pre-send repair in this revision requires a fresh acceptance run before release.
+> Status: v0.1 release candidate. The durable pre-send protocol passed the full live native matrix on 2026-08-24 at commit `eaff5feb83d0e78bf92af1120696c0c9445b9b34`; the subsequent reason-file hardening does not alter native transport behavior.
 
 ## Why
 
@@ -121,7 +121,7 @@ pro-dispatch worker show
 pro-dispatch prepare --parent-task-id '<id>' --prompt-file assignment.md
 pro-dispatch arm '<assignment-id>'
 pro-dispatch submitted '<assignment-id>' --sent-prompt-file native-read-back.txt
-pro-dispatch indeterminate '<assignment-id>' --reason '<error>'
+pro-dispatch indeterminate '<assignment-id>' --reason-file reason.txt
 pro-dispatch complete '<assignment-id>' --response-file response.txt
 pro-dispatch recover '<assignment-id>'
 pro-dispatch status
