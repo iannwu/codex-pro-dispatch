@@ -2,7 +2,7 @@
 
 Dispatch bounded work from a Codex task to a dedicated ChatGPT Pro conversation inside the official combined ChatGPT/Codex desktop app, then return the validated result to the exact parent task.
 
-> Status: v0.1 release candidate. The durable pre-send protocol passed the full live native matrix on 2026-08-24 at commit `eaff5feb83d0e78bf92af1120696c0c9445b9b34`; the subsequent reason-file hardening does not alter native transport behavior.
+> Status: v0.1.1 release candidate. The durable pre-send protocol passed the full live native matrix on 2026-08-24. This patch explicitly records native unusual-activity HTTP 403 responses and enforces a 30-minute cooldown before any fresh assignment.
 
 ## Why
 
@@ -111,6 +111,8 @@ pro-dispatch recover '<assignment-id>'
 
 If collection remains ambiguous, the assignment stays unresolved until it is explicitly completed or abandoned.
 
+When native diagnostics identify an unusual-activity HTTP 403, the skill records the exact error and OpenAI request ID, remains collect-only, and starts a fixed 30-minute cooldown. Abandoning the old receipt does not bypass the cooldown, and no automatic retry occurs.
+
 ## CLI
 
 The CLI manages private local state and deterministic validation. It does not control the ChatGPT UI itself.
@@ -122,6 +124,7 @@ pro-dispatch prepare --parent-task-id '<id>' --prompt-file assignment.md
 pro-dispatch arm '<assignment-id>'
 pro-dispatch submitted '<assignment-id>' --sent-prompt-file native-read-back.txt
 pro-dispatch indeterminate '<assignment-id>' --reason-file reason.txt
+pro-dispatch unusual-activity '<assignment-id>' --request-id '<id>' --reason-file reason.txt
 pro-dispatch complete '<assignment-id>' --response-file response.txt
 pro-dispatch recover '<assignment-id>'
 pro-dispatch status

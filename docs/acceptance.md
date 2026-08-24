@@ -123,6 +123,18 @@ Expected v0.1 behavior:
 - clipboard remains unchanged
 - exact parent task is restored
 
+## I. Unusual-activity HTTP 403 cooldown
+
+On a disposable armed assignment, simulate recording the exact native unusual-activity HTTP 403 and its request ID with `pro-dispatch unusual-activity`.
+
+Expected:
+
+- the receipt reports HTTP status `403`, error kind `openai-unusual-activity`, the request ID, and `cooldown_seconds: 1800`
+- the original assignment remains collect-only and is never resent
+- after user-authorized abandonment, a fresh `prepare` fails with `CooldownError` until the recorded 30-minute deadline
+- `status`, `doctor`, and `recover` expose the cooldown details
+- preparation succeeds after the deadline without an automatic send
+
 ## Release gate
 
-v0.1 is ready to merge only when A through G pass. H may retain the documented brief foreground collection limitation, but clipboard changes, duplicate submission, wrong-thread collection, stale response acceptance, or failed parent restoration are blockers.
+v0.1 is ready to merge only when A through G and I pass. H may retain the documented brief foreground collection limitation, but clipboard changes, duplicate submission, cooldown bypass, wrong-thread collection, stale response acceptance, or failed parent restoration are blockers.
