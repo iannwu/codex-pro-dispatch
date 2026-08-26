@@ -2,9 +2,9 @@
 
 The unit tests verify state, markers, privacy, and no-resend behavior. They cannot exercise the official app's live native conversation controls.
 
-Run this matrix before merging v0.1.
+Run this matrix before merging v1.0.
 
-Latest live result: PASS on 2026-08-24 for the durable pre-send protocol at commit `eaff5feb83d0e78bf92af1120696c0c9445b9b34`. The follow-up reason-file hardening affects CLI input handling only and does not alter the native send, collection, or restoration protocol.
+Latest live result: PASS on 2026-08-24 for the durable pre-send protocol at commit `eaff5feb83d0e78bf92af1120696c0c9445b9b34`. The follow-up reason-file and unusual-activity cooldown changes affect deterministic CLI/state handling; they do not change the single native send, collection, or restoration protocol.
 
 ## A. Setup
 
@@ -115,7 +115,7 @@ Expected:
 
 While another app is frontmost, run a several-minute dispatch.
 
-Expected v0.1 behavior:
+Expected v1.0 behavior:
 
 - submission and waiting do not interrupt foreground work
 - collection is deferred when focus state is available
@@ -137,4 +137,4 @@ Expected:
 
 ## Release gate
 
-v0.1 is ready to merge only when A through G and I pass. H may retain the documented brief foreground collection limitation, but clipboard changes, duplicate submission, cooldown bypass, wrong-thread collection, stale response acceptance, or failed parent restoration are blockers.
+v1.0 is ready to merge only when A through G and I pass. H may retain the documented brief foreground collection limitation, but clipboard changes, duplicate submission, cooldown bypass, wrong-thread collection, stale response acceptance, or failed parent restoration are blockers.

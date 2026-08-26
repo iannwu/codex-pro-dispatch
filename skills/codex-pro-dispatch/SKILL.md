@@ -3,6 +3,7 @@ name: codex-pro-dispatch
 description: Dispatch a bounded implementation, review, or research assignment from a Codex task to a dedicated ChatGPT Pro conversation in the official combined desktop app, recover the result without resending, and return to the parent Codex task. Use when the user asks Codex to delegate work to ChatGPT Pro; do not use for ordinary local coding.
 metadata:
   short-description: Dispatch work to official-app ChatGPT Pro
+  version: "1.0.0"
 ---
 
 # Codex Pro Dispatch
@@ -17,6 +18,20 @@ Codex parent task
 ```
 
 This skill relies on the host's native Chat and Codex conversation controls. It does not install another browser, app, daemon, model provider, MCP connector, or Accessibility bridge.
+
+## Contract
+
+Goal: safely delegate one bounded assignment from the exact Codex parent task to a user-confirmed ChatGPT Pro worker, collect the existing result without duplicate submission, independently verify claimed repository work, and restore the exact parent task. Excellent behavior fails closed when native state is ambiguous.
+
+Evaluate the workflow on these skill-specific dimensions:
+
+- `EXACTLY_ONCE_SAFETY`: no timeout, restart, read-back mismatch, or transport error can cause an automatic resend.
+- `THREAD_IDENTITY`: the worker and parent task are resolved by stable identity, never titles or visual position.
+- `RECOVERY_INTEGRITY`: every ambiguous state preserves collect-only recovery and rejects stale or mismatched results.
+- `VERIFICATION_BOUNDARY`: worker claims remain untrusted until the parent independently verifies them.
+- `OPERATOR_CLARITY`: another Codex instance can follow the workflow without guessing about permissions or native state.
+
+Hard fail if any path permits an automatic resend after arming, accepts a result from the wrong worker, restores the wrong parent task, or treats a worker claim of repository mutation as verified evidence.
 
 ## Hard boundaries
 

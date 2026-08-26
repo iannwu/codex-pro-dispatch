@@ -10,7 +10,7 @@ EXPECTED_BIN="${ROOT}/bin/pro-dispatch"
 EXPECTED_SKILL="${ROOT}/skills/codex-pro-dispatch"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "codex-pro-dispatch v0.1 requires the official macOS ChatGPT/Codex desktop app." >&2
+  echo "codex-pro-dispatch v1.0 requires the official macOS ChatGPT/Codex desktop app." >&2
   exit 1
 fi
 

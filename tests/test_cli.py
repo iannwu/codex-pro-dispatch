@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "pro-dispatch"
+VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
 
 class CliTests(unittest.TestCase):
@@ -58,6 +59,11 @@ class CliTests(unittest.TestCase):
         completed = self.run_cli("--help")
         self.assertEqual(completed.returncode, 0)
         self.assertIn("official-app Codex Pro Dispatch", completed.stdout)
+
+    def test_version(self) -> None:
+        completed = self.run_cli("--version")
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout.strip(), f"pro-dispatch {VERSION}")
 
     def test_missing_worker_is_structured_error(self) -> None:
         completed = self.run_cli(
