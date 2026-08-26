@@ -2,18 +2,32 @@
 
 The unit tests verify state, markers, privacy, and no-resend behavior. They cannot exercise the official app's live native conversation controls.
 
-Run this matrix before merging v1.0.
+Run this matrix against the exact release-candidate commit before marking a release stable. Record the app version/build, macOS version, native capability names, candidate SHA, and results in a redacted release receipt.
 
-Latest live result: PASS on 2026-08-24 for the durable pre-send protocol at commit `eaff5feb83d0e78bf92af1120696c0c9445b9b34`. The follow-up reason-file and unusual-activity cooldown changes affect deterministic CLI/state handling; they do not change the single native send, collection, or restoration protocol.
+The 2026-08-24 development run is historical evidence only. It was not performed against the current release candidate and must not be represented as the current release result.
 
 ## A. Setup
+
+### A0. Host capability preflight
+
+- Confirm the six semantic capabilities in [compatibility.md](compatibility.md).
+- Run `pro-dispatch doctor` without an assertion and confirm it fails closed.
+- Run `pro-dispatch prepare --parent-task-id acceptance-preflight --assignment-id acceptance-preflight` without `--native-controls-confirmed` and confirm it fails before reading stdin.
+- After the semantic check, configure the worker and run `pro-dispatch doctor --native-controls-confirmed`.
+
+Expected:
+
+- a missing native capability stops before worker or assignment state is written
+- unasserted `doctor` exits nonzero and reports `native_controls_confirmed: false`
+- unasserted `prepare` exits nonzero without reading the prompt and creates no assignment receipt
+- the asserted health check succeeds only when local state is healthy
 
 ### A1. Worker configuration
 
 - Create one dedicated Chat conversation.
 - Visibly select Pro.
 - Resolve its stable conversation ID.
-- Run `pro-dispatch worker set --conversation-id <id> --confirm-pro`.
+- Run `pro-dispatch worker set --conversation-id <id> --confirm-pro --native-controls-confirmed`.
 
 Expected:
 
@@ -79,7 +93,7 @@ Expected:
 - each has a unique assignment ID
 - parent task is restored after each collection
 
-## E. Exactly-once uncertainty
+## E. At-most-once uncertainty
 
 Interrupt or terminate the app after `pro-dispatch arm` and before submission recording, including the boundary immediately after the native send.
 
@@ -89,6 +103,7 @@ Expected:
 - the durable receipt already has `no_resend: true` before the native send
 - no automatic resend occurs
 - recovery opens the saved worker and checks for the existing response
+- an interruption before transport may produce zero sends; the assignment still remains collect-only
 
 ## F. Marker isolation
 
@@ -115,7 +130,7 @@ Expected:
 
 While another app is frontmost, run a several-minute dispatch.
 
-Expected v1.0 behavior:
+Expected behavior:
 
 - submission and waiting do not interrupt foreground work
 - collection is deferred when focus state is available
@@ -135,6 +150,28 @@ Expected:
 - `status`, `doctor`, and `recover` expose the cooldown details
 - preparation succeeds after the deadline without an automatic send
 
+## J. Private transient files
+
+Run a complete dispatch containing a unique, non-secret sentinel in the prompt and response.
+
+Expected:
+
+- every transient prompt, read-back, response, and reason file is created inside one mode-`0700` temporary directory
+- transient files are mode `0600`
+- cleanup runs after exact parent restoration and on simulated failure
+- the sentinel is absent from the checkout and the helper's config/state directories after cleanup
+
+## K. Legacy diagnostic redaction
+
+Place a disposable pre-v1.1 receipt containing unique, non-secret sentinel values in the legacy `last_error` and `reason` fields, then run `pro-dispatch doctor --native-controls-confirmed`.
+
+Expected:
+
+- `doctor` reports the number of migrated receipts
+- each raw diagnostic body is replaced durably with a category and SHA-256 hash
+- the sentinel is absent from status output and the on-disk receipt
+- corrupt receipts still produce structured unhealthy JSON and a nonzero exit
+
 ## Release gate
 
-v1.0 is ready to merge only when A through G and I pass. H may retain the documented brief foreground collection limitation, but clipboard changes, duplicate submission, cooldown bypass, wrong-thread collection, stale response acceptance, or failed parent restoration are blockers.
+The candidate is ready to be called stable only when A through K pass on the exact candidate commit. H may retain the documented brief foreground collection limitation, but missing native capabilities, clipboard changes, duplicate submission, cooldown bypass, wrong-thread collection, stale response acceptance, sensitive temp-file residue, unredacted legacy diagnostics, or failed parent restoration are blockers.

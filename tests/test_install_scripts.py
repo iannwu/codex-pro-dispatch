@@ -47,6 +47,10 @@ class InstallScriptTests(unittest.TestCase):
 
     @property
     def skill_target(self) -> Path:
+        return self.home / ".agents" / "skills" / "codex-pro-dispatch"
+
+    @property
+    def legacy_skill_target(self) -> Path:
         return self.codex_home / "skills" / "codex-pro-dispatch"
 
     def test_install_is_idempotent_and_uninstall_removes_owned_links(self) -> None:
@@ -89,6 +93,27 @@ class InstallScriptTests(unittest.TestCase):
         self.assertNotEqual(removed.returncode, 0)
         self.assertTrue(worker_file.exists())
         self.assertTrue(self.bin_target.is_symlink())
+
+    def test_owned_legacy_skill_install_is_migrated(self) -> None:
+        self.legacy_skill_target.parent.mkdir(parents=True)
+        self.legacy_skill_target.symlink_to(ROOT / "skills" / "codex-pro-dispatch")
+
+        installed = self.run_script(INSTALL)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertIn("Migrated legacy skill link", installed.stdout)
+        self.assertFalse(self.legacy_skill_target.exists())
+        self.assertTrue(self.bin_target.is_symlink())
+        self.assertTrue(self.skill_target.is_symlink())
+
+    def test_unowned_legacy_skill_install_blocks_migration(self) -> None:
+        self.legacy_skill_target.parent.mkdir(parents=True)
+        self.legacy_skill_target.write_text("owned elsewhere\n", encoding="utf-8")
+
+        installed = self.run_script(INSTALL)
+        self.assertNotEqual(installed.returncode, 0)
+        self.assertIn("Refusing to migrate unowned legacy skill path", installed.stderr)
+        self.assertFalse(self.bin_target.exists())
+        self.assertFalse(self.skill_target.exists())
 
 
 if __name__ == "__main__":

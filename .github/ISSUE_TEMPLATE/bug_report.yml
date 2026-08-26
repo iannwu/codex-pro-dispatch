@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible, non-sensitive problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not include conversation IDs, prompts, responses, receipts, credentials, private repository names, or account data. Report security issues privately from the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Codex Pro Dispatch version
+      placeholder: 1.1.0
+    validations:
+      required: true
+  - type: input
+    id: app_version
+    attributes:
+      label: ChatGPT/Codex app version and build
+      placeholder: 26.x.y (build)
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and architecture
+      placeholder: macOS 15.x, Apple silicon
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the behavior and the semantic native capability involved.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide safe, redacted steps and output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private data and this is not a security vulnerability.
+          required: true

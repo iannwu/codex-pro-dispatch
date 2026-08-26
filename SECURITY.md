@@ -1,6 +1,13 @@
 # Security
 
-Codex Pro Dispatch v1.0 is a source-visible Codex skill plus a small local state helper. It does not include a browser, desktop automation engine, persistent service, model proxy, MCP server, or account credential store.
+Codex Pro Dispatch is a source-visible Codex skill, plugin package, and small local state helper. It does not include a browser, desktop automation engine, persistent service, model proxy, MCP server, or account credential store.
+
+## Supported versions
+
+| Version | Security support |
+| --- | --- |
+| 1.1.x | Supported after stable release |
+| 1.0.x and earlier | Upgrade required; public-contract corrections are not backported |
 
 ## Trust boundary
 
@@ -36,15 +43,21 @@ It does not store:
 - assignment prompt text
 - complete response transcripts
 
-Config and state directories use mode `0700`. JSON files and lock files use mode `0600`.
+Config and state directories use mode `0700`. JSON and lock files use mode `0600`.
 
-## Exactly-once behavior
+Diagnostic commands store a category and SHA-256 hash, not the raw reason body. The v1.1 `doctor` check durably redacts raw diagnostic fields left by earlier releases before reporting health.
 
-Immediately before the native send, an assignment is durably moved from `prepared` to `armed`. The `armed` receipt sets `no_resend` before any send can occur, closing the crash window between native submission and read-back recording. An assignment can then be marked submitted only once. A timeout, app restart, retrieval failure, or ambiguous native-control result remains collection-only. The skill must never resend automatically.
+Prompt, native read-back, response, and error bodies may pass through short-lived files during a dispatch. The skill requires one private mode-`0700` temporary directory, mode-`0600` files, minimal output, and cleanup after parent restoration on success or failure. Those transient files and host/terminal logs are outside the receipt-store guarantee.
 
-Completion additionally requires exactly one recorded submission and an exact verified outbound-prompt hash. A valid-looking result marker alone cannot complete an unverified assignment.
+## At-most-once behavior
 
-Completed receipts are immutable. A later or unrelated worker response cannot overwrite an already completed assignment.
+Immediately before a native send attempt, an assignment moves durably from `prepared` to `armed`. The `armed` receipt sets `no_resend` before transport. The workflow then permits at most one native send attempt. A crash before transport may therefore leave an assignment with zero sends and no resend path. A timeout, app restart, retrieval failure, or ambiguous native result remains collection-only.
+
+Completion requires one recorded submission and an exact verified outbound-prompt hash. A valid-looking result marker alone cannot complete an unverified assignment. Completed receipts are immutable.
+
+## Break-glass deletion
+
+`worker reset --force` and `purge --yes --force` can bypass unresolved-assignment guards. They may destroy the stable worker identity or receipts needed for collect-only recovery. Use them only with explicit user authorization to repair corrupt local state, after explaining that the no-resend evidence and recovery guarantee will be lost.
 
 ## External mutations
 
@@ -54,10 +67,12 @@ The parent must not silently substitute its own write and attribute it to Pro.
 
 ## Native control limitations
 
-The exact native Chat/Codex control API is supplied by the host product, not this repository. If those controls are missing or change, the skill fails closed. It must not substitute ChatGPT Web, Classic, CDP, Accessibility, AppleScript, or clipboard automation without a separately reviewed product decision.
+The host product, not this repository, supplies the exact native Chat/Codex control API. The skill checks the required semantic capabilities on every invocation. If any is missing or changed, it fails closed before dispatch. It must not substitute ChatGPT Web, Classic, CDP, Accessibility, AppleScript, or clipboard automation.
 
 Current collection can briefly foreground ChatGPT and move the pointer. No clipboard use is permitted.
 
 ## Reporting a vulnerability
 
-Do not open a public issue containing account data, conversation IDs, private repository names, or assignment receipts. Contact the repository owner privately through the security contact on the GitHub profile.
+Do not open a public issue containing account data, conversation IDs, private repository names, prompts, responses, or assignment receipts.
+
+Use GitHub's **Report a vulnerability** form in this repository's Security tab. Include the affected version, impact, minimal reproduction, and suggested mitigation when available. Redact secrets and private content. The maintainer aims to acknowledge reports within seven days and will coordinate disclosure after a fix or mitigation is available.

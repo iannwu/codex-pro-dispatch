@@ -99,7 +99,7 @@ class CoreTests(unittest.TestCase):
                 paths=self.paths,
             )
 
-    def test_submission_is_recorded_exactly_once(self) -> None:
+    def test_one_verified_submission_cannot_be_recorded_twice(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
         value = cpd.mark_submitted(
@@ -256,7 +256,9 @@ class CoreTests(unittest.TestCase):
             paths=self.paths,
         )
         self.assertEqual(repeated["cooldown_until"], value["cooldown_until"])
-        self.assertEqual(repeated["last_error"], reason)
+        self.assertEqual(repeated["last_error_kind"], "openai-unusual-activity")
+        self.assertEqual(repeated["last_error_sha256"], cpd.sha256_text(reason))
+        self.assertNotIn("last_error", repeated)
         self.assertEqual(
             repeated["openai_request_id"],
             "d2740d8b-5006-4e4d-a78a-820b4abab4f8",
@@ -289,6 +291,32 @@ class CoreTests(unittest.TestCase):
             paths=self.paths,
         )
         self.assertEqual(fresh.assignment_id, "dispatch-after-cooldown-7319")
+
+    def test_legacy_raw_diagnostics_are_redacted_durably(self) -> None:
+        prepared = self.prepare()
+        self.arm(prepared)
+        receipt = json.loads(prepared.receipt_path.read_text(encoding="utf-8"))
+        sentinel = "UNIQUE_PRIVATE_ERROR_BODY_7f4c489e"
+        receipt["last_error"] = sentinel
+        receipt["reason"] = "private abandon explanation"
+        prepared.receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+        visible = cpd.load_assignment(prepared.assignment_id, self.paths)
+        self.assertNotIn("last_error", visible)
+        self.assertNotIn("reason", visible)
+        self.assertIn(sentinel, prepared.receipt_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(cpd.redact_stored_diagnostics(self.paths), 1)
+        stored = prepared.receipt_path.read_text(encoding="utf-8")
+        self.assertNotIn(sentinel, stored)
+        self.assertNotIn("private abandon explanation", stored)
+        migrated = json.loads(stored)
+        self.assertEqual(
+            migrated["last_error_sha256"], cpd.sha256_text(sentinel)
+        )
+        self.assertEqual(
+            migrated["abandon_reason_kind"], "legacy-abandon-reason-redacted"
+        )
 
     def test_unusual_activity_cooldown_calculation_accepts_explicit_time(self) -> None:
         prepared = self.prepare()

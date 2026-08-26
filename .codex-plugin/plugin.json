@@ -1,0 +1,38 @@
+{
+  "name": "codex-pro-dispatch",
+  "version": "1.1.0",
+  "description": "A fail-closed macOS desktop Codex workflow for dispatching one bounded assignment to a dedicated ChatGPT Pro conversation.",
+  "author": {
+    "name": "Iann Wu",
+    "url": "https://github.com/iannwu"
+  },
+  "homepage": "https://github.com/iannwu/codex-pro-dispatch",
+  "repository": "https://github.com/iannwu/codex-pro-dispatch",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "chatgpt",
+    "agent-skill",
+    "delegation",
+    "macos"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Pro Dispatch",
+    "shortDescription": "Safe Codex-to-Pro dispatch",
+    "longDescription": "Desktop-only on the official ChatGPT app for macOS. Dispatch one bounded implementation, review, or research assignment from Codex to a dedicated ChatGPT Pro conversation with an at-most-one native send attempt, collect-only recovery, exact thread identity, and independent result verification.",
+    "developerName": "Iann Wu",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Local state"
+    ],
+    "websiteURL": "https://github.com/iannwu/codex-pro-dispatch",
+    "defaultPrompt": [
+      "Delegate this bounded task to my ChatGPT Pro worker.",
+      "Ask my Pro worker for an independent code review.",
+      "Recover my current Pro dispatch without resending."
+    ],
+    "brandColor": "#111827"
+  }
+}
