@@ -14,7 +14,7 @@ This standard applies in the repository, issue tracker, pull requests, release d
 
 Report conduct concerns privately to the repository owner through the contact options on the maintainer's GitHub profile. Do not use the vulnerability-reporting channel for ordinary interpersonal disputes. Reports will be reviewed in good faith and handled as confidentially as practical.
 
-Project maintainers may edit or remove contributions and may temporarily or permanently restrict participation when behavior violates this standard.
+The repository owner may edit or remove contributions and may temporarily or permanently restrict participation when behavior violates this standard.
 
 ## Attribution
 

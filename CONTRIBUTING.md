@@ -5,6 +5,7 @@ Thanks for helping make Codex Pro Dispatch safer and easier to understand.
 ## Before opening a change
 
 - Read [README.md](README.md), [SECURITY.md](SECURITY.md), and [docs/compatibility.md](docs/compatibility.md).
+- Follow the project [Code of Conduct](CODE_OF_CONDUCT.md).
 - Use a public issue for bugs and proposals that contain no private data.
 - Use GitHub private vulnerability reporting for security-sensitive findings.
 - Keep transport changes inside the official combined ChatGPT/Codex app boundary. Browser automation, Accessibility, AppleScript, CDP, clipboard injection, and title-based thread selection are out of scope unless a separate proposal changes the product contract first.
@@ -31,6 +32,12 @@ bash -n install.sh uninstall.sh
 ```
 
 For native workflow changes, update [docs/acceptance.md](docs/acceptance.md) and attach a redacted receipt from the exact candidate commit. Never include conversation IDs, private repository names, prompts, responses, credentials, or assignment receipts.
+
+## Governance and releases
+
+Codex Pro Dispatch is MIT-licensed and accepts outside contributions through issues and pull requests. Iann Wu is the sole maintainer of this repository and decides what is merged. Only the maintainer publishes official tags and GitHub releases.
+
+A merge does not by itself make a native-workflow change stable. The exact candidate commit must also pass every section of the [live native acceptance matrix](docs/acceptance.md) before the maintainer publishes a stable tag or release.
 
 ## Versioning
 

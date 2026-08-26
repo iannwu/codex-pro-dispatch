@@ -35,6 +35,8 @@ Codex Pro Dispatch provides the safety protocol around that handoff:
 
 It is not a model router or a standalone ChatGPT transport. The repository supplies the workflow, plugin package, and local receipt state machine; the supported Codex host supplies native conversation controls.
 
+For an instruction-level audit, read the complete [skill protocol](skills/codex-pro-dispatch/SKILL.md); its linked references define native recovery and GitHub verification.
+
 ## Who it is for
 
 - **People:** Codex users who want a deliberate, inspectable way to ask a dedicated ChatGPT Pro conversation for a bounded second implementation, review, or research pass.
@@ -237,7 +239,7 @@ bash -n install.sh uninstall.sh
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" skills/codex-pro-dispatch
 ```
 
-The live release gate is [docs/acceptance.md](docs/acceptance.md). Contributions are welcome; start with [CONTRIBUTING.md](CONTRIBUTING.md).
+The live release gate is [docs/acceptance.md](docs/acceptance.md). Contributions are welcome through issues and pull requests; Iann Wu remains the sole merge and release authority. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
