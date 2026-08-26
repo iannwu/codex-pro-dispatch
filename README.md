@@ -2,7 +2,7 @@
 
 Dispatch bounded work from a Codex task to a dedicated ChatGPT Pro conversation inside the official combined ChatGPT/Codex desktop app, then return the validated result to the exact parent task.
 
-> Status: v0.1.1 release candidate. The durable pre-send protocol passed the full live native matrix on 2026-08-24. This patch explicitly records native unusual-activity HTTP 403 responses and enforces a 30-minute cooldown before any fresh assignment.
+> Status: v1.0.0 stable public release. The durable pre-send protocol passed the full live native matrix on 2026-08-24. The unusual-activity HTTP 403 handling is anchored to an observed native failure and covered by deterministic state and CLI regression tests.
 
 ## Why
 
@@ -27,7 +27,7 @@ Codex Pro Dispatch adds the safety contract around that handoff:
 
 ## Deliberately not included
 
-v0.1 does not install or depend on:
+Codex Pro Dispatch does not install or depend on:
 
 - ChatGPT Web or Codex Web GPT
 - ChatGPT Classic
@@ -140,7 +140,7 @@ Private state lives under standard XDG paths:
 
 Set `CODEX_PRO_DISPATCH_HOME` to isolate both paths during tests.
 
-## Known v0.1 limitation
+## Known limitation
 
 Sending and waiting can happen in the background, but collecting a completed response may briefly foreground ChatGPT and move the pointer. The skill should defer collection while the user is active in another app when native focus state is available.
 

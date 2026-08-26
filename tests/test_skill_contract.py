@@ -6,6 +6,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "codex-pro-dispatch" / "SKILL.md"
 OPENAI_YAML = ROOT / "skills" / "codex-pro-dispatch" / "agents" / "openai.yaml"
+VERSION = ROOT / "VERSION"
+PACKAGE_INIT = ROOT / "src" / "codex_pro_dispatch" / "__init__.py"
+README = ROOT / "README.md"
 
 
 class SkillContractTests(unittest.TestCase):
@@ -15,7 +18,18 @@ class SkillContractTests(unittest.TestCase):
         frontmatter = text.split("---\n", 2)[1]
         self.assertIn("name: codex-pro-dispatch", frontmatter)
         self.assertIn("description:", frontmatter)
+        self.assertIn("## Contract", text)
+        self.assertIn("`EXACTLY_ONCE_SAFETY`", text)
         self.assertNotIn("TODO", text)
+
+    def test_public_release_version_is_consistent(self) -> None:
+        version = VERSION.read_text(encoding="utf-8").strip()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        skill = SKILL.read_text(encoding="utf-8")
+        frontmatter = skill.split("---\n", 2)[1]
+        self.assertIn(f'version: "{version}"', frontmatter)
+        self.assertIn(f'__version__ = "{version}"', PACKAGE_INIT.read_text(encoding="utf-8"))
+        self.assertIn(f"v{version} stable public release", README.read_text(encoding="utf-8"))
 
     def test_skill_preserves_exactly_once_and_official_app_boundaries(self) -> None:
         text = SKILL.read_text(encoding="utf-8")

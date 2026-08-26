@@ -1,6 +1,6 @@
 # Security
 
-Codex Pro Dispatch v0.1 is a source-visible Codex skill plus a small local state helper. It does not include a browser, desktop automation engine, persistent service, model proxy, MCP server, or account credential store.
+Codex Pro Dispatch v1.0 is a source-visible Codex skill plus a small local state helper. It does not include a browser, desktop automation engine, persistent service, model proxy, MCP server, or account credential store.
 
 ## Trust boundary
 
