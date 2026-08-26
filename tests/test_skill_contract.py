@@ -29,6 +29,10 @@ class SkillContractTests(unittest.TestCase):
             "Do not call the native send unless arming succeeds",
             "--reason-file '<reason-file>'",
             "without interpolating it into a shell command",
+            "pro-dispatch unusual-activity '<assignment-id>'",
+            "HTTP 403",
+            "30-minute cooldown",
+            "Do not reduce this to a generic `systemError`",
         ]:
             self.assertIn(phrase, text)
         self.assertNotIn("--reason '<exact", text)

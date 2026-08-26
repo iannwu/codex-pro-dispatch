@@ -246,6 +246,59 @@ class CliTests(unittest.TestCase):
         self.assertEqual(abandoned.returncode, 0, abandoned.stderr)
         self.assertEqual(json.loads(abandoned.stdout)["assignment"]["reason"], reason)
 
+    def test_unusual_activity_403_command_reports_and_blocks_fresh_prepare(self) -> None:
+        assignment_id = "dispatch-403-7319"
+        self.configure_and_prepare(assignment_id)
+        reason_path = Path(self.temporary.name) / "403-reason.txt"
+        reason_path.write_text(
+            "Unusual activity has been detected from your device. Try again later.\n",
+            encoding="utf-8",
+        )
+
+        blocked = self.run_cli(
+            "unusual-activity",
+            assignment_id,
+            "--request-id",
+            "d2740d8b-5006-4e4d-a78a-820b4abab4f8",
+            "--reason-file",
+            str(reason_path),
+        )
+        self.assertEqual(blocked.returncode, 0, blocked.stderr)
+        payload = json.loads(blocked.stdout)
+        self.assertEqual(payload["native_http_status"], 403)
+        self.assertTrue(payload["collect_only"])
+        self.assertEqual(payload["cooldown"]["cooldown_seconds"], 1800)
+        self.assertGreater(payload["cooldown"]["retry_after_seconds"], 0)
+
+        abandoned = self.run_cli(
+            "abandon",
+            assignment_id,
+            "--reason",
+            "user authorized a fresh assignment",
+        )
+        self.assertEqual(abandoned.returncode, 0, abandoned.stderr)
+        fresh = self.run_cli(
+            "prepare",
+            "--parent-task-id",
+            "parent-7319",
+            "--assignment-id",
+            "dispatch-fresh-during-cooldown-7319",
+            input_text="Fresh task",
+        )
+        self.assertEqual(fresh.returncode, 6)
+        error = json.loads(fresh.stderr)
+        self.assertEqual(error["error_type"], "CooldownError")
+        self.assertEqual(error["details"]["native_http_status"], 403)
+        self.assertEqual(error["details"]["cooldown_seconds"], 1800)
+
+        status = self.run_cli("status")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        status_payload = json.loads(status.stdout)
+        self.assertIsNone(status_payload["active_assignment"])
+        self.assertEqual(
+            status_payload["active_cooldown"]["assignment_id"], assignment_id
+        )
+
     def test_recover_reports_verified_outbound_state(self) -> None:
         assignment_id = "dispatch-recover-fields-7319"
         prepared = self.configure_and_prepare(assignment_id)

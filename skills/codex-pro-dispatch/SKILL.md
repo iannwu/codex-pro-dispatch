@@ -86,6 +86,16 @@ pro-dispatch indeterminate '<assignment-id>' --reason-file '<reason-file>'
 
 Write the exact error to the temporary UTF-8 reason file without interpolating it into a shell command. Use `--reason-file` for native errors and other untrusted text.
 
+If the native send reports `systemError`, inspect the error payload exposed by the native control. If that payload is unavailable, inspect the official app's local log only around that single send, read-only, for the HTTP status, response detail, and request ID; do not dump broad logs. If diagnostics identify an HTTP 403 whose response reports unusual activity, preserve the exact response in the reason file and record it with the dedicated command:
+
+```bash
+pro-dispatch unusual-activity '<assignment-id>' \
+  --request-id '<OpenAI-request-id>' \
+  --reason-file '<reason-file>'
+```
+
+Report the blocker as an unusual-activity HTTP 403 and include the request ID when available. Do not reduce this to a generic `systemError`. The command keeps the assignment collect-only and starts a fixed 30-minute cooldown. During that cooldown, continue only read-only recovery of the existing assignment; never resend it. Even if the user authorizes abandoning the failed assignment and creating a fresh one, `pro-dispatch prepare` must remain blocked until the cooldown expires. Do not bypass or shorten the cooldown by changing workers.
+
 If the app stops after `arm`—whether before, during, or after the native send—recover collect-only. Never send that assignment again. Only the user may authorize abandoning it and preparing a fresh assignment after bounded inspection of the exact worker.
 
 8. Wait using the worker conversation's native metadata or timestamp. Do not repeatedly reopen the worker while it is generating.
@@ -173,6 +183,7 @@ Useful commands:
 pro-dispatch worker show
 pro-dispatch status
 pro-dispatch recover '<assignment-id>'
+pro-dispatch unusual-activity '<assignment-id>' --request-id '<id>' --reason-file '<reason-file>'
 pro-dispatch abandon '<assignment-id>' --reason-file '<reason-file>'
 pro-dispatch worker reset
 pro-dispatch doctor

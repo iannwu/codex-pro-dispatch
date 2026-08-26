@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import datetime as dt
 import stat
 import tempfile
 import unittest
@@ -212,6 +213,105 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(recovery["no_resend"])
         self.assertEqual(recovery["worker_conversation_id"], self.worker_id)
         self.assertEqual(recovery["parent_task_id"], self.parent_id)
+
+    def test_unusual_activity_403_reports_details_and_enforces_cooldown(self) -> None:
+        prepared = self.prepare()
+        self.arm(prepared)
+        reason = (
+            "HTTP 403: Unusual activity has been detected from your device. "
+            "Try again later."
+        )
+
+        value = cpd.mark_unusual_activity_403(
+            prepared.assignment_id,
+            reason=reason,
+            request_id="d2740d8b-5006-4e4d-a78a-820b4abab4f8",
+            paths=self.paths,
+        )
+
+        self.assertEqual(value["status"], "indeterminate")
+        self.assertEqual(value["native_http_status"], 403)
+        self.assertEqual(value["native_error_kind"], "openai-unusual-activity")
+        self.assertEqual(value["cooldown_seconds"], 1800)
+        self.assertTrue(value["no_resend"])
+        cooldown = cpd.active_cooldown(self.paths)
+        self.assertIsNotNone(cooldown)
+        assert cooldown is not None
+        self.assertEqual(cooldown["assignment_id"], prepared.assignment_id)
+        self.assertGreater(cooldown["retry_after_seconds"], 0)
+        recovery = cpd.recovery_info(prepared.assignment_id, self.paths)
+        self.assertEqual(recovery["native_http_status"], 403)
+        self.assertEqual(
+            recovery["openai_request_id"],
+            "d2740d8b-5006-4e4d-a78a-820b4abab4f8",
+        )
+        self.assertGreater(
+            recovery["active_cooldown"]["retry_after_seconds"], 0
+        )
+
+        repeated = cpd.mark_unusual_activity_403(
+            prepared.assignment_id,
+            reason="a repeated observation must not restart the clock",
+            request_id="different-request-id",
+            paths=self.paths,
+        )
+        self.assertEqual(repeated["cooldown_until"], value["cooldown_until"])
+        self.assertEqual(repeated["last_error"], reason)
+        self.assertEqual(
+            repeated["openai_request_id"],
+            "d2740d8b-5006-4e4d-a78a-820b4abab4f8",
+        )
+
+        cpd.abandon_assignment(
+            prepared.assignment_id,
+            reason="user authorized a fresh assignment",
+            paths=self.paths,
+        )
+        with self.assertRaises(cpd.CooldownError) as raised:
+            cpd.prepare_assignment(
+                "Fresh task",
+                parent_task_id=self.parent_id,
+                assignment_id="dispatch-cooldown-blocked-7319",
+                paths=self.paths,
+            )
+        self.assertEqual(raised.exception.details["native_http_status"], 403)
+        self.assertEqual(raised.exception.details["cooldown_seconds"], 1800)
+
+        receipt = cpd.load_assignment(prepared.assignment_id, self.paths)
+        receipt["cooldown_until"] = "2000-01-01T00:00:00.000Z"
+        prepared.receipt_path.write_text(
+            json.dumps(receipt) + "\n", encoding="utf-8"
+        )
+        fresh = cpd.prepare_assignment(
+            "Fresh task",
+            parent_task_id=self.parent_id,
+            assignment_id="dispatch-after-cooldown-7319",
+            paths=self.paths,
+        )
+        self.assertEqual(fresh.assignment_id, "dispatch-after-cooldown-7319")
+
+    def test_unusual_activity_cooldown_calculation_accepts_explicit_time(self) -> None:
+        prepared = self.prepare()
+        self.arm(prepared)
+        value = cpd.mark_unusual_activity_403(
+            prepared.assignment_id,
+            reason="HTTP 403 unusual activity",
+            paths=self.paths,
+        )
+        started = dt.datetime.fromisoformat(
+            value["cooldown_started_at"].replace("Z", "+00:00")
+        )
+        cooldown = cpd.active_cooldown(
+            self.paths, now=started + dt.timedelta(minutes=29)
+        )
+        self.assertIsNotNone(cooldown)
+        assert cooldown is not None
+        self.assertEqual(cooldown["retry_after_seconds"], 60)
+        self.assertIsNone(
+            cpd.active_cooldown(
+                self.paths, now=started + dt.timedelta(minutes=30)
+            )
+        )
 
     def test_late_readback_verifies_indeterminate_submission_without_resend(self) -> None:
         prepared = self.prepare()
@@ -431,6 +531,12 @@ class CoreTests(unittest.TestCase):
             )
         with self.assertRaises(cpd.StateError):
             cpd.mark_ambiguous(
+                prepared.assignment_id,
+                reason="attempted arming bypass",
+                paths=self.paths,
+            )
+        with self.assertRaises(cpd.StateError):
+            cpd.mark_unusual_activity_403(
                 prepared.assignment_id,
                 reason="attempted arming bypass",
                 paths=self.paths,

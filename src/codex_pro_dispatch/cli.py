@@ -11,6 +11,7 @@ from . import __version__
 from .core import (
     DispatchError,
     abandon_assignment,
+    active_cooldown,
     active_assignment,
     arm_assignment,
     complete_assignment,
@@ -20,6 +21,7 @@ from .core import (
     load_worker,
     mark_ambiguous,
     mark_indeterminate,
+    mark_unusual_activity_403,
     mark_pending,
     mark_submitted,
     prepare_assignment,
@@ -114,6 +116,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     indeterminate.add_argument("assignment_id")
     add_reason_source(indeterminate)
+
+    unusual_activity = subparsers.add_parser(
+        "unusual-activity",
+        help="Record native unusual-activity HTTP 403 and start a 30-minute cooldown",
+    )
+    unusual_activity.add_argument("assignment_id")
+    unusual_activity.add_argument(
+        "--request-id", help="OpenAI request ID from the native HTTP 403 response"
+    )
+    add_reason_source(unusual_activity)
 
     ambiguous = subparsers.add_parser(
         "ambiguous", help="Record an unvalidated response; never resend"
@@ -214,6 +226,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         return {"ok": True, "assignment": value, "collect_only": True}
 
+    if args.command == "unusual-activity":
+        value = mark_unusual_activity_403(
+            args.assignment_id,
+            reason=reason_from_args(args),
+            request_id=args.request_id,
+            paths=paths,
+        )
+        return {
+            "ok": True,
+            "assignment": value,
+            "native_http_status": 403,
+            "cooldown": active_cooldown(paths),
+            "collect_only": True,
+        }
+
     if args.command == "ambiguous":
         value = mark_ambiguous(
             args.assignment_id, reason=reason_from_args(args), paths=paths
@@ -246,6 +273,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "ok": True,
             "worker": worker,
             "active_assignment": active_assignment(paths),
+            "active_cooldown": active_cooldown(paths),
             "assignments": list_assignments(paths),
             "paths": {
                 "config_dir": str(paths.config_dir),
@@ -259,6 +287,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "python": platform.python_version(),
             "worker_configured": False,
             "active_assignment": None,
+            "active_cooldown": None,
         }
         try:
             checks["worker"] = worker_payload(load_worker(paths))
@@ -268,6 +297,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         try:
             current = active_assignment(paths)
             checks["active_assignment"] = current
+            checks["active_cooldown"] = active_cooldown(paths)
         except DispatchError as exc:
             checks["state_error"] = str(exc)
         checks["native_controls"] = "manual acceptance required inside Codex Desktop"

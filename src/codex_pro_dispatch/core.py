@@ -5,6 +5,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -25,6 +26,7 @@ ALL_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 RESULT_MARKER_PREFIX = "[CODEX_PRO_DISPATCH_RESULT assignment_id="
+UNUSUAL_ACTIVITY_COOLDOWN_SECONDS = 30 * 60
 
 
 class DispatchError(RuntimeError):
@@ -51,6 +53,10 @@ class StateError(DispatchError):
 
 class MarkerError(DispatchError):
     exit_code = 5
+
+
+class CooldownError(DispatchError):
+    exit_code = 6
 
 
 @dataclass(frozen=True)
@@ -109,10 +115,28 @@ def default_paths() -> RuntimePaths:
     )
 
 
-def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace(
+def _format_utc(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def utc_now() -> str:
+    return _format_utc(dt.datetime.now(dt.timezone.utc))
+
+
+def _parse_utc(value: str, *, field: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"Invalid UTC timestamp in {field}", details={field: value}
+        ) from exc
+    if parsed.tzinfo is None:
+        raise ConfigurationError(
+            f"UTC timestamp in {field} must include a timezone", details={field: value}
+        )
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def _secure_directory(path: Path) -> None:
@@ -395,6 +419,56 @@ def active_assignment(paths: RuntimePaths | None = None) -> dict[str, Any] | Non
     return active[0] if active else None
 
 
+def active_cooldown(
+    paths: RuntimePaths | None = None,
+    *,
+    now: dt.datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return the latest unexpired native unusual-activity cooldown."""
+    current = now or dt.datetime.now(dt.timezone.utc)
+    if current.tzinfo is None:
+        raise ConfigurationError("Cooldown comparison time must include a timezone")
+    current = current.astimezone(dt.timezone.utc)
+    active: list[tuple[dt.datetime, dict[str, Any]]] = []
+    for value in list_assignments(paths):
+        cooldown_until = value.get("cooldown_until")
+        if not cooldown_until:
+            continue
+        try:
+            parsed_until = _parse_utc(
+                str(cooldown_until), field="cooldown_until"
+            )
+        except DispatchError as exc:
+            raise StateError(
+                "Invalid cooldown receipt; refusing to dispatch",
+                details={
+                    "assignment_id": value.get("assignment_id"),
+                    "error": str(exc),
+                },
+            ) from exc
+        if parsed_until > current:
+            active.append((parsed_until, value))
+
+    if not active:
+        return None
+
+    parsed_until, value = max(active, key=lambda item: item[0])
+    result: dict[str, Any] = {
+        "assignment_id": value.get("assignment_id"),
+        "native_http_status": value.get("native_http_status"),
+        "native_error_kind": value.get("native_error_kind"),
+        "cooldown_seconds": value.get("cooldown_seconds"),
+        "cooldown_started_at": value.get("cooldown_started_at"),
+        "cooldown_until": value.get("cooldown_until"),
+        "retry_after_seconds": max(
+            1, math.ceil((parsed_until - current).total_seconds())
+        ),
+    }
+    if value.get("openai_request_id"):
+        result["openai_request_id"] = value["openai_request_id"]
+    return result
+
+
 def prepare_assignment(
     prompt: str,
     *,
@@ -423,6 +497,12 @@ def prepare_assignment(
                     "assignment_id": existing_active.get("assignment_id"),
                     "status": existing_active.get("status"),
                 },
+            )
+        cooldown = active_cooldown(runtime)
+        if cooldown:
+            raise CooldownError(
+                "Native ChatGPT HTTP 403 cooldown is still active",
+                details=cooldown,
             )
 
         previous: dict[str, Any] | None = None
@@ -651,6 +731,62 @@ def mark_indeterminate(
     )
 
 
+def mark_unusual_activity_403(
+    assignment_id: str,
+    *,
+    reason: str,
+    request_id: str | None = None,
+    paths: RuntimePaths | None = None,
+) -> dict[str, Any]:
+    """Record a native unusual-activity HTTP 403 and start a fixed cooldown."""
+    cleaned = reason.strip()
+    if not cleaned:
+        raise ConfigurationError("HTTP 403 reason is empty")
+    cleaned_request_id: str | None = None
+    if request_id is not None:
+        cleaned_request_id = validate_identifier(
+            request_id.strip(), field="openai_request_id"
+        )
+    runtime = paths or default_paths()
+    allowed = {"armed", "submitted", "pending", "ambiguous", "indeterminate"}
+    with state_lock(runtime):
+        value = load_assignment(assignment_id, runtime)
+        current = str(value["status"])
+        if current not in allowed:
+            raise StateError(
+                f"Cannot record HTTP 403 from assignment state {current}",
+                details={"assignment_id": assignment_id, "status": current},
+            )
+
+        if value.get("native_error_kind") == "openai-unusual-activity":
+            if cleaned_request_id and not value.get("openai_request_id"):
+                value["openai_request_id"] = cleaned_request_id
+                _save_assignment(assignment_id, value, runtime)
+            return value
+
+        started = dt.datetime.now(dt.timezone.utc)
+        value.update(
+            {
+                "status": "indeterminate",
+                "last_error": cleaned,
+                "submission_may_have_occurred": True,
+                "no_resend": True,
+                "native_http_status": 403,
+                "native_error_kind": "openai-unusual-activity",
+                "cooldown_seconds": UNUSUAL_ACTIVITY_COOLDOWN_SECONDS,
+                "cooldown_started_at": _format_utc(started),
+                "cooldown_until": _format_utc(
+                    started
+                    + dt.timedelta(seconds=UNUSUAL_ACTIVITY_COOLDOWN_SECONDS)
+                ),
+            }
+        )
+        if cleaned_request_id:
+            value["openai_request_id"] = cleaned_request_id
+        _save_assignment(assignment_id, value, runtime)
+        return value
+
+
 def mark_ambiguous(
     assignment_id: str,
     *,
@@ -741,7 +877,7 @@ def recovery_info(
     assignment_id: str, paths: RuntimePaths | None = None
 ) -> dict[str, Any]:
     value = load_assignment(assignment_id, paths)
-    return {
+    recovery = {
         "assignment_id": assignment_id,
         "status": value["status"],
         "worker_conversation_id": value["worker_conversation_id"],
@@ -762,6 +898,20 @@ def recovery_info(
         "continuation_of": value.get("continuation_of"),
         "last_error": value.get("last_error"),
     }
+    for field in (
+        "native_http_status",
+        "native_error_kind",
+        "openai_request_id",
+        "cooldown_seconds",
+        "cooldown_started_at",
+        "cooldown_until",
+    ):
+        if value.get(field) is not None:
+            recovery[field] = value[field]
+    cooldown = active_cooldown(paths)
+    if cooldown and cooldown.get("assignment_id") == assignment_id:
+        recovery["active_cooldown"] = cooldown
+    return recovery
 
 
 def reset_worker(

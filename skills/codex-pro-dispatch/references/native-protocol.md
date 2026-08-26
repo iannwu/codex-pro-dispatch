@@ -38,6 +38,8 @@ Do not reopen the worker repeatedly during generation. Do not retry a message be
 
 Native send acknowledgement may become visible through read-back after a delay. If the exact user message is temporarily absent, record `indeterminate`, wait, and recover without resending. Absence in an immediate read is not proof that the send failed.
 
+If the native send reports `systemError`, first inspect any error payload exposed by that control. If no payload is exposed, inspect the official app log read-only around that one send for the HTTP status, response detail, and request ID. Do not emit unrelated log content. An unusual-activity HTTP 403 must be recorded with `pro-dispatch unusual-activity`, not collapsed into a generic transport error.
+
 ## Collection
 
 1. Open the worker by exact conversation ID.
@@ -72,6 +74,7 @@ The clipboard must remain unchanged.
 | Read-back file equals expected prompt plus one trailing newline | Re-extract the same native message without the file artifact and verify again; never resend |
 | Read-back differs by any other byte | Keep the helper's `indeterminate` state; do not retry verification or resend |
 | Send may have happened | `pro-dispatch indeterminate`; never resend |
+| Native diagnostics show an unusual-activity HTTP 403 | Preserve the exact response and request ID with `pro-dispatch unusual-activity`; report HTTP 403 explicitly, remain collect-only, and enforce the 30-minute cooldown before any fresh assignment |
 | Worker unchanged | Keep waiting within the bounded timeout |
 | Thread not loaded | Open exact worker ID and wait |
 | Wrong thread loaded | Stop and reject collection |
