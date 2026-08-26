@@ -41,9 +41,9 @@ The helper's deterministic state logic is tested on macOS and Linux, but Linux C
 
 | Skill version | App version | App build | macOS | Native matrix | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| 1.1.0-rc | 26.818.61809 | 7019 | 26.6.2 | Pending | Must be recorded before the v1.1.0 stable tag |
+| 1.1.0 | 26.820.60940 | 7119 | 26.6.2 | Passed | [Redacted release receipt](releases/v1.1.0-acceptance.md) |
 
-Earlier development runs are not treated as release evidence because they were not executed against the exact v1.1.0 release candidate with a complete build receipt.
+Earlier development runs are not treated as release evidence because they were not executed against the v1.1.0 release candidate with a complete build receipt.
 
 ## Release evidence policy
 
