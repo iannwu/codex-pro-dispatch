@@ -19,11 +19,17 @@ All notable changes to Codex Pro Dispatch are documented here.
 - Require explicit invocation until the native workflow has a stable public compatibility record.
 - Reframe the landing page around requirements, honest limitations, safety, and agent/human quick starts.
 - Document the macOS desktop-only boundary, connector requirements, remote-code visibility, and common first-run failures.
+- Document optional OpenAI request IDs in the receipt data inventory.
 
 ### Security
 
 - Document break-glass force deletion and the recovery guarantees it destroys.
 - Require private mode-`0700` temporary storage, mode-`0600` files, and cleanup on all exits.
+- Preserve source-install idempotency when a custom `CODEX_HOME` resolves to the agents skill directory.
+
+### Fixed
+
+- Keep the desktop-only health contract test portable across macOS and Linux CI.
 
 ## [1.0.0] - 2026-08-26
 

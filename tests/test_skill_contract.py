@@ -70,6 +70,7 @@ class SkillContractTests(unittest.TestCase):
             "write-capable GitHub connector",
             "Local and uncommitted files are invisible to the worker",
             "Common first-run problems",
+            "OpenAI request ID when one is available",
         ]:
             self.assertIn(phrase, text)
 

@@ -25,7 +25,21 @@ if sys.version_info < (3, 9):
     raise SystemExit(1)
 PY
 
-if [[ -e "$LEGACY_SKILL_TARGET" || -L "$LEGACY_SKILL_TARGET" ]]; then
+canonical_target() {
+  python3 - "$1" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1]).expanduser()
+print(path.parent.resolve(strict=False) / path.name)
+PY
+}
+
+SKILL_TARGET_CANONICAL="$(canonical_target "$SKILL_TARGET")"
+LEGACY_SKILL_TARGET_CANONICAL="$(canonical_target "$LEGACY_SKILL_TARGET")"
+
+if [[ "$LEGACY_SKILL_TARGET_CANONICAL" != "$SKILL_TARGET_CANONICAL" ]] && \
+  [[ -e "$LEGACY_SKILL_TARGET" || -L "$LEGACY_SKILL_TARGET" ]]; then
   if [[ -L "$LEGACY_SKILL_TARGET" && "$(readlink "$LEGACY_SKILL_TARGET")" == "$EXPECTED_SKILL" ]]; then
     MIGRATE_LEGACY=true
   else

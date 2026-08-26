@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "bin" / "pro-dispatch"
+BUNDLED_CLI = ROOT / "skills" / "codex-pro-dispatch" / "scripts" / "pro-dispatch"
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+sys.path.insert(0, str(ROOT / "src"))
+
+from codex_pro_dispatch import cli as cli_module
+from codex_pro_dispatch import sha256_text
 
 
 class CliTests(unittest.TestCase):
@@ -65,6 +73,17 @@ class CliTests(unittest.TestCase):
     def test_version(self) -> None:
         completed = self.run_cli("--version")
         self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout.strip(), f"pro-dispatch {VERSION}")
+
+    def test_bundled_plugin_helper_runs_from_the_source_layout(self) -> None:
+        completed = subprocess.run(
+            [str(BUNDLED_CLI), "--version"],
+            text=True,
+            capture_output=True,
+            env=self.env,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), f"pro-dispatch {VERSION}")
 
     def test_missing_worker_is_structured_error(self) -> None:
@@ -378,6 +397,39 @@ class CliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertIn("state_error", payload)
 
+    def test_doctor_reports_and_persists_legacy_diagnostic_redaction(self) -> None:
+        assignment_id = "dispatch-doctor-redaction-7319"
+        self.configure_and_prepare(assignment_id)
+        receipt_path = (
+            Path(self.temporary.name)
+            / "state"
+            / "assignments"
+            / f"{assignment_id}.json"
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        sentinel = "LEGACY_PRIVATE_DIAGNOSTIC_7319"
+        receipt["last_error"] = sentinel
+        receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+        status = self.run_cli("status")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        status_payload = json.loads(status.stdout)
+        visible = status_payload["assignments"][0]
+        self.assertNotIn("last_error", visible)
+        self.assertEqual(visible["last_error_sha256"], sha256_text(sentinel))
+        self.assertIn(sentinel, receipt_path.read_text(encoding="utf-8"))
+
+        doctor = self.run_cli("doctor")
+        self.assertEqual(doctor.returncode, 1, doctor.stderr)
+        doctor_payload = json.loads(doctor.stdout)
+        self.assertEqual(doctor_payload["redacted_diagnostic_receipts"], 1)
+        stored = receipt_path.read_text(encoding="utf-8")
+        self.assertNotIn(sentinel, stored)
+        self.assertEqual(
+            json.loads(stored)["last_error_sha256"],
+            sha256_text(sentinel),
+        )
+
     def test_doctor_fails_until_native_controls_are_confirmed(self) -> None:
         worker = self.run_cli(
             "worker",
@@ -392,16 +444,50 @@ class CliTests(unittest.TestCase):
         unconfirmed = self.run_cli("doctor")
         self.assertEqual(unconfirmed.returncode, 1)
         unconfirmed_payload = json.loads(unconfirmed.stdout)
-        self.assertTrue(unconfirmed_payload["local_ok"])
+        expected_local_ok = platform.system() == "Darwin"
+        self.assertEqual(unconfirmed_payload["local_ok"], expected_local_ok)
         self.assertFalse(unconfirmed_payload["native_controls_confirmed"])
         self.assertFalse(unconfirmed_payload["ok"])
 
         confirmed = self.run_cli("doctor", "--native-controls-confirmed")
-        self.assertEqual(confirmed.returncode, 0, confirmed.stderr)
+        self.assertEqual(confirmed.returncode, 0 if expected_local_ok else 1, confirmed.stderr)
         confirmed_payload = json.loads(confirmed.stdout)
-        self.assertTrue(confirmed_payload["local_ok"])
+        self.assertEqual(confirmed_payload["local_ok"], expected_local_ok)
         self.assertTrue(confirmed_payload["native_controls_confirmed"])
-        self.assertTrue(confirmed_payload["ok"])
+        self.assertEqual(confirmed_payload["ok"], expected_local_ok)
+
+    def test_doctor_fails_closed_on_a_non_darwin_host(self) -> None:
+        worker = self.run_cli(
+            "worker",
+            "set",
+            "--conversation-id",
+            "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e",
+            "--confirm-pro",
+            "--native-controls-confirmed",
+        )
+        self.assertEqual(worker.returncode, 0, worker.stderr)
+
+        emitted: list[dict[str, object]] = []
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CODEX_PRO_DISPATCH_HOME": self.temporary.name},
+            ),
+            mock.patch.object(cli_module.platform, "system", return_value="Linux"),
+            mock.patch.object(
+                cli_module,
+                "emit",
+                side_effect=lambda payload, **_: emitted.append(payload),
+            ),
+        ):
+            exit_code = cli_module.main(["doctor", "--native-controls-confirmed"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(len(emitted), 1)
+        payload = emitted[0]
+        self.assertFalse(payload["local_ok"])
+        self.assertTrue(payload["native_controls_confirmed"])
+        self.assertFalse(payload["ok"])
 
 
 if __name__ == "__main__":

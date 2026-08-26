@@ -68,6 +68,16 @@ class InstallScriptTests(unittest.TestCase):
         self.assertFalse(self.bin_target.exists())
         self.assertFalse(self.skill_target.exists())
 
+    def test_install_is_idempotent_when_codex_home_matches_agents_home(self) -> None:
+        self.env["CODEX_HOME"] = f"{self.home / '.agents'}/"
+
+        first = self.run_script(INSTALL)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.run_script(INSTALL)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertTrue(self.skill_target.is_symlink())
+        self.assertEqual(self.skill_target.readlink(), ROOT / "skills" / "codex-pro-dispatch")
+
     def test_unowned_skill_target_prevents_any_link_removal(self) -> None:
         installed = self.run_script(INSTALL)
         self.assertEqual(installed.returncode, 0, installed.stderr)

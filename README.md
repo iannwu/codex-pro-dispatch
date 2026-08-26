@@ -212,7 +212,7 @@ The skill opens the saved worker ID, verifies any existing outbound message, col
 
 ## Safety and privacy
 
-The helper stores only worker identity, parent and assignment IDs, timestamps, state transitions, markers, and prompt/response hashes. Config directories use mode `0700`; receipt and lock files use `0600`.
+The helper stores only worker identity, parent and assignment IDs, timestamps, state transitions, markers, prompt/response hashes, and an OpenAI request ID when one is available for unusual-activity HTTP 403 recovery. Config directories use mode `0700`; receipt and lock files use `0600`.
 
 The helper does not retain prompt bodies, response transcripts, raw diagnostic bodies, credentials, cookies, browser profiles, or repository source. Diagnostic commands store only a category and SHA-256 hash. `doctor` durably redacts raw diagnostic bodies left by releases before v1.1. During a dispatch, the skill may need short-lived prompt, read-back, response, and error files. It requires a private temporary directory, restrictive permissions, minimal output, and cleanup after parent restoration. Host and terminal logs remain outside the helper's storage guarantee.
 
@@ -222,7 +222,15 @@ Read [SECURITY.md](SECURITY.md) before using the skill with private repositories
 
 ## Development
 
+The runtime and unit tests use only the Python standard library. Contributors
+need Python 3.9+, Bash, and a current Codex installation. OpenAI's optional
+skill validator also imports PyYAML; install it in a virtual environment before
+running the final command below:
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install PyYAML
 python3 -m unittest discover -s tests -v
 python3 -m py_compile bin/pro-dispatch skills/codex-pro-dispatch/scripts/pro-dispatch src/codex_pro_dispatch/*.py
 bash -n install.sh uninstall.sh

@@ -32,6 +32,7 @@ The helper stores only:
 - timestamps and state transitions
 - prompt and response hashes
 - exact marker strings
+- OpenAI request ID when available for unusual-activity HTTP 403 recovery
 
 It does not store:
 

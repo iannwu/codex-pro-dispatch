@@ -318,6 +318,49 @@ class CoreTests(unittest.TestCase):
             migrated["abandon_reason_kind"], "legacy-abandon-reason-redacted"
         )
 
+    def test_empty_legacy_diagnostics_are_removed_without_fabricated_metadata(self) -> None:
+        prepared = self.prepare()
+        receipt = json.loads(prepared.receipt_path.read_text(encoding="utf-8"))
+        receipt["last_error"] = " \n "
+        receipt["reason"] = ""
+        prepared.receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+        self.assertEqual(cpd.redact_stored_diagnostics(self.paths), 1)
+        migrated = json.loads(prepared.receipt_path.read_text(encoding="utf-8"))
+        for field in (
+            "last_error",
+            "last_error_kind",
+            "last_error_sha256",
+            "reason",
+            "abandon_reason_kind",
+            "abandon_reason_sha256",
+        ):
+            self.assertNotIn(field, migrated)
+
+    def test_legacy_redaction_preserves_existing_structured_metadata(self) -> None:
+        prepared = self.prepare()
+        receipt = json.loads(prepared.receipt_path.read_text(encoding="utf-8"))
+        receipt.update(
+            {
+                "last_error": "legacy raw error",
+                "last_error_kind": "specific-native-error",
+                "last_error_sha256": "existing-error-hash",
+                "reason": "legacy raw abandon reason",
+                "abandon_reason_kind": "specific-user-reason",
+                "abandon_reason_sha256": "existing-reason-hash",
+            }
+        )
+        prepared.receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+
+        self.assertEqual(cpd.redact_stored_diagnostics(self.paths), 1)
+        migrated = json.loads(prepared.receipt_path.read_text(encoding="utf-8"))
+        self.assertNotIn("last_error", migrated)
+        self.assertNotIn("reason", migrated)
+        self.assertEqual(migrated["last_error_kind"], "specific-native-error")
+        self.assertEqual(migrated["last_error_sha256"], "existing-error-hash")
+        self.assertEqual(migrated["abandon_reason_kind"], "specific-user-reason")
+        self.assertEqual(migrated["abandon_reason_sha256"], "existing-reason-hash")
+
     def test_unusual_activity_cooldown_calculation_accepts_explicit_time(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
