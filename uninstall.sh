@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODEX_HOME="${CODEX_HOME:-${HOME}/.codex}"
 BIN_TARGET="${HOME}/.local/bin/pro-dispatch"
-SKILL_TARGET="${CODEX_HOME}/skills/codex-pro-dispatch"
+SKILL_TARGET="${HOME}/.agents/skills/codex-pro-dispatch"
+LEGACY_SKILL_TARGET="${CODEX_HOME}/skills/codex-pro-dispatch"
 EXPECTED_BIN="${ROOT}/bin/pro-dispatch"
 EXPECTED_SKILL="${ROOT}/skills/codex-pro-dispatch"
 PURGE_STATE=false
@@ -43,6 +44,7 @@ remove_owned_link() {
 # an ownership failure from leaving a partially uninstalled installation.
 verify_owned_link "$BIN_TARGET" "$EXPECTED_BIN"
 verify_owned_link "$SKILL_TARGET" "$EXPECTED_SKILL"
+verify_owned_link "$LEGACY_SKILL_TARGET" "$EXPECTED_SKILL"
 
 if $PURGE_STATE; then
   "$EXPECTED_BIN" purge --yes
@@ -50,6 +52,7 @@ fi
 
 remove_owned_link "$BIN_TARGET" "$EXPECTED_BIN"
 remove_owned_link "$SKILL_TARGET" "$EXPECTED_SKILL"
+remove_owned_link "$LEGACY_SKILL_TARGET" "$EXPECTED_SKILL"
 
 echo "Checkout retained at $ROOT"
 if ! $PURGE_STATE; then

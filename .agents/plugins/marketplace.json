@@ -1,0 +1,20 @@
+{
+  "name": "codex-pro-dispatch",
+  "interface": {
+    "displayName": "Codex Pro Dispatch"
+  },
+  "plugins": [
+    {
+      "name": "codex-pro-dispatch",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

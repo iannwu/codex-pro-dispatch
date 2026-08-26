@@ -1,10 +1,21 @@
 # GitHub verification contract
 
-Read this reference when Chat Pro reports a GitHub mutation.
+Read this reference before authorizing a GitHub mutation and again when Chat Pro reports one.
+
+## Before dispatch
+
+Repository-write mode requires all of the following:
+
+- the dedicated Pro worker exposes a GitHub connector or tool with the required write action for the exact repository
+- the relevant starting commit and branch are remotely visible; local-only and uncommitted code is not implicitly shared
+- organization, SSO, branch-protection, and repository policies permit the proposed disposable branch action
+- the parent has independent remote read access for verification
+
+Connector presence does not prove write permission. If the worker has read-only access, keep the assignment prompt-only. Test new connector authorization on a disposable unprotected branch, never a protected ref.
 
 ## Worker responsibility
 
-The Chat Pro worker performs only the repository actions authorized by the assignment, using the GitHub connector available inside its own Chat conversation.
+The Chat Pro worker performs only the repository actions authorized by the assignment, using the GitHub connector available inside its own Chat conversation. Codex Pro Dispatch does not install, authenticate, or broaden that connector.
 
 The worker should return concrete remote evidence, normally:
 

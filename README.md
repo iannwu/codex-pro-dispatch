@@ -1,168 +1,246 @@
 # Codex Pro Dispatch
 
-Dispatch bounded work from a Codex task to a dedicated ChatGPT Pro conversation inside the official combined ChatGPT/Codex desktop app, then return the validated result to the exact parent task.
+[![CI](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/iannwu/codex-pro-dispatch)](https://github.com/iannwu/codex-pro-dispatch/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform: macOS](https://img.shields.io/badge/platform-macOS-black.svg)](#requirements)
 
-> Status: v1.0.0 stable public release. The durable pre-send protocol passed the full live native matrix on 2026-08-24. The unusual-activity HTTP 403 handling is anchored to an observed native failure and covered by deterministic state and CLI regression tests.
+An independent macOS safety wrapper for a supported Codex desktop workflow. It hands one bounded implementation, review, or research job to a dedicated ChatGPT Pro conversation with at most one native send attempt, collect-only recovery, and independent verification of the result.
 
-## Why
+**Desktop-only:** the dispatch workflow runs only inside the official ChatGPT desktop app for macOS with Codex. It does not run from ChatGPT on the web, Codex CLI alone, an IDE extension, Windows, or Linux. The Codex CLI is used only to install and manage the plugin.
 
-The official desktop app already contains both sides of the workflow:
+**Version: v1.1.0 release candidate.** The local state helper and plugin package are tested. Public-stable status is intentionally withheld until this exact release candidate passes the [live native acceptance matrix](docs/acceptance.md).
+
+This project is independent and unofficial. It is not affiliated with, endorsed by, or maintained by OpenAI.
+
+## What it does
 
 ```text
-Codex Sol orchestrator
-    -> dedicated ChatGPT Pro worker
-    -> GitHub branch or analysis result
-    -> Codex Sol verification and review
+Codex parent task
+    -> one bounded, marked assignment
+    -> dedicated ChatGPT Pro conversation
+    -> marked response or authorized GitHub commit
+    -> parent-side validation and exact task restoration
 ```
 
-Codex Pro Dispatch adds the safety contract around that handoff:
+Codex Pro Dispatch provides the safety protocol around that handoff:
 
-- a stable worker conversation ID
-- exactly-once submission
-- assignment and result markers
-- recovery without resending
-- same-worker continuation
-- exact parent-task restoration
-- independent GitHub verification
+- stable worker and parent-task identity
+- at-most-one native send attempt per assignment
+- exact native read-back verification
+- no automatic resend after ambiguity, timeout, or restart
+- result markers and stale-response rejection
+- same-worker follow-ups with new assignment IDs
+- independent verification of worker-reported repository changes
 
-## Deliberately not included
+It is not a model router or a standalone ChatGPT transport. The repository supplies the workflow, plugin package, and local receipt state machine; the supported Codex host supplies native conversation controls.
 
-Codex Pro Dispatch does not install or depend on:
+For an instruction-level audit, read the complete [skill protocol](skills/codex-pro-dispatch/SKILL.md); its linked references define native recovery and GitHub verification.
 
-- ChatGPT Web or Codex Web GPT
-- ChatGPT Classic
-- a Codex model-provider or model-selector integration
-- CDP, AppleScript, Accessibility automation, or clipboard injection
-- Electron, a browser runtime, or a persistent daemon
-- MCP, tunnels, local shell access, or filesystem access for Chat Pro
+## Who it is for
 
-The host Codex build must expose the native Chat and Codex conversation controls used by the official combined app.
+- **People:** Codex users who want a deliberate, inspectable way to ask a dedicated ChatGPT Pro conversation for a bounded second implementation, review, or research pass.
+- **Agents:** Codex tasks that can prove the required native capabilities, preserve exact thread identity, and fail closed instead of guessing or resending.
 
-## Installation
+If you only want another Codex subagent, use Codex's native subagent tools. If your host cannot expose the native Chat/Codex controls below, this skill is not compatible.
 
-Clone the source so every instruction and helper remains inspectable:
+## Requirements
+
+| Requirement | Supported contract |
+| --- | --- |
+| OS | macOS |
+| Host | Official ChatGPT desktop app with Codex; desktop workflow only |
+| Installer | A current Codex CLI that exposes `codex plugin marketplace` and `codex plugin add` |
+| Account | ChatGPT account or workspace where the user can visibly select Pro |
+| Runtime | Python 3.9 or newer; no third-party Python packages |
+| Invocation | Explicit `$codex-pro-dispatch` invocation |
+| Worker | One dedicated Chat conversation with Pro visibly selected |
+| Native capabilities | Current parent-task ID; list/resolve chats; exact-ID send; exact user-message read-back; completed-response read; exact-ID open/restore |
+| Connector | None for prompt-only review or research; repository writes require a write-capable GitHub connector/tool in the Pro worker |
+| Verification | Repository-write tasks also require parent-side access to fetch and inspect the reported remote commit |
+
+Every invocation checks those six semantic capabilities before configuring a worker or preparing an assignment. Exact tool names may change between app builds. Missing capability means stop—never a fallback to browser, Accessibility, AppleScript, CDP, or clipboard automation.
+
+The native Chat/Codex controls are not a GitHub connector. This plugin supplies neither one: the desktop host supplies the conversation controls, while external-service connectors are installed and authorized separately by the user or workspace.
+
+Before installing, these commands should succeed:
+
+```bash
+codex --version
+codex plugin --help
+python3 --version  # must be 3.9+
+git --version
+```
+
+### Compatibility status
+
+| Surface | Status |
+| --- | --- |
+| Local state machine | Tested on macOS and Linux in CI |
+| Plugin manifest | Validated against the current Codex plugin schema |
+| Manual skill discovery | `$HOME/.agents/skills` |
+| Native end-to-end workflow | Previously exercised during development; exact v1.1.0 release-candidate matrix pending |
+| Current maintainer app build | `26.818.61809` (`7019`) on macOS; recorded for the pending matrix, not yet claimed as passed |
+
+See [docs/compatibility.md](docs/compatibility.md) for the exact capability contract and tested-build policy.
+
+## Install
+
+OpenAI's current guidance packages reusable skills as plugins. This repository includes the plugin manifest and marketplace catalog needed for a normal Codex install. See the official [skills](https://developers.openai.com/codex/skills) and [plugin packaging](https://developers.openai.com/plugins/build/plugins) documentation.
+
+The v1.1.0 release candidate is not yet published because the exact native matrix is pending. Do not install it from a mutable branch or a nonexistent stable tag. Once the gate passes, the release instructions will use the immutable `v1.1.0` tag:
+
+```bash
+codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.1.0
+codex plugin add codex-pro-dispatch@codex-pro-dispatch
+```
+
+Restart Codex if the plugin does not appear, then invoke `$codex-pro-dispatch` explicitly.
+
+To remove the plugin while retaining private receipts:
+
+```bash
+codex plugin remove codex-pro-dispatch@codex-pro-dispatch
+codex plugin marketplace remove codex-pro-dispatch
+```
+
+For source development or audit-first installation, clone and pin the same immutable tag, then use the transparent symlink installer:
 
 ```bash
 git clone https://github.com/iannwu/codex-pro-dispatch.git
 cd codex-pro-dispatch
+git checkout v1.1.0
 ./install.sh
 ```
 
-The installer creates only two symlinks:
+The source installer creates two visible symlinks:
 
 ```text
 ~/.local/bin/pro-dispatch
-${CODEX_HOME:-~/.codex}/skills/codex-pro-dispatch
+~/.agents/skills/codex-pro-dispatch
 ```
 
-It does not use `sudo`, modify Codex model routing, install a service, or launch at login.
-
-The links point to this checkout by absolute path. Keep the checkout in place while the skill is installed. Before moving or deleting it, uninstall first:
-
-```bash
-./uninstall.sh
-```
-
-To also erase the private worker configuration and assignment receipts:
-
-```bash
-./uninstall.sh --purge-state
-```
-
-Purging state is irreversible and is refused while an assignment is unresolved.
-
-Ensure `~/.local/bin` is on your `PATH`:
+It does not use `sudo`, install dependencies, start a daemon, alter model routing, or launch at login. Keep the checkout in place while installed. Add `~/.local/bin` to `PATH` if needed:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## One-time setup
+Then restart Codex if the skill does not appear and invoke `$codex-pro-dispatch` explicitly.
 
-In Codex, invoke `$codex-pro-dispatch` and ask it to set up a worker.
+When upgrading an installation made before v1.1 from the same checkout, `install.sh` safely migrates its owned legacy `$CODEX_HOME/skills/codex-pro-dispatch` symlink. It refuses regular files and symlinks owned by another checkout.
 
-The skill will ask you to:
+To uninstall a source installation while retaining private receipts:
 
-1. Create or select one dedicated Chat conversation in the official app.
-2. Visibly select Pro in that conversation.
-3. Let Codex save the conversation's stable ID.
-
-The model selector is not exposed by the native control interface, so the Pro selection is stored as user-confirmed rather than machine-verified.
-
-## Normal use
-
-Tell the Codex parent task something like:
-
-```text
-Use $codex-pro-dispatch to send this implementation assignment to my ChatGPT Pro worker. Have Pro commit only to the requested branch, then independently verify the result and run the local tests.
+```bash
+./uninstall.sh
 ```
 
-The skill prepares a marked assignment, submits it once, waits for the worker conversation to update, validates the marked response, and restores the exact parent task.
+To also purge worker configuration and receipts:
+
+```bash
+./uninstall.sh --purge-state
+```
+
+Purge is irreversible and is refused while an assignment is unresolved.
+
+## First run
+
+In a Codex task, say:
+
+```text
+Use $codex-pro-dispatch to check compatibility and set up my dedicated ChatGPT Pro worker.
+```
+
+The skill will:
+
+1. Verify all six native host capabilities.
+2. Ask you to create or choose one dedicated Chat conversation.
+3. Ask you to visibly select Pro.
+4. Save that conversation's stable ID and run the local health check.
+
+The native interface does not machine-verify the selected model, so Pro selection is stored honestly as user-confirmed.
+
+## GitHub connector for repository work
+
+You do **not** need a connector when the Pro worker only reviews or researches the prompt you send it.
+
+If you want the worker to create a branch or commit, all of the following must be true:
+
+1. A GitHub connector or tool is enabled for the dedicated Pro worker and authorized for the exact repository.
+2. That connector exposes the required write action. Read-only repository access is not enough; connector capabilities and workspace policy can vary.
+3. The relevant repository and starting commit exist on GitHub. The Pro conversation cannot see uncommitted files, local-only branches, or your Codex worktree unless you explicitly provide that content through an approved tool.
+4. The Codex parent can independently fetch and inspect the returned commit, using local Git credentials or another read path. Worker claims are never accepted without verification.
+5. The first write test uses a disposable, unprotected branch. Never use the connector's first test against `main`, another protected branch, or a private repository containing sensitive material.
+
+This plugin does not install, authenticate, or broaden permissions for the GitHub connector. Repository owners and workspace administrators may need to approve the connector, organization SSO, and repository access separately.
+
+## Use it
+
+```text
+Use $codex-pro-dispatch to send this bounded implementation to my ChatGPT Pro worker. Ask it to commit only to the named branch, then independently verify the commit and tests here.
+```
+
+The workflow arms a durable receipt immediately before transport and then permits at most one native send attempt. It verifies delivery only through exact native read-back.
+
+That distinction matters: if the app stops after arming but before transport, the assignment may have zero sends and still become permanently collect-only. This favors duplicate prevention over guaranteed delivery. Start a fresh assignment only after bounded inspection and explicit user authorization.
+
+## Common first-run problems
+
+| Symptom | Likely cause and fix |
+| --- | --- |
+| `codex plugin` is unknown | Update the Codex CLI. Plugin installation requires a build with plugin marketplace support. |
+| Plugin installed but `$codex-pro-dispatch` is missing | Restart the ChatGPT desktop app, confirm the plugin is enabled, then invoke the skill explicitly in a new Codex task. |
+| Compatibility check reports missing native controls | This app build or task surface cannot run the workflow. Use the supported macOS desktop surface; there is no web, CLI-only, IDE, or UI-automation fallback. |
+| Pro cannot be selected | The account or workspace does not currently expose the required Pro setting. The helper cannot select or verify it for you. |
+| Worker cannot see the repository or latest code | Grant the GitHub connector access to that repository and push the required starting commit. Local and uncommitted files are invisible to the worker. |
+| Worker can read GitHub but cannot commit | The connector is read-only, lacks repository permission, or is blocked by organization/SSO policy. Use prompt-only review mode or obtain write access before retrying on a new assignment. |
+| `python3` is missing or older than 3.9 | Install a supported Python and make sure `python3` resolves to it before invoking the skill. |
+| Source install works but `pro-dispatch` is not found | Add `$HOME/.local/bin` to `PATH`, or let the skill use its bundled helper by absolute path. |
+| A new dispatch says another assignment is active | Recover or explicitly abandon the existing assignment. Do not delete its receipt or resend it. |
+| Dispatch is `armed`, `indeterminate`, or timed out | Run recovery against the saved worker. Never resend the same assignment; it may already have been delivered. |
+
+For support requests, include redacted versions and capability details listed in [SUPPORT.md](SUPPORT.md), never prompts, conversation IDs, or assignment receipts.
 
 ## Recovery
 
-A timeout or `thread not loaded` result never authorizes a resend.
-
-The skill reopens the exact saved worker conversation ID and collects the existing answer:
+A timeout, restart, stale UI, or `thread not loaded` result never authorizes a resend. Recover the existing assignment:
 
 ```bash
 pro-dispatch recover '<assignment-id>'
 ```
 
-If collection remains ambiguous, the assignment stays unresolved until it is explicitly completed or abandoned.
+The skill opens the saved worker ID, verifies any existing outbound message, collects only a matching completed response, and restores the exact parent task. An unusual-activity HTTP 403 remains collect-only and starts a fixed 30-minute cooldown before any fresh assignment.
 
-When native diagnostics identify an unusual-activity HTTP 403, the skill records the exact error and OpenAI request ID, remains collect-only, and starts a fixed 30-minute cooldown. Abandoning the old receipt does not bypass the cooldown, and no automatic retry occurs.
+## Safety and privacy
 
-## CLI
+The helper stores only worker identity, parent and assignment IDs, timestamps, state transitions, markers, prompt/response hashes, and an OpenAI request ID when one is available for unusual-activity HTTP 403 recovery. Config directories use mode `0700`; receipt and lock files use `0600`.
 
-The CLI manages private local state and deterministic validation. It does not control the ChatGPT UI itself.
+The helper does not retain prompt bodies, response transcripts, raw diagnostic bodies, credentials, cookies, browser profiles, or repository source. Diagnostic commands store only a category and SHA-256 hash. `doctor` durably redacts raw diagnostic bodies left by releases before v1.1. During a dispatch, the skill may need short-lived prompt, read-back, response, and error files. It requires a private temporary directory, restrictive permissions, minimal output, and cleanup after parent restoration. Host and terminal logs remain outside the helper's storage guarantee.
 
-```bash
-pro-dispatch worker set --conversation-id '<id>' --confirm-pro
-pro-dispatch worker show
-pro-dispatch prepare --parent-task-id '<id>' --prompt-file assignment.md
-pro-dispatch arm '<assignment-id>'
-pro-dispatch submitted '<assignment-id>' --sent-prompt-file native-read-back.txt
-pro-dispatch indeterminate '<assignment-id>' --reason-file reason.txt
-pro-dispatch unusual-activity '<assignment-id>' --request-id '<id>' --reason-file reason.txt
-pro-dispatch complete '<assignment-id>' --response-file response.txt
-pro-dispatch recover '<assignment-id>'
-pro-dispatch status
-pro-dispatch doctor
-```
+`worker reset --force` and `purge --yes --force` are break-glass commands. They can erase recovery identity or unresolved receipts and therefore destroy the workflow's no-resend evidence. They are not part of normal operation.
 
-Private state lives under standard XDG paths:
+Read [SECURITY.md](SECURITY.md) before using the skill with private repositories.
 
-```text
-~/.config/codex-pro-dispatch/worker.json
-~/.local/state/codex-pro-dispatch/assignments/*.json
-```
+## Development
 
-Set `CODEX_PRO_DISPATCH_HOME` to isolate both paths during tests.
-
-## Known limitation
-
-Sending and waiting can happen in the background, but collecting a completed response may briefly foreground ChatGPT and move the pointer. The skill should defer collection while the user is active in another app when native focus state is available.
-
-The clipboard is not used.
-
-## Verification
-
-Repository-verifiable checks:
+The runtime and unit tests use only the Python standard library. Contributors
+need Python 3.9+, Bash, and a current Codex installation. OpenAI's optional
+skill validator also imports PyYAML; install it in a virtual environment before
+running the final command below:
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install PyYAML
 python3 -m unittest discover -s tests -v
-python3 -m py_compile bin/pro-dispatch src/codex_pro_dispatch/*.py
+python3 -m py_compile bin/pro-dispatch skills/codex-pro-dispatch/scripts/pro-dispatch src/codex_pro_dispatch/*.py
 bash -n install.sh uninstall.sh
-./bin/pro-dispatch --help
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" skills/codex-pro-dispatch
 ```
 
-The live release gate is documented in [docs/acceptance.md](docs/acceptance.md).
+The live release gate is [docs/acceptance.md](docs/acceptance.md). Contributions are welcome through issues and pull requests; Iann Wu remains the sole merge and release authority. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Security
+## License
 
-Read [SECURITY.md](SECURITY.md). The project stores no ChatGPT cookies, credentials, browser profiles, private source, or full transcripts. Chat Pro uses only the tools exposed inside its official Chat conversation. The parent Codex task independently verifies any remote mutation.
-
-## Experimental history
-
-The repository's earlier branches preserve the Classic/Accessibility proof of concept. They are not part of this official-app skill architecture and should not be merged into this branch.
+[MIT](LICENSE)

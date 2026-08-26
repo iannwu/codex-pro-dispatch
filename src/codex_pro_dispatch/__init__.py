@@ -31,6 +31,7 @@ from .core import (
     parse_result,
     prepare_assignment,
     purge_local_state,
+    redact_stored_diagnostics,
     recovery_info,
     reset_worker,
     result_marker,
@@ -72,6 +73,7 @@ __all__ = [
     "parse_result",
     "prepare_assignment",
     "purge_local_state",
+    "redact_stored_diagnostics",
     "recovery_info",
     "reset_worker",
     "result_marker",
@@ -80,4 +82,4 @@ __all__ = [
     "wrap_prompt",
 ]
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

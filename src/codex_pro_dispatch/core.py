@@ -200,6 +200,34 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _redact_diagnostic_fields(value: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Replace legacy raw diagnostic bodies with categories and hashes."""
+    redacted = dict(value)
+    changed = False
+    for raw_field, kind_field, hash_field, fallback_kind in (
+        (
+            "last_error",
+            "last_error_kind",
+            "last_error_sha256",
+            "legacy-diagnostic-redacted",
+        ),
+        (
+            "reason",
+            "abandon_reason_kind",
+            "abandon_reason_sha256",
+            "legacy-abandon-reason-redacted",
+        ),
+    ):
+        if raw_field not in redacted:
+            continue
+        cleaned = str(redacted.pop(raw_field)).strip()
+        changed = True
+        if cleaned:
+            redacted.setdefault(kind_field, fallback_kind)
+            redacted.setdefault(hash_field, sha256_text(cleaned))
+    return redacted, changed
+
+
 def normalize_newlines(value: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -370,7 +398,8 @@ def load_assignment(
     if value.get("assignment_id") != assignment_id:
         raise ConfigurationError(f"Assignment identity mismatch: {path}")
     validate_status(str(value.get("status", "")))
-    return value
+    redacted, _ = _redact_diagnostic_fields(value)
+    return redacted
 
 
 def _save_assignment(
@@ -398,13 +427,38 @@ def list_assignments(paths: RuntimePaths | None = None) -> list[dict[str, Any]]:
             assignment_id = str(value.get("assignment_id", ""))
             validate_identifier(assignment_id, field="assignment_id")
             validate_status(str(value.get("status", "")))
-            values.append(value)
+            redacted, _ = _redact_diagnostic_fields(value)
+            values.append(redacted)
         except DispatchError as exc:
             raise StateError(
                 "Invalid assignment receipt; refusing to dispatch",
                 details={"path": str(path), "error": str(exc)},
             ) from exc
     return sorted(values, key=lambda value: str(value.get("created_at", "")))
+
+
+def redact_stored_diagnostics(paths: RuntimePaths | None = None) -> int:
+    """Durably remove raw diagnostic bodies written by releases before v1.1."""
+    runtime = paths or default_paths()
+    redacted_count = 0
+    with state_lock(runtime):
+        if not runtime.assignments_dir.exists():
+            return 0
+        for path in sorted(runtime.assignments_dir.glob("*.json")):
+            value = read_json(path)
+            assignment_id = str(value.get("assignment_id", ""))
+            validate_identifier(assignment_id, field="assignment_id")
+            validate_status(str(value.get("status", "")))
+            if path != assignment_path(assignment_id, runtime):
+                raise StateError(
+                    "Assignment identity mismatch during diagnostic redaction",
+                    details={"path": str(path), "assignment_id": assignment_id},
+                )
+            redacted, changed = _redact_diagnostic_fields(value)
+            if changed:
+                atomic_write_json(path, redacted)
+                redacted_count += 1
+    return redacted_count
 
 
 def active_assignment(paths: RuntimePaths | None = None) -> dict[str, Any] | None:
@@ -663,9 +717,7 @@ def mark_submitted(
             else:
                 value.pop("readback_correction_allowed", None)
                 value.pop("readback_correction_kind", None)
-            value["last_error"] = (
-                "Native read-back prompt does not exactly match the prepared wrapped_prompt"
-            )
+            value["last_error_kind"] = "native-readback-mismatch"
             _save_assignment(assignment_id, value, runtime)
             raise StateError(
                 "Submitted prompt failed exact read-back verification; never resend",
@@ -684,6 +736,8 @@ def mark_submitted(
         value["outbound_prompt_verified_at"] = verified_at
         value["submission_observed"] = True
         value.pop("last_error", None)
+        value.pop("last_error_kind", None)
+        value.pop("last_error_sha256", None)
         value.pop("submission_may_have_occurred", None)
         if is_readback_correction:
             if is_legacy_single_trailing_newline_correction:
@@ -723,7 +777,8 @@ def mark_indeterminate(
         allowed={"armed", "submitted", "pending", "ambiguous", "indeterminate"},
         target="indeterminate",
         updates={
-            "last_error": cleaned,
+            "last_error_kind": "native-send-indeterminate",
+            "last_error_sha256": sha256_text(cleaned),
             "submission_may_have_occurred": True,
             "no_resend": True,
         },
@@ -768,7 +823,8 @@ def mark_unusual_activity_403(
         value.update(
             {
                 "status": "indeterminate",
-                "last_error": cleaned,
+                "last_error_kind": "openai-unusual-activity",
+                "last_error_sha256": sha256_text(cleaned),
                 "submission_may_have_occurred": True,
                 "no_resend": True,
                 "native_http_status": 403,
@@ -800,7 +856,11 @@ def mark_ambiguous(
         assignment_id,
         allowed={"armed", "submitted", "pending", "indeterminate", "ambiguous"},
         target="ambiguous",
-        updates={"last_error": cleaned, "no_resend": True},
+        updates={
+            "last_error_kind": "response-ambiguous",
+            "last_error_sha256": sha256_text(cleaned),
+            "no_resend": True,
+        },
         paths=paths,
     )
 
@@ -818,7 +878,11 @@ def abandon_assignment(
         assignment_id,
         allowed=ACTIVE_STATUSES,
         target="abandoned",
-        updates={"abandoned_at": utc_now(), "reason": cleaned},
+        updates={
+            "abandoned_at": utc_now(),
+            "abandon_reason_kind": "user-authorized",
+            "abandon_reason_sha256": sha256_text(cleaned),
+        },
         paths=paths,
     )
 
@@ -896,7 +960,8 @@ def recovery_info(
         "sent_prompt_sha256": value.get("sent_prompt_sha256"),
         "readback_artifact_sha256": value.get("readback_artifact_sha256"),
         "continuation_of": value.get("continuation_of"),
-        "last_error": value.get("last_error"),
+        "last_error_kind": value.get("last_error_kind"),
+        "last_error_sha256": value.get("last_error_sha256"),
     }
     for field in (
         "native_http_status",

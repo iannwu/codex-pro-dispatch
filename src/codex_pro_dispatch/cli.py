@@ -26,6 +26,7 @@ from .core import (
     mark_submitted,
     prepare_assignment,
     purge_local_state,
+    redact_stored_diagnostics,
     recovery_info,
     reset_worker,
     save_worker,
@@ -82,16 +83,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Confirm the user visibly selected Pro in this Chat conversation",
     )
+    worker_set.add_argument(
+        "--native-controls-confirmed",
+        action="store_true",
+        help="Confirm this Codex task passed the native host-capability preflight",
+    )
 
     worker_sub.add_parser("show", help="Show the configured worker")
     worker_reset = worker_sub.add_parser("reset", help="Remove the configured worker")
     worker_reset.add_argument("--force", action="store_true")
 
-    prepare = subparsers.add_parser("prepare", help="Create one exactly-once assignment")
+    prepare = subparsers.add_parser(
+        "prepare", help="Create one at-most-once native-send assignment"
+    )
     prepare.add_argument("--parent-task-id", required=True)
     prepare.add_argument("--prompt-file", default="-", help="UTF-8 prompt file, or - for stdin")
     prepare.add_argument("--continuation-of")
     prepare.add_argument("--assignment-id")
+    prepare.add_argument(
+        "--native-controls-confirmed",
+        action="store_true",
+        help="Confirm this invocation passed the native host-capability preflight",
+    )
 
     arm = subparsers.add_parser(
         "arm", help="Durably prohibit resends immediately before native submission"
@@ -151,7 +164,14 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Show one assignment or all local state")
     status.add_argument("assignment_id", nargs="?")
 
-    subparsers.add_parser("doctor", help="Check local helper configuration")
+    doctor = subparsers.add_parser(
+        "doctor", help="Check local state and the current host-capability assertion"
+    )
+    doctor.add_argument(
+        "--native-controls-confirmed",
+        action="store_true",
+        help="Assert that the invoking skill verified every required native capability",
+    )
 
     purge = subparsers.add_parser("purge", help="Remove private worker and assignment state")
     purge.add_argument("--yes", action="store_true")
@@ -174,6 +194,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.command == "worker":
         if args.worker_command == "set":
+            if not args.native_controls_confirmed:
+                raise DispatchError(
+                    "Worker setup requires the skill's native host-capability preflight; "
+                    "invoke $codex-pro-dispatch inside a supported Codex desktop task"
+                )
             worker = save_worker(
                 args.conversation_id,
                 label=args.label,
@@ -188,6 +213,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"ok": True, "removed": removed, "path": str(paths.worker_file)}
 
     if args.command == "prepare":
+        if not args.native_controls_confirmed:
+            raise DispatchError(
+                "Assignment preparation requires the current invocation's native "
+                "host-capability preflight"
+            )
         prompt = read_text_source(args.prompt_file)
         prepared = prepare_assignment(
             prompt,
@@ -288,7 +318,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "worker_configured": False,
             "active_assignment": None,
             "active_cooldown": None,
+            "redacted_diagnostic_receipts": 0,
         }
+        try:
+            checks["redacted_diagnostic_receipts"] = redact_stored_diagnostics(paths)
+        except DispatchError as exc:
+            checks["state_error"] = str(exc)
         try:
             checks["worker"] = worker_payload(load_worker(paths))
             checks["worker_configured"] = True
@@ -300,12 +335,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             checks["active_cooldown"] = active_cooldown(paths)
         except DispatchError as exc:
             checks["state_error"] = str(exc)
-        checks["native_controls"] = "manual acceptance required inside Codex Desktop"
-        checks["ok"] = (
+        checks["local_ok"] = (
             checks["platform"] == "Darwin"
             and checks["worker_configured"]
             and "worker_error" not in checks
             and "state_error" not in checks
+        )
+        checks["native_controls_confirmed"] = bool(
+            args.native_controls_confirmed
+        )
+        checks["native_controls"] = (
+            "confirmed for this invocation by the Codex skill"
+            if args.native_controls_confirmed
+            else "not confirmed; run through $codex-pro-dispatch in a supported host"
+        )
+        checks["ok"] = bool(
+            checks["local_ok"] and checks["native_controls_confirmed"]
         )
         return checks
 
@@ -322,7 +367,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        emit(run(args))
+        payload = run(args)
+        emit(payload)
+        if args.command == "doctor" and not payload.get("ok", False):
+            return 1
         return 0
     except DispatchError as exc:
         emit(

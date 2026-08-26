@@ -8,6 +8,8 @@ Read this reference for first-time setup, collection, or recovery.
 - The host exposes native controls that can resolve conversation IDs, submit a message, observe conversation metadata, open a conversation by ID, read the latest completed assistant response, and return to a Codex task by ID.
 - Exact tool names may vary by Codex build. Use the available native controls semantically. Do not replace them with shell UI automation.
 
+Do not treat these assumptions as satisfied automatically. Complete the six-capability host preflight in `SKILL.md` on every invocation. If any capability is missing, stop before configuration or assignment preparation.
+
 ## Worker setup
 
 1. The user opens one dedicated Chat conversation.
@@ -23,7 +25,7 @@ A worker title is a label only. Conversation identity comes from the stable ID.
 2. Prepare the assignment with `pro-dispatch prepare`.
 3. Resolve the configured worker by ID.
 4. Immediately before sending, run `pro-dispatch arm '<assignment-id>'`. Do not send unless it succeeds.
-5. Submit `wrapped_prompt` once. After `arm`, the assignment is permanently collect-only if the app crashes or the send outcome is uncertain.
+5. Make at most one native send attempt for `wrapped_prompt`. After `arm`, the assignment is permanently collect-only if the app crashes or the send outcome is uncertain. An interruption before transport can therefore result in zero sends; this is deliberate fail-closed behavior.
 6. After confirmation, use native controls to read back the exact submitted user message from the worker and save it as UTF-8 without reconstructing or editing it.
 7. Run `pro-dispatch submitted '<assignment-id>' --sent-prompt-file '<native-read-back-file>'` so the helper compares the read-back bytes with the prepared `wrapped_prompt` hash.
 8. If the hash differs, keep the helper's `indeterminate` collect-only state and never resend. If confirmation itself is indeterminate, record `indeterminate` and switch to collection-only recovery.
