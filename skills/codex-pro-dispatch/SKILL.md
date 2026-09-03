@@ -3,7 +3,7 @@ name: codex-pro-dispatch
 description: Dispatch a bounded implementation, review, or research assignment from a Codex task to a dedicated ChatGPT Pro conversation in the official combined desktop app, recover the result without resending, and return to the parent Codex task. Use when the user asks Codex to delegate work to ChatGPT Pro; do not use for ordinary local coding.
 metadata:
   short-description: Dispatch work to official-app ChatGPT Pro
-  version: "1.1.0"
+  version: "1.1.1"
 ---
 
 # Codex Pro Dispatch
@@ -54,7 +54,9 @@ Confirm that the current Codex task exposes all of these semantic capabilities:
 2. List or resolve Chat conversations by stable ID.
 3. Send one user message to an exact Chat conversation ID.
 4. Read back the exact submitted user-message bytes from that conversation.
-5. Read the latest completed assistant response and completion metadata.
+5. Read one stable assistant-message ID, exact text, final-generation provenance,
+   explicit message and selected-result outer truncation metadata, and the exact
+   submitted-user-message ID from one native collection operation.
 6. Open an exact Chat or Codex task by stable ID so the parent can be restored.
 
 Exact tool names may vary, but every capability must be available in the current task. Do not infer availability from macOS, app presence, an installed plugin, or a prior successful run. If any capability is missing, stop before writing worker configuration or assignment state and report the missing capability. Never substitute UI automation.
@@ -149,14 +151,14 @@ If the app stops after `arm`â€”whether before, during, or after the native sendâ
 
 8. Wait using the worker conversation's native metadata or timestamp. Do not repeatedly reopen the worker while it is generating.
 9. When the worker has updated, open the worker by its exact conversation ID and wait until that exact thread is loaded.
-10. Read only the newest completed assistant response associated with the assignment. Save it in the private temporary directory as UTF-8.
-11. Validate and complete:
+10. Read only the newest completed assistant response associated with the assignment. Save one strict native collection-evidence JSON object in the private temporary directory. It must contain the helper-allowlisted `adapter_contract_id`, both exact worker IDs, the stable assistant-message ID, exact submitted-user-message ID, `generation_status: "completed"`, trusted finality provenance, exact text, and message plus selected-result outer truncation fields. Never invent a `false` truncation value: an omitted field is unknown unless the installed helper's version-scoped adapter contract explicitly says otherwise.
+11. Validate and complete from that evidence, never from response text alone:
 
 ```bash
-pro-dispatch complete '<assignment-id>' --response-file '<response-file>'
+pro-dispatch complete '<assignment-id>' --native-evidence-file '<native-evidence.json>'
 ```
 
-12. Use the returned `payload` as the worker result.
+12. Use the private result file only after successful evidence-gated completion; do not print a response body into terminal JSON.
 13. Restore the exact saved parent Codex task.
 14. If the worker reported GitHub mutations, follow [references/github-verification.md](references/github-verification.md).
 15. Delete the private temporary directory in the cleanup path.
@@ -182,8 +184,8 @@ pro-dispatch submitted '<assignment-id>' \
 
 This recovery command verifies the already-existing message; it does not send anything. It is allowed from `indeterminate` or `ambiguous` while `submission_count` is zero. It is also allowed with `submission_count` one only when the receipt explicitly has `readback_correction_allowed: true`, or an older receipt's stored mismatch hash proves the same single-trailing-newline artifact, and the corrected read-back exactly matches the prepared hash. Never call the native send control during this recovery step.
 
-5. Read the newest completed assistant response.
-6. Validate it with `pro-dispatch complete`.
+5. Re-read the exact selected assistant message into a strict native evidence JSON object. A changed observation timestamp alone is an idempotent reread; changed source identity or content after acceptance is a conflict.
+6. Validate it with `pro-dispatch complete --native-evidence-file`.
 7. Restore the saved parent task ID.
 
 Never send the original assignment again. If the response cannot be matched to the exact result marker, record the issue and stop:

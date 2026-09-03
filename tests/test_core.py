@@ -25,6 +25,7 @@ class CoreTests(unittest.TestCase):
         )
         self.worker_id = "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e"
         self.parent_id = "parent-task-7319"
+        self.native_user_message_id = "native-user-message-7319"
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -48,6 +49,33 @@ class CoreTests(unittest.TestCase):
 
     def arm(self, prepared: cpd.PreparedAssignment) -> dict[str, object]:
         return cpd.arm_assignment(prepared.assignment_id, self.paths)
+
+    def evidence(
+        self,
+        response: str,
+        *,
+        assistant_message_id: str = "native-assistant-message-7319",
+    ) -> cpd.NativeCollectionEvidence:
+        return cpd.NativeCollectionEvidence.from_mapping(
+            {
+                "schema": cpd.NATIVE_COLLECTION_SCHEMA,
+                "adapter_contract_id": "codex-desktop-native-collection/v1",
+                "requested_conversation_id": self.worker_id,
+                "loaded_conversation_id": self.worker_id,
+                "assistant_message_id": assistant_message_id,
+                "submitted_user_message_id": self.native_user_message_id,
+                "role": "assistant",
+                "generation_status": "completed",
+                "generation_finality_provenance": "native-message-status",
+                "truncated": False,
+                "selected_result_outer_integrity": {
+                    "truncated": False,
+                    "provenance": "native-result-envelope",
+                },
+                "text": response,
+                "observed_at": "2026-09-02T00:00:00.000Z",
+            }
+        )
 
     def test_worker_requires_explicit_pro_confirmation(self) -> None:
         with self.assertRaises(cpd.ConfigurationError):
@@ -435,51 +463,77 @@ class CoreTests(unittest.TestCase):
     def test_result_marker_must_be_first_nonempty_line(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
-        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
+        cpd.mark_submitted(
+            prepared.assignment_id,
+            prepared.wrapped_prompt,
+            self.paths,
+            native_user_message_id=self.native_user_message_id,
+        )
+        response = "Preamble\n[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone"
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
                 prepared.assignment_id,
-                "Preamble\n[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone",
+                response,
                 self.paths,
+                evidence=self.evidence(response),
             )
 
     def test_result_marker_rejects_surrounding_whitespace(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
-        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
+        cpd.mark_submitted(
+            prepared.assignment_id,
+            prepared.wrapped_prompt,
+            self.paths,
+            native_user_message_id=self.native_user_message_id,
+        )
+        response = " [CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319] \nDone"
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
                 prepared.assignment_id,
-                " [CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319] \nDone",
+                response,
                 self.paths,
+                evidence=self.evidence(response),
             )
 
     def test_mismatched_result_marker_is_rejected(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
-        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
+        cpd.mark_submitted(
+            prepared.assignment_id,
+            prepared.wrapped_prompt,
+            self.paths,
+            native_user_message_id=self.native_user_message_id,
+        )
+        response = "[CODEX_PRO_DISPATCH_RESULT assignment_id=wrong]\nDone"
         with self.assertRaises(cpd.MarkerError):
             cpd.complete_assignment(
                 prepared.assignment_id,
-                "[CODEX_PRO_DISPATCH_RESULT assignment_id=wrong]\nDone",
+                response,
                 self.paths,
+                evidence=self.evidence(response),
             )
 
     def test_complete_validates_marker_and_is_idempotent(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
-        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
+        cpd.mark_submitted(
+            prepared.assignment_id,
+            prepared.wrapped_prompt,
+            self.paths,
+            native_user_message_id=self.native_user_message_id,
+        )
         response = (
             "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\n\n"
             "commit_sha=abc123\nbranch=feature/test"
         )
         value, payload = cpd.complete_assignment(
-            prepared.assignment_id, response, self.paths
+            prepared.assignment_id, response, self.paths, evidence=self.evidence(response)
         )
         self.assertEqual(value["status"], "complete")
         self.assertEqual(payload, "commit_sha=abc123\nbranch=feature/test")
         second, second_payload = cpd.complete_assignment(
-            prepared.assignment_id, response, self.paths
+            prepared.assignment_id, response, self.paths, evidence=self.evidence(response)
         )
         self.assertEqual(second["response_sha256"], value["response_sha256"])
         self.assertEqual(second_payload, payload)
@@ -487,27 +541,40 @@ class CoreTests(unittest.TestCase):
     def test_completed_receipt_cannot_be_rewritten(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
-        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
-        cpd.complete_assignment(
+        cpd.mark_submitted(
             prepared.assignment_id,
-            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nOriginal",
+            prepared.wrapped_prompt,
             self.paths,
+            native_user_message_id=self.native_user_message_id,
         )
+        original = "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nOriginal"
+        cpd.complete_assignment(
+            prepared.assignment_id, original, self.paths, evidence=self.evidence(original)
+        )
+        later = "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nLater"
         with self.assertRaises(cpd.StateError):
             cpd.complete_assignment(
                 prepared.assignment_id,
-                "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nLater",
+                later,
                 self.paths,
+                evidence=self.evidence(later),
             )
 
     def test_continuation_uses_same_worker_after_completion(self) -> None:
         first = self.prepare()
         self.arm(first)
-        cpd.mark_submitted(first.assignment_id, first.wrapped_prompt, self.paths)
+        cpd.mark_submitted(
+            first.assignment_id,
+            first.wrapped_prompt,
+            self.paths,
+            native_user_message_id=self.native_user_message_id,
+        )
+        response = "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone"
         cpd.complete_assignment(
             first.assignment_id,
-            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone",
+            response,
             self.paths,
+            evidence=self.evidence(response),
         )
         second = cpd.prepare_assignment(
             "Repair the failing test.",
@@ -620,17 +687,17 @@ class CoreTests(unittest.TestCase):
         response = (
             "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone"
         )
-        with self.assertRaises(cpd.StateError):
+        with self.assertRaises(cpd.CollectionEvidenceError):
             cpd.complete_assignment(prepared.assignment_id, response, self.paths)
         self.arm(prepared)
-        with self.assertRaises(cpd.StateError):
+        with self.assertRaises(cpd.CollectionEvidenceError):
             cpd.complete_assignment(prepared.assignment_id, response, self.paths)
         cpd.mark_indeterminate(
             prepared.assignment_id,
             reason="native send outcome is unknown",
             paths=self.paths,
         )
-        with self.assertRaises(cpd.StateError):
+        with self.assertRaises(cpd.CollectionEvidenceError):
             cpd.complete_assignment(prepared.assignment_id, response, self.paths)
         value = cpd.load_assignment(prepared.assignment_id, self.paths)
         self.assertEqual(value["status"], "indeterminate")

@@ -54,7 +54,7 @@ Prompt, native read-back, response, and error bodies may pass through short-live
 
 Immediately before a native send attempt, an assignment moves durably from `prepared` to `armed`. The `armed` receipt sets `no_resend` before transport. The workflow then permits at most one native send attempt. A crash before transport may therefore leave an assignment with zero sends and no resend path. A timeout, app restart, retrieval failure, or ambiguous native result remains collection-only.
 
-Completion requires one recorded submission and an exact verified outbound-prompt hash. A valid-looking result marker alone cannot complete an unverified assignment. Completed receipts are immutable.
+Completion requires one recorded submission, an exact verified outbound-prompt hash, and a strict native collection-evidence envelope associated with that exact native user message. A valid-looking result marker, response file, or caller-supplied boolean alone cannot complete an unresolved assignment. The envelope records raw and normalized message/outer truncation, stable assistant-message identity, and generation-finality provenance. Missing truncation is unknown and fails closed unless a helper-owned, version-scoped adapter contract explicitly proves the host's omission semantics. Completed receipts are immutable; rereading identical source/content at a newer observation time is idempotent.
 
 ## Break-glass deletion
 

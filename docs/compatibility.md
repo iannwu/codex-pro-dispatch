@@ -12,12 +12,12 @@ The workflow is desktop-only. ChatGPT on the web, Codex CLI alone, IDE extension
 | Worker identity | List or resolve Chat conversations and address the configured worker by stable ID, never title or position |
 | Native submission | Make one user-message send attempt to that exact worker |
 | Outbound verification | Read the exact existing submitted user message for byte-level verification |
-| Completion read | Read the latest completed assistant response and completion metadata |
+| Completion read | Read one stable assistant message ID, exact text, generation-finality provenance, explicit message and selected-result outer truncation metadata, and the exact submitted user-message association from one native result |
 | Navigation | Open the exact worker and restore the exact parent task by stable ID |
 
 Tool names are host implementation details. For example, a build may expose operations resembling `list_threads`, `send_message_to_thread`, `read_thread`, and exact-ID navigation. Similar names are not proof of compatibility: the semantic inputs, outputs, stable identities, and read-back behavior must all be present.
 
-The skill repeats this preflight on every invocation. `pro-dispatch doctor --native-controls-confirmed` accepts the result as an assertion for that invocation; the standalone Python process cannot inspect the host's tool inventory itself.
+The skill repeats this preflight on every invocation. `pro-dispatch doctor --native-controls-confirmed` accepts the result as an assertion for that invocation; the standalone Python process cannot inspect the host's tool inventory itself. A host that cannot supply the collection fields together is unsupported for inline completion. A missing `truncated` field is unknown, not false, unless a reviewed helper release contains an allowlisted, version-scoped adapter contract proving that omission reports no shortening.
 
 ## Supported environment
 

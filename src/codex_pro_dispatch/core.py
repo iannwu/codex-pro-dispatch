@@ -15,6 +15,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .collection import NativeCollectionEvidence
+from .errors import (
+    BusyError,
+    CollectionEvidenceError,
+    ConfigurationError,
+    CooldownError,
+    DispatchError,
+    MarkerError,
+    StateError,
+    TruncationError,
+)
+
 APP_NAME = "codex-pro-dispatch"
 SCHEMA_VERSION = 1
 
@@ -27,36 +39,6 @@ ALL_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 RESULT_MARKER_PREFIX = "[CODEX_PRO_DISPATCH_RESULT assignment_id="
 UNUSUAL_ACTIVITY_COOLDOWN_SECONDS = 30 * 60
-
-
-class DispatchError(RuntimeError):
-    """Expected, user-facing error."""
-
-    exit_code = 2
-
-    def __init__(self, message: str, *, details: Mapping[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.details = dict(details or {})
-
-
-class ConfigurationError(DispatchError):
-    pass
-
-
-class BusyError(DispatchError):
-    exit_code = 3
-
-
-class StateError(DispatchError):
-    exit_code = 4
-
-
-class MarkerError(DispatchError):
-    exit_code = 5
-
-
-class CooldownError(DispatchError):
-    exit_code = 6
 
 
 @dataclass(frozen=True)
@@ -187,6 +169,15 @@ def validate_identifier(value: str, *, field: str) -> str:
             f"{field} must use only letters, digits, dot, underscore, colon, and hyphen",
             details={field: value},
         )
+    return value
+
+
+def validate_native_message_id(value: str, *, field: str) -> str:
+    """Validate an opaque host ID without pretending it has our assignment grammar."""
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+        raise ConfigurationError(f"{field} must be a nonempty bounded native ID")
+    if any(ord(character) < 32 for character in value):
+        raise ConfigurationError(f"{field} must not contain control characters")
     return value
 
 
@@ -646,6 +637,8 @@ def mark_submitted(
     assignment_id: str,
     sent_prompt: str,
     paths: RuntimePaths | None = None,
+    *,
+    native_user_message_id: str | None = None,
 ) -> dict[str, Any]:
     runtime = paths or default_paths()
     with state_lock(runtime):
@@ -695,6 +688,10 @@ def mark_submitted(
         value["submission_count"] = 1
         value["sent_prompt_sha256"] = sent_hash
         value["no_resend"] = True
+        if native_user_message_id is not None:
+            value["native_user_message_id"] = validate_native_message_id(
+                native_user_message_id, field="native_user_message_id"
+            )
         value["readback_verification_attempt_count"] = int(
             value.get(
                 "readback_verification_attempt_count",
@@ -889,19 +886,77 @@ def abandon_assignment(
 
 def complete_assignment(
     assignment_id: str,
-    response: str,
+    response: str | None = None,
     paths: RuntimePaths | None = None,
+    *,
+    evidence: NativeCollectionEvidence | None = None,
 ) -> tuple[dict[str, Any], str]:
+    """Complete a v1 receipt only from one trusted native evidence envelope.
+
+    ``response`` remains a compatibility argument so callers receive a clear
+    fail-closed error instead of accidentally treating a body file as proof of a
+    complete native read.  It is never sufficient by itself.
+    """
     runtime = paths or default_paths()
-    normalized, payload = parse_result(response, assignment_id)
+    if evidence is None:
+        raise CollectionEvidenceError(
+            "Response-only completion is disabled; native collection evidence is required",
+            details={"assignment_id": assignment_id},
+            error_code="collection_evidence_required",
+        )
+    if response is not None and normalize_newlines(response) != evidence.text:
+        raise CollectionEvidenceError(
+            "Response file does not exactly match the native collection evidence",
+            details={"assignment_id": assignment_id},
+            error_code="collection_evidence_conflict",
+        )
+    normalized, payload = parse_result(evidence.text, assignment_id)
     response_hash = sha256_text(normalized)
     payload_hash = sha256_text(payload)
 
     with state_lock(runtime):
         value = load_assignment(assignment_id, runtime)
         current = str(value["status"])
+        worker_id = str(value.get("worker_conversation_id", ""))
+        if (
+            evidence.requested_conversation_id != worker_id
+            or evidence.loaded_conversation_id != worker_id
+        ):
+            raise CollectionEvidenceError(
+                "Native collection evidence is for a different worker",
+                details={"assignment_id": assignment_id},
+                error_code="collection_wrong_worker",
+            )
+        submitted_message_id = value.get("native_user_message_id")
+        if not submitted_message_id or evidence.submitted_user_message_id != submitted_message_id:
+            raise CollectionEvidenceError(
+                "Native collection evidence is not associated with the verified submitted message",
+                details={"assignment_id": assignment_id},
+                error_code="collection_submission_mismatch",
+            )
+        if not evidence.has_known_truncation:
+            raise CollectionEvidenceError(
+                "Native collection truncation is unknown for this adapter",
+                details={"assignment_id": assignment_id},
+                error_code="collection_truncation_unknown",
+            )
+        evidence_fields = evidence.receipt_fields()
+        if not evidence.complete_and_untruncated:
+            value.update(evidence_fields)
+            value["status"] = "ambiguous"
+            value["no_resend"] = True
+            _save_assignment(assignment_id, value, runtime)
+            raise TruncationError(
+                "Native collection was truncated and cannot complete",
+                details={"assignment_id": assignment_id, "no_resend": True},
+                error_code="collection_truncated",
+            )
         if current == "complete":
-            if value.get("response_sha256") != response_hash:
+            if (
+                value.get("response_sha256") != response_hash
+                or value.get("assistant_message_id") != evidence.assistant_message_id
+                or value.get("submitted_user_message_id") != evidence.submitted_user_message_id
+            ):
                 raise StateError(
                     "Completed assignment is immutable and the new response differs",
                     details={"assignment_id": assignment_id},
@@ -931,6 +986,7 @@ def complete_assignment(
         value["completed_at"] = utc_now()
         value["response_sha256"] = response_hash
         value["payload_sha256"] = payload_hash
+        value.update(evidence_fields)
         value["result_marker_validated"] = True
         value["no_resend"] = True
         _save_assignment(assignment_id, value, runtime)

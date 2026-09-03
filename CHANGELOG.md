@@ -2,6 +2,24 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## [1.1.1] - 2026-09-02
+
+### Fixed
+
+- Close the marker-bearing truncated-prefix defect: unresolved receipts can no
+  longer complete from response text alone.
+- Require one strict, versioned native collection-evidence envelope bound to the
+  configured worker, exact submitted user message, stable assistant message,
+  completed generation, and explicit collection-integrity fields.
+
+### Security
+
+- Record raw and normalized truncation evidence without a caller-controlled
+  `--truncated` switch. Missing truncation remains unknown and fails closed unless
+  a future helper-owned, allowlisted adapter contract explicitly proves otherwise.
+- Keep observations at different timestamps idempotent by excluding `observed_at`
+  from immutable content identity.
+
 ## [1.1.0] - 2026-08-26
 
 ### Added
@@ -51,4 +69,5 @@ All notable changes to Codex Pro Dispatch are documented here.
 - The v1 safety patch was prompted by a native send failure whose visible `systemError` masked an unusual-activity HTTP 403. PR #2 made the failure explicit, kept the assignment collect-only, and added a cooldown that cannot be bypassed by abandoning the receipt or changing workers.
 
 [1.1.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.0.0...v1.1.0
+[1.1.1]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.1.0...v1.1.1
 [1.0.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v0.1.0...v1.0.0

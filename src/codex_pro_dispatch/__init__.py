@@ -39,6 +39,20 @@ from .core import (
     sha256_text,
     wrap_prompt,
 )
+from .collection import (
+    NATIVE_ADAPTER_CONTRACTS,
+    NATIVE_COLLECTION_SCHEMA,
+    NativeAdapterContract,
+    NativeCollectionEvidence,
+)
+from .errors import (
+    ArtifactProtocolError,
+    ArtifactVerificationError,
+    ChunkProtocolError,
+    CollectionEvidenceError,
+    ReceiptMigrationError,
+    TruncationError,
+)
 
 __all__ = [
     "ACTIVE_STATUSES",
@@ -80,6 +94,16 @@ __all__ = [
     "save_worker",
     "sha256_text",
     "wrap_prompt",
+    "NATIVE_ADAPTER_CONTRACTS",
+    "NATIVE_COLLECTION_SCHEMA",
+    "NativeAdapterContract",
+    "NativeCollectionEvidence",
+    "CollectionEvidenceError",
+    "TruncationError",
+    "ArtifactProtocolError",
+    "ArtifactVerificationError",
+    "ChunkProtocolError",
+    "ReceiptMigrationError",
 ]
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"

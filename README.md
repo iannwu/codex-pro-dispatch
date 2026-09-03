@@ -9,7 +9,7 @@ An independent macOS safety wrapper for a supported Codex desktop workflow. It h
 
 **Desktop-only:** the dispatch workflow runs only inside the official ChatGPT desktop app for macOS with Codex. It does not run from ChatGPT on the web, Codex CLI alone, an IDE extension, Windows, or Linux. The Codex CLI is used only to install and manage the plugin.
 
-**Version: v1.1.0 stable.** The local state helper, plugin package, native desktop handoff, same-worker continuation, collect-only recovery, and GitHub connector proof passed the [release acceptance matrix](docs/acceptance.md). See the [redacted v1.1.0 receipt](docs/releases/v1.1.0-acceptance.md).
+**Version: v1.1.1 candidate.** This branch closes response-only completion: a marker-bearing prefix cannot complete without strict native collection evidence proving the selected message is final and untruncated. It has not been released or accepted on a live host yet.
 
 This project is independent and unofficial. It is not affiliated with, endorsed by, or maintained by OpenAI.
 
@@ -29,7 +29,7 @@ Codex Pro Dispatch provides the safety protocol around that handoff:
 - at-most-one native send attempt per assignment
 - exact native read-back verification
 - no automatic resend after ambiguity, timeout, or restart
-- result markers and stale-response rejection
+- result markers, explicit native collection integrity, and stale-response rejection
 - same-worker follow-ups with new assignment IDs
 - independent verification of worker-reported repository changes
 
@@ -55,7 +55,7 @@ If you only want another Codex subagent, use Codex's native subagent tools. If y
 | Runtime | Python 3.9 or newer; no third-party Python packages |
 | Invocation | Explicit `$codex-pro-dispatch` invocation |
 | Worker | One dedicated Chat conversation with Pro visibly selected |
-| Native capabilities | Current parent-task ID; list/resolve chats; exact-ID send; exact user-message read-back; completed-response read; exact-ID open/restore |
+| Native capabilities | Current parent-task ID; list/resolve chats; exact-ID send; exact user-message read-back; stable assistant-message ID; finality provenance; explicit message/outer truncation; exact-ID open/restore |
 | Connector | None for prompt-only review or research; repository writes require a write-capable GitHub connector/tool in the Pro worker |
 | Verification | Repository-write tasks also require parent-side access to fetch and inspect the reported remote commit |
 

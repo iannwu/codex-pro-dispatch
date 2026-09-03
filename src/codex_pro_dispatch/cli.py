@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
+from .collection import NativeCollectionEvidence
 from .core import (
     DispatchError,
     abandon_assignment,
@@ -120,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Exact UTF-8 native read-back of the submitted user message, or - for stdin",
     )
+    submitted.add_argument(
+        "--native-user-message-id",
+        help="Stable native ID of the exact user message read back from the worker",
+    )
 
     pending = subparsers.add_parser("pending", help="Record that the worker is still running")
     pending.add_argument("assignment_id")
@@ -147,10 +152,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_reason_source(ambiguous)
 
     complete = subparsers.add_parser(
-        "complete", help="Validate the result marker and complete an assignment"
+        "complete", help="Deprecated evidence-gated inline completion alias"
     )
     complete.add_argument("assignment_id")
-    complete.add_argument("--response-file", default="-", help="UTF-8 response file, or - for stdin")
+    complete.add_argument(
+        "--native-evidence-file",
+        required=True,
+        help="Strict UTF-8 JSON evidence from one native collection operation",
+    )
+    complete.add_argument(
+        "--response-file",
+        help="Optional exact body cross-check; body-only completion is never allowed",
+    )
 
     recover = subparsers.add_parser(
         "recover", help="Show the saved worker and parent IDs without resending"
@@ -239,7 +252,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.command == "submitted":
         sent_prompt = read_exact_text_source(args.sent_prompt_file)
-        value = mark_submitted(args.assignment_id, sent_prompt, paths)
+        value = mark_submitted(
+            args.assignment_id,
+            sent_prompt,
+            paths,
+            native_user_message_id=args.native_user_message_id,
+        )
         return {"ok": True, "assignment": value}
 
     if args.command == "arm":
@@ -278,9 +296,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"ok": True, "assignment": value, "collect_only": True}
 
     if args.command == "complete":
-        response = read_text_source(args.response_file)
-        value, payload = complete_assignment(args.assignment_id, response, paths)
-        return {"ok": True, "assignment": value, "payload": payload}
+        evidence = NativeCollectionEvidence.from_json_bytes(
+            Path(args.native_evidence_file).read_bytes()
+            if args.native_evidence_file != "-"
+            else sys.stdin.buffer.read()
+        )
+        response = read_text_source(args.response_file) if args.response_file else None
+        value, _payload = complete_assignment(
+            args.assignment_id, response, paths, evidence=evidence
+        )
+        return {
+            "ok": True,
+            "assignment": value,
+            "completion_basis": "native-inline",
+            "byte_length": value.get("response_byte_length"),
+            "sha256": value.get("response_sha256"),
+        }
 
     if args.command == "recover":
         return {"ok": True, "recovery": recovery_info(args.assignment_id, paths)}
@@ -378,6 +409,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "ok": False,
                 "error": str(exc),
                 "error_type": exc.__class__.__name__,
+                "error_code": exc.error_code,
                 "details": exc.details,
             },
             stream=sys.stderr,
@@ -385,7 +417,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return exc.exit_code
     except (OSError, UnicodeError) as exc:
         emit(
-            {"ok": False, "error": str(exc), "error_type": exc.__class__.__name__},
+            {
+                "ok": False,
+                "error": str(exc),
+                "error_type": exc.__class__.__name__,
+                "error_code": "runtime_error",
+            },
             stream=sys.stderr,
         )
         return 1

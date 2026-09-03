@@ -65,6 +65,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(armed.returncode, 0, armed.stderr)
         return payload
 
+    def write_evidence(self, assignment_id: str, response: str) -> Path:
+        evidence = {
+            "schema": "codex-pro-dispatch.native-collection/v1",
+            "adapter_contract_id": "codex-desktop-native-collection/v1",
+            "requested_conversation_id": "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e",
+            "loaded_conversation_id": "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e",
+            "assistant_message_id": f"native-assistant-{assignment_id}",
+            "submitted_user_message_id": f"native-user-{assignment_id}",
+            "role": "assistant",
+            "generation_status": "completed",
+            "generation_finality_provenance": "native-message-status",
+            "truncated": False,
+            "selected_result_outer_integrity": {
+                "truncated": False,
+                "provenance": "native-result-envelope",
+            },
+            "text": response,
+            "observed_at": "2026-09-02T00:00:00.000Z",
+        }
+        path = Path(self.temporary.name) / f"{assignment_id}-evidence.json"
+        path.write_text(json.dumps(evidence), encoding="utf-8")
+        return path
+
     def test_help(self) -> None:
         completed = self.run_cli("--help")
         self.assertEqual(completed.returncode, 0)
@@ -141,19 +164,23 @@ class CliTests(unittest.TestCase):
             "dispatch-cli-7319",
             "--sent-prompt-file",
             str(read_back_path),
+            "--native-user-message-id",
+            "native-user-dispatch-cli-7319",
         )
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
 
+        response = (
+            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-cli-7319]\n"
+            "READY"
+        )
         completed = self.run_cli(
             "complete",
             "dispatch-cli-7319",
-            input_text=(
-                "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-cli-7319]\n"
-                "READY"
-            ),
+            "--native-evidence-file",
+            str(self.write_evidence("dispatch-cli-7319", response)),
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(json.loads(completed.stdout)["payload"], "READY")
+        self.assertEqual(json.loads(completed.stdout)["completion_basis"], "native-inline")
 
     def test_submitted_rejects_leading_character_drift_and_blocks_resend(self) -> None:
         prepared = self.configure_and_prepare("dispatch-leading-drift-7319")
@@ -244,6 +271,8 @@ class CliTests(unittest.TestCase):
             assignment_id,
             "--sent-prompt-file",
             "-",
+            "--native-user-message-id",
+            f"native-user-{assignment_id}",
             input_text=str(prepared["wrapped_prompt"]),
         )
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
@@ -253,16 +282,18 @@ class CliTests(unittest.TestCase):
         self.assertTrue(receipt["outbound_prompt_verified"])
         self.assertEqual(receipt["submission_recovered_from"], "ambiguous")
 
+        response = (
+            f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
+            "RECOVERED"
+        )
         completed = self.run_cli(
             "complete",
             assignment_id,
-            input_text=(
-                f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
-                "RECOVERED"
-            ),
+            "--native-evidence-file",
+            str(self.write_evidence(assignment_id, response)),
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(json.loads(completed.stdout)["payload"], "RECOVERED")
+        self.assertEqual(json.loads(completed.stdout)["completion_basis"], "native-inline")
 
     def test_reason_file_hashes_untrusted_text_without_persisting_or_interpolating(self) -> None:
         assignment_id = "dispatch-reason-file-7319"

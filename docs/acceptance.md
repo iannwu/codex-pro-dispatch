@@ -52,6 +52,25 @@ Expected:
 - the exact parent Codex task is restored
 - clipboard is unchanged
 
+### B1. Collection-integrity regression
+
+Collect a marker-bearing response deliberately above the native reader limit. Save
+the native collection envelope from the same read operation, including stable
+assistant/user-message association, completed-generation provenance, and both
+truncation fields.
+
+Expected:
+
+- explicit `truncated: true`, an outer truncation indication, or a missing required
+  truncation field never completes the receipt;
+- `complete --response-file` without `--native-evidence-file` fails before storing
+  a result;
+- a host may normalize omitted truncation only when the installed helper names an
+  allowlisted, version-scoped adapter contract whose deployed behavior was accepted
+  on this exact build; examples alone are not acceptance evidence;
+- rereading identical source/content at a later `observed_at` is idempotent;
+- no original assignment is resent during collection recovery.
+
 ## C. Thread-not-loaded recovery
 
 1. Submit one marked assignment.
