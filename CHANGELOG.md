@@ -2,6 +2,13 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## [1.2.1] - 2026-09-04
+
+### Fixed
+
+- Ignore a stale native read-back from a different assignment without changing
+  the current receipt; wait for and verify the matching message without resending.
+
 ## [1.2.0] - 2026-09-04
 
 ### Added
@@ -66,6 +73,7 @@ All notable changes to Codex Pro Dispatch are documented here.
 
 - The v1 safety patch was prompted by a native send failure whose visible `systemError` masked an unusual-activity HTTP 403. PR #2 made the failure explicit, kept the assignment collect-only, and added a cooldown that cannot be bypassed by abandoning the receipt or changing workers.
 
+[1.2.1]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v0.1.0...v1.0.0
