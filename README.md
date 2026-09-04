@@ -9,7 +9,10 @@ An independent macOS safety wrapper for a supported Codex desktop workflow. It h
 
 **Desktop-only:** the dispatch workflow runs only inside the official ChatGPT desktop app for macOS with Codex. It does not run from ChatGPT on the web, Codex CLI alone, an IDE extension, Windows, or Linux. The Codex CLI is used only to install and manage the plugin.
 
-**Version: v1.1.0 stable.** The local state helper, plugin package, native desktop handoff, same-worker continuation, collect-only recovery, and GitHub connector proof passed the [release acceptance matrix](docs/acceptance.md). See the [redacted v1.1.0 receipt](docs/releases/v1.1.0-acceptance.md).
+**Version: v1.2.0 stable.** Long results now continue in bounded chunks and are
+reassembled exactly without weakening the existing no-resend contract. See the
+[v1.2.0 long-result receipt](docs/releases/v1.2.0-long-result-acceptance.md) and
+the prior [v1.1.0 full-matrix receipt](docs/releases/v1.1.0-acceptance.md).
 
 This project is independent and unofficial. It is not affiliated with, endorsed by, or maintained by OpenAI.
 
@@ -81,8 +84,8 @@ git --version
 | Local state machine | Tested on macOS and Linux in CI |
 | Plugin manifest | Validated against the current Codex plugin schema |
 | Manual skill discovery | `$HOME/.agents/skills` |
-| Native end-to-end workflow | v1.1.0 matrix passed on the tested maintainer build; compatibility remains build-sensitive |
-| Current maintainer app build | `26.820.60940` (`7119`) on macOS 26.6.2; v1.1.0 matrix passed |
+| Native end-to-end workflow | v1.1.0 full matrix and v1.2.0 long-result gate passed; compatibility remains build-sensitive |
+| Current maintainer app build | `26.901.31953` (`7868`) on macOS 26.6.2; v1.2.0 long-result gate passed |
 
 See [docs/compatibility.md](docs/compatibility.md) for the exact capability contract and tested-build policy.
 
@@ -90,10 +93,10 @@ See [docs/compatibility.md](docs/compatibility.md) for the exact capability cont
 
 OpenAI's current guidance packages reusable skills as plugins. This repository includes the plugin manifest and marketplace catalog needed for a normal Codex install. See the official [skills](https://developers.openai.com/codex/skills) and [plugin packaging](https://developers.openai.com/plugins/build/plugins) documentation.
 
-Install the stable release from the immutable `v1.1.0` tag:
+Install the stable release from the immutable `v1.2.0` tag:
 
 ```bash
-codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.1.0
+codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.2.0
 codex plugin add codex-pro-dispatch@codex-pro-dispatch
 ```
 
@@ -111,7 +114,7 @@ For source development or audit-first installation, clone and pin the same immut
 ```bash
 git clone https://github.com/iannwu/codex-pro-dispatch.git
 cd codex-pro-dispatch
-git checkout v1.1.0
+git checkout v1.2.0
 ./install.sh
 ```
 

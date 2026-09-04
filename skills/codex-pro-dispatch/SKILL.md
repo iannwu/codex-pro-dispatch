@@ -3,7 +3,7 @@ name: codex-pro-dispatch
 description: Dispatch a bounded implementation, review, or research assignment from a Codex task to a dedicated ChatGPT Pro conversation in the official combined desktop app, recover the result without resending, and return to the parent Codex task. Use when the user asks Codex to delegate work to ChatGPT Pro; do not use for ordinary local coding.
 metadata:
   short-description: Dispatch work to official-app ChatGPT Pro
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Codex Pro Dispatch

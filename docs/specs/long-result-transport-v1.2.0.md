@@ -372,19 +372,19 @@ contract-drift risk than time savings.
 
 ## Implementation Tasks
 
-- [ ] **T1 (P1, human: ~1h / CC: ~15min)** — Protocol — Add conditional bounded response framing.
+- [x] **T1 (P1, human: ~1h / CC: ~15min)** — Protocol — Add conditional bounded response framing.
   - Surfaced by: Architecture review — initial and continuation prompts require mutually exclusive response forms.
   - Files: `src/codex_pro_dispatch/core.py`, `tests/test_core.py`
   - Verify: initial wrapper advertises short/control only; exact `CONTINUE` wrapper advertises chunk only.
-- [ ] **T2 (P1, human: ~2h / CC: ~25min)** — Completion — Validate exact footer, bounds, modes, and legacy receipts.
+- [x] **T2 (P1, human: ~2h / CC: ~25min)** — Completion — Validate exact footer, bounds, modes, and legacy receipts.
   - Surfaced by: Code-quality review — v1.1 normalizes/strips responses and cannot distinguish footer-bound receipts.
   - Files: `src/codex_pro_dispatch/core.py`, `src/codex_pro_dispatch/cli.py`, `tests/test_core.py`, `tests/test_cli.py`
   - Verify: `python3 -m unittest tests.test_core tests.test_cli`
-- [ ] **T3 (P1, human: ~2h / CC: ~25min)** — Skill — Orchestrate bounded chunks with transient assembly.
+- [x] **T3 (P1, human: ~2h / CC: ~25min)** — Skill — Orchestrate bounded chunks with transient assembly.
   - Surfaced by: Architecture/performance review — exact multi-call assembly needs private scratch storage, one replacement rule, and a finite bound.
   - Files: `skills/codex-pro-dispatch/SKILL.md`, `skills/codex-pro-dispatch/references/native-protocol.md`, `tests/test_skill_contract.py`
   - Verify: `python3 -m unittest tests.test_skill_contract`
-- [ ] **T4 (P1, human: ~2h / CC: ~30min)** — Verification — Cover every branch and run exact long-result acceptance.
+- [x] **T4 (P1, human: ~2h / CC: ~30min)** — Verification — Cover every branch and run exact long-result acceptance.
   - Surfaced by: Test review — byte boundaries, opaque marker examples, sequencing, idempotency, local failures, and live >30K reconstruction need explicit coverage.
   - Files: `tests/test_core.py`, `tests/test_cli.py`, `tests/test_skill_contract.py`
   - Verify: `python3 -m unittest discover -s tests`, then the native desktop acceptance described below.
