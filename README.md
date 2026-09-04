@@ -31,6 +31,8 @@ Codex Pro Dispatch provides the safety protocol around that handoff:
 - no automatic resend after ambiguity, timeout, or restart
 - result markers and stale-response rejection
 - same-worker follow-ups with new assignment IDs
+- exact reassembly of long results from bounded continuation chunks; 10,000
+  bytes is a per-response generation target, not a hard acceptance gate
 - independent verification of worker-reported repository changes
 
 It is not a model router or a standalone ChatGPT transport. The repository supplies the workflow, plugin package, and local receipt state machine; the supported Codex host supplies native conversation controls.

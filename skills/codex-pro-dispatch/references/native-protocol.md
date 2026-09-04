@@ -96,15 +96,16 @@ metadata is not silently treated as false.
 When the native reader explicitly reports truncation, preserve the exact bytes
 and pass `--truncated` to `complete`; otherwise omit that flag.
 
-The response is valid UTF-8, must contain no CR byte, is at most 10,000 UTF-8 bytes,
-begins at byte zero with the result marker, and ends as literal final bytes:
+The response is valid UTF-8, must contain no CR byte, begins at byte zero with
+the result marker, and ends as literal final bytes:
 
 ```text
 [CODEX_PRO_DISPATCH_END assignment_id=<current-assignment-id>]
 ```
 
 Never normalize newlines, strip body text, or scan opaque body bytes for
-marker-looking examples. The initial wrapper permits only a nonempty short body
+marker-looking examples. Ten thousand UTF-8 bytes is a generation guideline,
+not an acceptance gate. The initial wrapper permits only a nonempty short body
 or the exact no-body continuation-required control form. For a normalized body
 whose first byte starts the exact continuation header, the wrapper permits only
 the matching chunk form:
@@ -130,9 +131,10 @@ The parent appends the returned payload byte-for-byte to one private mode-0600
 assembly file, then flushes and fsyncs before advancing the accepted index. At
 chunk 16 with final=0, stop before chunk 17.
 
-Malformed, oversized, truncated, wrong-worker, wrong-assignment, wrong-root,
-wrong-index, or incomplete output is rejected before receipt completion. Do not
-append it, advance the logical index, or resend it. The operator may make
+Malformed, truncated, wrong-worker, wrong-assignment, wrong-root, wrong-index,
+or incomplete output is rejected before receipt completion. A response above
+the 10,000-byte guideline is still accepted when its envelope is intact. Do not
+append rejected output, advance the logical index, or resend it. The operator may make
 exactly one operator-authorized replacement for a rejected native chunk at an
 expected index: abandon the failed active assignment, set the in-task guard,
 then prepare a new assignment for the same index with `continuation_of` the last

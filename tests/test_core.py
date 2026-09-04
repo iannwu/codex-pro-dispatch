@@ -532,7 +532,7 @@ class CoreTests(unittest.TestCase):
         initial = cpd.wrap_prompt("Inspect the code.", "dispatch-initial-7319")
         self.assertIn("CONTINUATION_REQUIRED", initial)
         self.assertNotIn("CODEX_PRO_DISPATCH_CHUNK", initial)
-        self.assertIn("below 10000 UTF-8 bytes", initial)
+        self.assertIn("Aim to keep the entire assistant response below 10000 UTF-8 bytes", initial)
 
         continuation_body = (
             "[CODEX_PRO_DISPATCH_CONTINUE root_assignment_id=dispatch-root-7319 "
@@ -585,34 +585,17 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("result_kind", value)
         self.assertEqual(payload, body)
 
-    def test_short_result_at_exact_byte_limit_completes_and_oversized_result_fails(self) -> None:
+    def test_response_above_size_guideline_completes_when_envelope_is_intact(self) -> None:
         prepared = self.prepare()
         self.submit(prepared)
         marker = f"[CODEX_PRO_DISPATCH_RESULT assignment_id={prepared.assignment_id}]\n"
         footer = f"\n[CODEX_PRO_DISPATCH_END assignment_id={prepared.assignment_id}]"
-        body = "x" * (10_000 - len(marker.encode("utf-8")) - len(footer.encode("utf-8")))
+        body = "x" * (10_291 - len(marker.encode("utf-8")) - len(footer.encode("utf-8")))
         response = marker + body + footer
-        self.assertEqual(len(response.encode("utf-8")), 10_000)
+        self.assertEqual(len(response.encode("utf-8")), 10_291)
         value, payload = cpd.complete_assignment(prepared.assignment_id, response, self.paths)
         self.assertEqual(value["status"], "complete")
         self.assertEqual(payload, body)
-
-        oversized = cpd.prepare_assignment(
-            "A second bounded response.",
-            parent_task_id=self.parent_id,
-            assignment_id="dispatch-oversized-7319",
-            paths=self.paths,
-        )
-        self.submit(oversized)
-        with self.assertRaisesRegex(cpd.MarkerError, "response-too-large"):
-            cpd.complete_assignment(
-                oversized.assignment_id,
-                self.bounded_response(oversized.assignment_id, "x" * 10_000),
-                self.paths,
-            )
-        self.assertEqual(
-            cpd.load_assignment(oversized.assignment_id, self.paths)["status"], "submitted"
-        )
 
     def test_explicit_native_truncation_is_rejected_without_completion(self) -> None:
         prepared = self.prepare()

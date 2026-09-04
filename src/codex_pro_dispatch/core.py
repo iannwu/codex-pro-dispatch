@@ -30,9 +30,8 @@ RESULT_MARKER_PREFIX = "[CODEX_PRO_DISPATCH_RESULT assignment_id="
 END_MARKER_PREFIX = "[CODEX_PRO_DISPATCH_END assignment_id="
 CONTINUATION_REQUIRED_PREFIX = "[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED "
 CHUNK_PREFIX = "[CODEX_PRO_DISPATCH_CHUNK "
-CONTINUE_PROMPT_PREFIX = "[CODEX_PRO_DISPATCH_CONTINUE "
 BOUNDED_RESULT_PROTOCOL = "bounded-footer-v1"
-MAX_RESPONSE_BYTES = 10_000
+RESPONSE_GUIDELINE_BYTES = 10_000
 MAX_CHUNKS = 16
 CHUNK_INDEX_PATTERN = re.compile(r"^(?:[1-9]|1[0-6])$")
 CONTINUE_PROMPT_PATTERN = re.compile(
@@ -341,7 +340,7 @@ def wrap_prompt(prompt: str, assignment_id: str) -> str:
     continuation = _continuation_prompt_at_byte_zero(normalized)
     shared = (
         "Response limits and framing:\n"
-        f"1. Keep the entire assistant response below {MAX_RESPONSE_BYTES} UTF-8 bytes.\n"
+        f"1. Aim to keep the entire assistant response below {RESPONSE_GUIDELINE_BYTES} UTF-8 bytes.\n"
         "2. Target no more than 6,000 characters of body text.\n"
         f"3. Begin at byte zero with this exact line: {marker}\n"
         f"4. End with this exact final line and no byte after it: {footer}\n"
@@ -427,11 +426,6 @@ def _parse_result(
         )
 
     raw = _response_bytes(response)
-    if len(raw) > MAX_RESPONSE_BYTES:
-        raise MarkerError(
-            f"response-too-large: response exceeds {MAX_RESPONSE_BYTES} UTF-8 bytes",
-            details={"byte_length": len(raw), "maximum": MAX_RESPONSE_BYTES},
-        )
     if b"\r" in raw:
         raise MarkerError("response-cr-byte: response contains a CR byte")
     try:

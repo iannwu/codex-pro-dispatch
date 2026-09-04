@@ -9,12 +9,13 @@ v1.2.0 makes one narrow reliability change:
 - Every newly prepared response must end with an exact per-assignment end marker.
 - A response explicitly reported by the native reader as `truncated: true` is always rejected.
 - A response without the required final marker is always rejected.
-- Every accepted response must be no larger than 10,000 UTF-8 bytes.
+- Every prompt asks the worker to aim below 10,000 UTF-8 bytes; this is guidance,
+  not an acceptance gate.
 - Long read-only work is returned through one explicit continuation protocol.
 
 Implementation starts from the clean v1.1.0 code on `origin/main`. The current uncommitted v1.2 transport experiment is research only and is not the implementation baseline.
 
-The native reader may omit the `truncated` field for normal results. v1.2.0 does not interpret omission as an undocumented `false`. Instead, completion is proven operationally by the bounded response size and the exact final marker. A prefix cut near 20,000 characters exceeds the 10,000-byte ceiling and is rejected even if it ends on marker-looking body text.
+The native reader may omit the `truncated` field for normal results. v1.2.0 does not interpret omission as an undocumented `false`. Instead, completion requires the exact final marker, while an explicit `truncated: true` is always rejected. The 10,000-byte target reduces the chance of reaching the native reader's truncation boundary without turning a small model overshoot into a retry.
 
 The existing v1.1.0 workflow remains intact: one configured Pro worker, one unresolved assignment at a time, durable arming before each send, exact user-message read-back, no automatic resend after uncertainty, stable thread identity, and exact parent-task restoration.
 
@@ -49,17 +50,18 @@ The supported transport remains the official combined ChatGPT and Codex desktop 
 
 ## Exact protocol
 
-### Shared size and marker rules
+### Shared size guidance and marker rules
 
 Every v1.2.0 prepared prompt instructs the worker to:
 
-1. Keep the complete assistant message below 10,000 UTF-8 bytes.
+1. Aim to keep the complete assistant message below 10,000 UTF-8 bytes.
 2. Target no more than 6,000 characters of body text.
 3. Begin at byte zero with the supplied result marker and end with the supplied
    exact end marker.
 4. Emit only the form selected by the conditional wrapper below.
 
-The parent enforces the 10,000-byte limit. The model is not trusted to count precisely.
+The parent does not reject a complete response solely for exceeding that
+guideline because the model cannot count bytes precisely.
 
 Every accepted native item must come from the configured worker conversation,
 have a stable assistant item ID and completed enclosing turn, and not report
@@ -86,7 +88,7 @@ below and prepares it with the existing `--continuation-of` relationship.
 ### Raw response grammar
 
 The parser reads raw response bytes before UTF-8 decoding: they must be valid
-UTF-8, at most 10,000 bytes, and contain no CR byte. `LF` below is byte
+UTF-8 and contain no CR byte. `LF` below is byte
 `0x0a`. There is no BOM, leading blank line, newline conversion, normalization,
 or stripping: the result marker starts at byte zero and the end marker is the
 literal final byte sequence (so no LF, blank line, or other byte follows it).
@@ -154,7 +156,7 @@ Every continuation uses the same deterministic message body:
 Return only chunk <index> of the same deliverable.
 Continue from the last accepted boundary without repeating or summarizing accepted text.
 Use the required chunk envelope.
-Keep the entire response below 10,000 UTF-8 bytes.
+Aim to keep the entire response below 10,000 UTF-8 bytes.
 Set final=1 only when this chunk completes the deliverable.
 Otherwise set final=0.
 ```
@@ -179,12 +181,11 @@ The parent accepts it only when:
 - `index` is canonical decimal `1` through `16` (no sign or leading zero), and
   `final` is exactly `0` or `1`.
 - The body satisfies the raw grammar's empty-final rule.
-- All shared size, identity, completion, truncation, and marker checks pass.
+- All shared identity, completion, truncation, and marker checks pass.
 
 A logical result may contain at most 16 chunks. Reaching the limit with
 `final=0` stops collection with an incomplete-result error. This single bound
-prevents an uncooperative worker from creating an endless continuation chain
-and caps transient assembly below 160,000 UTF-8 bytes.
+prevents an uncooperative worker from creating an endless continuation chain.
 
 ### Parent-side assembly
 
@@ -290,7 +291,9 @@ form.
 
 ## Failure handling and one replacement
 
-Reject a response when it is truncated, oversized, incomplete, malformed, from the wrong worker, for the wrong assignment, or has the wrong root ID or chunk index.
+Reject a response when it is truncated, incomplete, malformed, from the wrong
+worker, for the wrong assignment, or has the wrong root ID or chunk index. The
+10,000-byte target is generation guidance, not an acceptance gate.
 
 Rejected text is not appended, the accepted index does not advance, and the
 failed user message is never resent. There is no automatic replacement message
@@ -388,8 +391,8 @@ contract-drift risk than time savings.
 
 ## Acceptance tests
 
-1. A short result at exactly 10,000 UTF-8 bytes completes; 10,001 bytes,
-   explicit native `truncated: true`, a missing footer, CR/CRLF, a leading
+1. A complete result above the 10,000-byte guideline still completes; explicit
+   native `truncated: true`, a missing footer, CR/CRLF, a leading
    byte before the marker, or bytes after the footer fail closed.
 2. Raw slicing preserves leading/trailing body LFs and marker-looking result,
    control, chunk, and footer examples byte for byte; only the reserved first
@@ -422,7 +425,7 @@ contract-drift risk than time savings.
     initial wrapper with short/control-only instructions and an exact
     `CONTINUE` wrapper with chunk-only instructions, plus the footer and
     assembly/recovery rules. A native acceptance run rejects truncation,
-    reconstructs a result over 30,000 characters from sub-10,000-byte chunks
+    reconstructs a result over 30,000 characters from chunks guided below 10,000 bytes
     with exact bytes and parent restoration, and exercises multi-chunk
     write-failure stop-and-cleanup.
 

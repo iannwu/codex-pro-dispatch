@@ -71,7 +71,7 @@ class SkillContractTests(unittest.TestCase):
             "Return only chunk <index> of the same deliverable.\n"
             "Continue from the last accepted boundary without repeating or summarizing accepted text.\n"
             "Use the required chunk envelope.\n"
-            "Keep the entire response below 10,000 UTF-8 bytes.\n"
+            "Aim to keep the entire response below 10,000 UTF-8 bytes.\n"
             "Set final=1 only when this chunk completes the deliverable.\n"
             "Otherwise set final=0."
         )
@@ -127,7 +127,7 @@ class SkillContractTests(unittest.TestCase):
             "explicit native truncation metadata",
             "valid UTF-8",
             "contain no CR byte",
-            "10,000 UTF-8 bytes",
+            "generation guideline, not an acceptance gate",
             "Never normalize newlines, strip body text",
             "at most 16",
             "flushes and fsyncs before advancing",

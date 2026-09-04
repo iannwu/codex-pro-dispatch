@@ -269,8 +269,8 @@ pro-dispatch complete '<assignment-id>' --response-file '<response-file>' --trun
 The parent independently verifies every reported branch, commit, file change,
 and CI result for any separately authorized repository-write assignment.
 
-Every accepted response is valid UTF-8, contains no CR byte, is at most 10,000
-UTF-8 bytes, begins at byte zero with the exact result marker, and ends with
+Every accepted response is valid UTF-8, contains no CR byte, begins at byte
+zero with the exact result marker, and ends with
 this exact footer as the literal final byte sequence:
 
 ```text
@@ -278,8 +278,9 @@ this exact footer as the literal final byte sequence:
 ```
 
 Never normalize newlines, strip body text, or search opaque body bytes for
-marker-looking examples. The parent enforces the byte ceiling; prompt the worker
-to target no more than 6,000 body characters.
+marker-looking examples. Ten thousand UTF-8 bytes is a generation guideline,
+not an acceptance gate; prompt the worker to target no more than 6,000 body
+characters.
 
 For an initial assignment, `wrap_prompt` permits only a nonempty short result
 or this exact no-body control form; it must not advertise chunks:
@@ -359,7 +360,7 @@ body to a new private prompt file without extra bytes:
 Return only chunk <index> of the same deliverable.
 Continue from the last accepted boundary without repeating or summarizing accepted text.
 Use the required chunk envelope.
-Keep the entire response below 10,000 UTF-8 bytes.
+Aim to keep the entire response below 10,000 UTF-8 bytes.
 Set final=1 only when this chunk completes the deliverable.
 Otherwise set final=0.
 ```
@@ -403,6 +404,6 @@ incomplete result. Clear the guard only after a successful append and index
 advance. Local assembly failure never consumes or permits this replacement.
 
 Native desktop acceptance remains a release gate: reject truncation; reconstruct
-a result over 30,000 characters from sub-10,000-byte chunks with exact bytes and
+a result over 30,000 characters from chunks guided below 10,000 bytes with exact bytes and
 parent restoration; and exercise multi-chunk assembly write-failure
 stop-and-cleanup.
