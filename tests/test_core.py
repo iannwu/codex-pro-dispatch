@@ -49,6 +49,42 @@ class CoreTests(unittest.TestCase):
     def arm(self, prepared: cpd.PreparedAssignment) -> dict[str, object]:
         return cpd.arm_assignment(prepared.assignment_id, self.paths)
 
+    def bounded_response(self, assignment_id: str, body: str) -> str:
+        return (
+            f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
+            f"{body}\n"
+            f"[CODEX_PRO_DISPATCH_END assignment_id={assignment_id}]"
+        )
+
+    def control_response(self, assignment_id: str, root_assignment_id: str | None = None) -> str:
+        root = root_assignment_id or assignment_id
+        return (
+            f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
+            "[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED "
+            f"root_assignment_id={root}]\n"
+            f"[CODEX_PRO_DISPATCH_END assignment_id={assignment_id}]"
+        )
+
+    def chunk_response(
+        self,
+        assignment_id: str,
+        root_assignment_id: str,
+        index: str,
+        final: str,
+        body: str,
+    ) -> str:
+        return (
+            f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
+            "[CODEX_PRO_DISPATCH_CHUNK "
+            f"root_assignment_id={root_assignment_id} index={index} final={final}]\n"
+            f"{body}\n"
+            f"[CODEX_PRO_DISPATCH_END assignment_id={assignment_id}]"
+        )
+
+    def submit(self, prepared: cpd.PreparedAssignment) -> None:
+        self.arm(prepared)
+        cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
+
     def test_worker_requires_explicit_pro_confirmation(self) -> None:
         with self.assertRaises(cpd.ConfigurationError):
             cpd.save_worker(
@@ -469,9 +505,8 @@ class CoreTests(unittest.TestCase):
         prepared = self.prepare()
         self.arm(prepared)
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
-        response = (
-            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\n\n"
-            "commit_sha=abc123\nbranch=feature/test"
+        response = self.bounded_response(
+            "dispatch-test-7319", "commit_sha=abc123\nbranch=feature/test"
         )
         value, payload = cpd.complete_assignment(
             prepared.assignment_id, response, self.paths
@@ -484,19 +519,303 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(second["response_sha256"], value["response_sha256"])
         self.assertEqual(second_payload, payload)
 
+    def test_prepare_marks_new_receipts_with_the_bounded_footer_protocol(self) -> None:
+        prepared = self.prepare()
+        receipt = cpd.load_assignment(prepared.assignment_id, self.paths)
+        self.assertEqual(receipt["result_protocol"], "bounded-footer-v1")
+        self.assertIn(
+            "[CODEX_PRO_DISPATCH_END assignment_id=dispatch-test-7319]",
+            prepared.wrapped_prompt,
+        )
+
+    def test_wrap_prompt_uses_mutually_exclusive_initial_and_continuation_forms(self) -> None:
+        initial = cpd.wrap_prompt("Inspect the code.", "dispatch-initial-7319")
+        self.assertIn("CONTINUATION_REQUIRED", initial)
+        self.assertNotIn("CODEX_PRO_DISPATCH_CHUNK", initial)
+        self.assertIn("Aim to keep the entire assistant response below 10000 UTF-8 bytes", initial)
+
+        continuation_body = (
+            "[CODEX_PRO_DISPATCH_CONTINUE root_assignment_id=dispatch-root-7319 "
+            "next_index=1]\n\nReturn only the next body."
+        )
+        continuation = cpd.wrap_prompt(continuation_body, "dispatch-chunk-7319")
+        self.assertIn("CODEX_PRO_DISPATCH_CHUNK", continuation)
+        self.assertNotIn("CONTINUATION_REQUIRED", continuation)
+        self.assertIn("root_assignment_id=dispatch-root-7319 index=1", continuation)
+
+        leading_byte = cpd.wrap_prompt("\n" + continuation_body, "dispatch-leading-7319")
+        self.assertIn("CONTINUATION_REQUIRED", leading_byte)
+        self.assertNotIn("CODEX_PRO_DISPATCH_CHUNK", leading_byte)
+
+    def test_raw_envelope_requires_byte_zero_footer_utf8_and_lf_only(self) -> None:
+        prepared = self.prepare()
+        self.submit(prepared)
+        valid = self.bounded_response(prepared.assignment_id, "OK")
+        invalid_responses: list[str | bytes] = [
+            "x" + valid,
+            valid + "x",
+            valid.replace("\nOK\n", "\r\nOK\n"),
+            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nOK",
+            b"[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\n\xff\n"
+            b"[CODEX_PRO_DISPATCH_END assignment_id=dispatch-test-7319]",
+        ]
+        for response in invalid_responses:
+            with self.subTest(response_type=type(response).__name__):
+                with self.assertRaises(cpd.MarkerError):
+                    cpd.complete_assignment(prepared.assignment_id, response, self.paths)
+        self.assertEqual(
+            cpd.load_assignment(prepared.assignment_id, self.paths)["status"], "submitted"
+        )
+
+    def test_raw_body_is_sliced_without_normalization_or_marker_scanning(self) -> None:
+        prepared = self.prepare()
+        self.submit(prepared)
+        body = (
+            "\nfirst\n"
+            "[CODEX_PRO_DISPATCH_RESULT assignment_id=another-assignment]\n"
+            "[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED root_assignment_id=example]\n"
+            "[CODEX_PRO_DISPATCH_CHUNK root_assignment_id=example index=1 final=0]\n"
+            "[CODEX_PRO_DISPATCH_END assignment_id=another-assignment]\n"
+        )
+        value, payload = cpd.complete_assignment(
+            prepared.assignment_id,
+            self.bounded_response(prepared.assignment_id, body),
+            self.paths,
+        )
+        self.assertNotIn("result_kind", value)
+        self.assertEqual(payload, body)
+
+    def test_response_above_size_guideline_completes_when_envelope_is_intact(self) -> None:
+        prepared = self.prepare()
+        self.submit(prepared)
+        marker = f"[CODEX_PRO_DISPATCH_RESULT assignment_id={prepared.assignment_id}]\n"
+        footer = f"\n[CODEX_PRO_DISPATCH_END assignment_id={prepared.assignment_id}]"
+        body = "x" * (10_291 - len(marker.encode("utf-8")) - len(footer.encode("utf-8")))
+        response = marker + body + footer
+        self.assertEqual(len(response.encode("utf-8")), 10_291)
+        value, payload = cpd.complete_assignment(prepared.assignment_id, response, self.paths)
+        self.assertEqual(value["status"], "complete")
+        self.assertEqual(payload, body)
+
+    def test_explicit_native_truncation_is_rejected_without_completion(self) -> None:
+        prepared = self.prepare()
+        self.submit(prepared)
+        with self.assertRaisesRegex(cpd.MarkerError, "truncated-response"):
+            cpd.complete_assignment(
+                prepared.assignment_id,
+                self.bounded_response(prepared.assignment_id, "OK"),
+                self.paths,
+                truncated=True,
+            )
+        self.assertEqual(
+            cpd.load_assignment(prepared.assignment_id, self.paths)["status"], "submitted"
+        )
+
+    def test_control_response_is_exact_and_only_reserved_first_line_is_interpreted(self) -> None:
+        prepared = self.prepare()
+        self.submit(prepared)
+        value, payload = cpd.complete_assignment(
+            prepared.assignment_id,
+            self.control_response(prepared.assignment_id),
+            self.paths,
+        )
+        self.assertNotIn("result_kind", value)
+        self.assertEqual(payload, "")
+
+        malformed = cpd.prepare_assignment(
+            "Try control parsing.",
+            parent_task_id=self.parent_id,
+            assignment_id="dispatch-control-invalid-7319",
+            paths=self.paths,
+        )
+        self.submit(malformed)
+        with self.assertRaisesRegex(cpd.MarkerError, "control-root-mismatch"):
+            cpd.complete_assignment(
+                malformed.assignment_id,
+                self.control_response(malformed.assignment_id, "wrong-root-7319"),
+                self.paths,
+            )
+        with self.assertRaisesRegex(cpd.MarkerError, "continuation-required-control-invalid"):
+            cpd.complete_assignment(
+                malformed.assignment_id,
+                self.bounded_response(
+                    malformed.assignment_id,
+                    "[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED "
+                    f"root_assignment_id={malformed.assignment_id}]\nextra",
+                ),
+                self.paths,
+            )
+        opaque = self.bounded_response(
+            malformed.assignment_id,
+            "\n[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED "
+            f"root_assignment_id={malformed.assignment_id}]",
+        )
+        value, payload = cpd.complete_assignment(malformed.assignment_id, opaque, self.paths)
+        self.assertNotIn("result_kind", value)
+        self.assertTrue(payload.startswith("\n[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED"))
+
+    def test_chunk_mode_requires_paired_expectations_and_exact_matching_header(self) -> None:
+        prepared = self.prepare(assignment_id="dispatch-chunk-current-7319")
+        self.submit(prepared)
+        root = "dispatch-root-7319"
+        response = self.chunk_response(prepared.assignment_id, root, "1", "0", "first")
+        with self.assertRaises(cpd.ConfigurationError):
+            cpd.complete_assignment(
+                prepared.assignment_id,
+                response,
+                self.paths,
+                expected_root_assignment_id=root,
+            )
+        with self.assertRaisesRegex(cpd.MarkerError, "chunk-arguments-required"):
+            cpd.complete_assignment(prepared.assignment_id, response, self.paths)
+        with self.assertRaisesRegex(cpd.MarkerError, "chunk-envelope-required"):
+            cpd.complete_assignment(
+                prepared.assignment_id,
+                self.bounded_response(prepared.assignment_id, "short"),
+                self.paths,
+                expected_root_assignment_id=root,
+                expected_chunk_index="1",
+            )
+        with self.assertRaisesRegex(cpd.MarkerError, "chunk-root-mismatch"):
+            cpd.complete_assignment(
+                prepared.assignment_id,
+                self.chunk_response(prepared.assignment_id, "wrong-root-7319", "1", "0", "first"),
+                self.paths,
+                expected_root_assignment_id=root,
+                expected_chunk_index="1",
+            )
+        with self.assertRaisesRegex(cpd.MarkerError, "chunk-index-invalid"):
+            cpd.complete_assignment(
+                prepared.assignment_id,
+                self.chunk_response(prepared.assignment_id, root, "01", "0", "first"),
+                self.paths,
+                expected_root_assignment_id=root,
+                expected_chunk_index="1",
+            )
+        with self.assertRaisesRegex(cpd.MarkerError, "chunk-index-mismatch"):
+            cpd.complete_assignment(
+                prepared.assignment_id,
+                self.chunk_response(prepared.assignment_id, root, "2", "0", "first"),
+                self.paths,
+                expected_root_assignment_id=root,
+                expected_chunk_index="1",
+            )
+        with self.assertRaisesRegex(cpd.MarkerError, "chunk-final-invalid"):
+            cpd.complete_assignment(
+                prepared.assignment_id,
+                self.chunk_response(prepared.assignment_id, root, "1", "2", "first"),
+                self.paths,
+                expected_root_assignment_id=root,
+                expected_chunk_index="1",
+            )
+        value, payload = cpd.complete_assignment(
+            prepared.assignment_id,
+            response,
+            self.paths,
+            expected_root_assignment_id=root,
+            expected_chunk_index="1",
+        )
+        self.assertNotIn("result_kind", value)
+        self.assertNotIn("result_root_assignment_id", value)
+        self.assertNotIn("chunk_index", value)
+        self.assertNotIn("final", value)
+        self.assertEqual(payload, "first")
+
+    def test_chunk_empty_rules_and_idempotency_are_fail_closed(self) -> None:
+        prepared = self.prepare(assignment_id="dispatch-chunk-empty-7319")
+        self.submit(prepared)
+        root = "dispatch-root-7319"
+        for final in ("0", "1"):
+            with self.subTest(final=final):
+                with self.assertRaisesRegex(cpd.MarkerError, "chunk-body-empty"):
+                    cpd.complete_assignment(
+                        prepared.assignment_id,
+                        self.chunk_response(prepared.assignment_id, root, "1", final, ""),
+                        self.paths,
+                        expected_root_assignment_id=root,
+                        expected_chunk_index="1",
+                    )
+
+        response = self.chunk_response(prepared.assignment_id, root, "1", "0", "first")
+        first, payload = cpd.complete_assignment(
+            prepared.assignment_id,
+            response,
+            self.paths,
+            expected_root_assignment_id=root,
+            expected_chunk_index="1",
+        )
+        repeated, repeated_payload = cpd.complete_assignment(
+            prepared.assignment_id,
+            response,
+            self.paths,
+            expected_root_assignment_id=root,
+            expected_chunk_index="1",
+        )
+        self.assertEqual(repeated["response_sha256"], first["response_sha256"])
+        self.assertEqual(repeated_payload, payload)
+        with self.assertRaises(cpd.StateError):
+            cpd.complete_assignment(
+                prepared.assignment_id,
+                self.chunk_response(prepared.assignment_id, root, "1", "1", "changed"),
+                self.paths,
+                expected_root_assignment_id=root,
+                expected_chunk_index="1",
+            )
+
+        later = cpd.prepare_assignment(
+            "Second chunk.",
+            parent_task_id=self.parent_id,
+            continuation_of=prepared.assignment_id,
+            assignment_id="dispatch-empty-final-7319",
+            paths=self.paths,
+        )
+        self.submit(later)
+        value, empty_payload = cpd.complete_assignment(
+            later.assignment_id,
+            self.chunk_response(later.assignment_id, root, "2", "1", ""),
+            self.paths,
+            expected_root_assignment_id=root,
+            expected_chunk_index="2",
+        )
+        self.assertNotIn("final", value)
+        self.assertEqual(empty_payload, "")
+
+    def test_active_legacy_receipt_is_inspect_recover_or_abandon_only(self) -> None:
+        prepared = self.prepare()
+        receipt = json.loads(prepared.receipt_path.read_text(encoding="utf-8"))
+        receipt.pop("result_protocol")
+        prepared.receipt_path.write_text(json.dumps(receipt) + "\n", encoding="utf-8")
+        self.assertEqual(cpd.load_assignment(prepared.assignment_id, self.paths)["status"], "prepared")
+        self.assertEqual(cpd.recovery_info(prepared.assignment_id, self.paths)["status"], "prepared")
+        with self.assertRaisesRegex(cpd.StateError, "legacy-active-assignment"):
+            self.arm(prepared)
+        with self.assertRaisesRegex(cpd.StateError, "legacy-active-assignment"):
+            cpd.prepare_assignment(
+                "Blocked by legacy receipt.",
+                parent_task_id=self.parent_id,
+                assignment_id="dispatch-legacy-successor-7319",
+                paths=self.paths,
+            )
+        abandoned = cpd.abandon_assignment(
+            prepared.assignment_id,
+            reason="operator is finishing the old receipt with v1.1",
+            paths=self.paths,
+        )
+        self.assertEqual(abandoned["status"], "abandoned")
+
     def test_completed_receipt_cannot_be_rewritten(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
         cpd.complete_assignment(
             prepared.assignment_id,
-            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nOriginal",
+            self.bounded_response("dispatch-test-7319", "Original"),
             self.paths,
         )
         with self.assertRaises(cpd.StateError):
             cpd.complete_assignment(
                 prepared.assignment_id,
-                "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nLater",
+                self.bounded_response("dispatch-test-7319", "Later"),
                 self.paths,
             )
 
@@ -506,7 +825,7 @@ class CoreTests(unittest.TestCase):
         cpd.mark_submitted(first.assignment_id, first.wrapped_prompt, self.paths)
         cpd.complete_assignment(
             first.assignment_id,
-            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone",
+            self.bounded_response("dispatch-test-7319", "Done"),
             self.paths,
         )
         second = cpd.prepare_assignment(
@@ -618,7 +937,8 @@ class CoreTests(unittest.TestCase):
     def test_complete_requires_one_verified_submission(self) -> None:
         prepared = self.prepare()
         response = (
-            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone"
+            "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-test-7319]\nDone\n"
+            "[CODEX_PRO_DISPATCH_END assignment_id=dispatch-test-7319]"
         )
         with self.assertRaises(cpd.StateError):
             cpd.complete_assignment(prepared.assignment_id, response, self.paths)

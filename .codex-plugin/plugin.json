@@ -1,6 +1,6 @@
 {
   "name": "codex-pro-dispatch",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A fail-closed macOS desktop Codex workflow for dispatching one bounded assignment to a dedicated ChatGPT Pro conversation.",
   "author": {
     "name": "Iann Wu",
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Codex Pro Dispatch",
     "shortDescription": "Safe Codex-to-Pro dispatch",
-    "longDescription": "Desktop-only on the official ChatGPT app for macOS. Dispatch one bounded implementation, review, or research assignment from Codex to a dedicated ChatGPT Pro conversation with an at-most-one native send attempt, collect-only recovery, exact thread identity, and independent result verification.",
+    "longDescription": "Desktop-only on the official ChatGPT app for macOS. Dispatch bounded work from Codex to a dedicated ChatGPT Pro conversation with at-most-one sends, collect-only recovery, and exact reassembly of long results from continuation chunks.",
     "developerName": "Iann Wu",
     "category": "Developer Tools",
     "capabilities": [

@@ -2,6 +2,22 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## [1.2.0] - 2026-09-04
+
+### Added
+
+- Continue long ChatGPT Pro results in bounded same-worker chunks and reassemble
+  the accepted payload bytes exactly before returning them to the parent task.
+- Require an exact per-assignment end marker and reject explicitly truncated,
+  incomplete, malformed, or out-of-sequence responses.
+
+### Changed
+
+- Treat 10,000 UTF-8 bytes as a response-generation target rather than a hard
+  acceptance gate, so small model overshoots do not force another dispatch.
+- Bound continuation chains to 16 chunks, preserve one durable receipt per
+  native message, and keep assembly private and transient.
+
 ## [1.1.0] - 2026-08-26
 
 ### Added
@@ -50,5 +66,6 @@ All notable changes to Codex Pro Dispatch are documented here.
 
 - The v1 safety patch was prompted by a native send failure whose visible `systemError` masked an unusual-activity HTTP 403. PR #2 made the failure explicit, kept the assignment collect-only, and added a cooldown that cannot be bypassed by abandoning the receipt or changing workers.
 
+[1.2.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v0.1.0...v1.0.0

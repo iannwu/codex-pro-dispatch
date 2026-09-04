@@ -24,8 +24,27 @@ ACTIVE_STATUSES = frozenset(
 TERMINAL_STATUSES = frozenset({"complete", "abandoned", "failed"})
 ALL_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
 
-IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+IDENTIFIER_TOKEN = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
+IDENTIFIER_PATTERN = re.compile(rf"^{IDENTIFIER_TOKEN}$")
 RESULT_MARKER_PREFIX = "[CODEX_PRO_DISPATCH_RESULT assignment_id="
+END_MARKER_PREFIX = "[CODEX_PRO_DISPATCH_END assignment_id="
+CONTINUATION_REQUIRED_PREFIX = "[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED "
+CHUNK_PREFIX = "[CODEX_PRO_DISPATCH_CHUNK "
+BOUNDED_RESULT_PROTOCOL = "bounded-footer-v1"
+RESPONSE_GUIDELINE_BYTES = 10_000
+MAX_CHUNKS = 16
+CHUNK_INDEX_PATTERN = re.compile(r"^(?:[1-9]|1[0-6])$")
+CONTINUE_PROMPT_PATTERN = re.compile(
+    rf"^\[CODEX_PRO_DISPATCH_CONTINUE root_assignment_id=(?P<root>{IDENTIFIER_TOKEN}) "
+    r"next_index=(?P<index>[0-9]+)\]$"
+)
+CONTROL_LINE_PATTERN = re.compile(
+    rf"^\[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED root_assignment_id=(?P<root>{IDENTIFIER_TOKEN})\]$"
+)
+CHUNK_LINE_PATTERN = re.compile(
+    rf"^\[CODEX_PRO_DISPATCH_CHUNK root_assignment_id=(?P<root>{IDENTIFIER_TOKEN}) "
+    r"index=(?P<index>[0-9]+) final=(?P<final>[^\]]*)\]$"
+)
 UNUSUAL_ACTIVITY_COOLDOWN_SECONDS = 30 * 60
 
 
@@ -93,6 +112,18 @@ class PreparedAssignment:
     receipt_path: Path
     wrapped_prompt: str
     continuation_of: str | None = None
+
+
+@dataclass(frozen=True)
+class ParsedResult:
+    """One validated bounded response envelope."""
+
+    response: str
+    payload: str
+    result_kind: str
+    root_assignment_id: str | None = None
+    chunk_index: int | None = None
+    final: int | None = None
 
 
 def default_paths() -> RuntimePaths:
@@ -247,50 +278,265 @@ def result_marker(assignment_id: str) -> str:
     return f"{RESULT_MARKER_PREFIX}{assignment_id}]"
 
 
-def wrap_prompt(prompt: str, assignment_id: str) -> str:
-    cleaned = normalize_newlines(prompt).strip()
-    if not cleaned:
-        raise ConfigurationError("Prompt is empty")
-    marker = result_marker(assignment_id)
+def end_marker(assignment_id: str) -> str:
+    validate_identifier(assignment_id, field="assignment_id")
+    return f"{END_MARKER_PREFIX}{assignment_id}]"
+
+
+def _continuation_required_marker(root_assignment_id: str) -> str:
+    validate_identifier(root_assignment_id, field="root_assignment_id")
     return (
-        f"{prompt_marker(assignment_id)}\n\n"
-        f"{cleaned}\n\n"
-        "Completion protocol:\n"
-        f"1. Begin your final response with this exact line: {marker}\n"
-        "2. Then provide the requested deliverable.\n"
-        "3. Use only tools actually available inside this Chat conversation.\n"
-        "4. Do not claim a repository write, command, test, or deployment unless it actually occurred.\n"
-        "5. Keep this assignment ID in context for any follow-up in this worker thread."
+        "[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED "
+        f"root_assignment_id={root_assignment_id}]"
     )
 
 
-def parse_result(response: str, assignment_id: str) -> tuple[str, str]:
-    normalized = normalize_newlines(response)
-    expected = result_marker(assignment_id)
-    lines = normalized.split("\n")
-    first_nonempty = next((index for index, line in enumerate(lines) if line.strip()), None)
-    if first_nonempty is None:
-        raise MarkerError("Worker response is empty")
-    first = lines[first_nonempty]
-    if first != expected:
+def _chunk_header(root_assignment_id: str, index: int, final: int) -> str:
+    validate_identifier(root_assignment_id, field="root_assignment_id")
+    if index < 1 or index > MAX_CHUNKS:
+        raise ConfigurationError(
+            f"chunk index must be between 1 and {MAX_CHUNKS}",
+            details={"chunk_index": index},
+        )
+    if final not in {0, 1}:
+        raise ConfigurationError("chunk final must be 0 or 1", details={"final": final})
+    return (
+        "[CODEX_PRO_DISPATCH_CHUNK "
+        f"root_assignment_id={root_assignment_id} index={index} final={final}]"
+    )
+
+
+def _canonical_chunk_index(value: int | str, *, field: str) -> int:
+    if isinstance(value, bool):
+        raise ConfigurationError(f"{field} must be a canonical decimal from 1 to {MAX_CHUNKS}")
+    text = str(value)
+    if not CHUNK_INDEX_PATTERN.fullmatch(text):
+        raise ConfigurationError(
+            f"{field} must be a canonical decimal from 1 to {MAX_CHUNKS}",
+            details={field: value},
+        )
+    return int(text)
+
+
+def _continuation_prompt_at_byte_zero(prompt: str) -> tuple[str, int] | None:
+    first_line = prompt.split("\n", 1)[0]
+    match = CONTINUE_PROMPT_PATTERN.fullmatch(first_line)
+    if not match:
+        return None
+    try:
+        index = _canonical_chunk_index(match.group("index"), field="next_index")
+    except ConfigurationError:
+        return None
+    return match.group("root"), index
+
+
+def wrap_prompt(prompt: str, assignment_id: str) -> str:
+    normalized = normalize_newlines(prompt)
+    cleaned = normalized.strip()
+    if not cleaned:
+        raise ConfigurationError("Prompt is empty")
+    marker = result_marker(assignment_id)
+    footer = end_marker(assignment_id)
+    continuation = _continuation_prompt_at_byte_zero(normalized)
+    shared = (
+        "Response limits and framing:\n"
+        f"1. Aim to keep the entire assistant response below {RESPONSE_GUIDELINE_BYTES} UTF-8 bytes.\n"
+        "2. Target no more than 6,000 characters of body text.\n"
+        f"3. Begin at byte zero with this exact line: {marker}\n"
+        f"4. End with this exact final line and no byte after it: {footer}\n"
+        "5. Use only tools actually available inside this Chat conversation.\n"
+        "6. Do not claim a repository write, command, test, or deployment unless it actually occurred.\n"
+        "7. Keep this assignment ID in context for any follow-up in this worker thread.\n"
+    )
+    if continuation is not None:
+        root_assignment_id, index = continuation
+        response_form = (
+            "Return only this chunk response form:\n"
+            f"{marker}\n"
+            f"{_chunk_header(root_assignment_id, index, 0)}\n"
+            "<nonempty chunk body unless final=1 after an earlier nonempty chunk>\n"
+            f"{footer}\n"
+            "Use the same root and index shown in the user message. Set final=1 only "
+            "when this chunk completes the deliverable; otherwise set final=0."
+        )
+    else:
+        response_form = (
+            "Return only one of these response forms:\n"
+            "- A nonempty complete result between the supplied result marker and end marker.\n"
+            "- This exact no-body continuation-required control response when the "
+            "complete deliverable cannot fit safely:\n"
+            f"{marker}\n"
+            f"{_continuation_required_marker(assignment_id)}\n"
+            f"{footer}\n"
+            "Do not return any other response form."
+        )
+    return (
+        f"{prompt_marker(assignment_id)}\n\n"
+        f"{cleaned}\n\n"
+        f"{shared}\n"
+        f"{response_form}"
+    )
+
+
+def _response_bytes(response: str | bytes) -> bytes:
+    if isinstance(response, bytes):
+        return response
+    if isinstance(response, str):
+        try:
+            return response.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise MarkerError("Worker response is not valid UTF-8") from exc
+    raise ConfigurationError("Worker response must be text or bytes")
+
+
+def _parse_result(
+    response: str | bytes,
+    assignment_id: str,
+    *,
+    expected_root_assignment_id: str | None = None,
+    expected_chunk_index: int | str | None = None,
+    truncated: bool | None = None,
+) -> ParsedResult:
+    paired_expectations = (
+        expected_root_assignment_id is not None,
+        expected_chunk_index is not None,
+    )
+    if paired_expectations[0] != paired_expectations[1]:
+        raise ConfigurationError(
+            "expected-root-assignment-id and expected-chunk-index must be supplied together"
+        )
+    if truncated is not None and not isinstance(truncated, bool):
+        raise ConfigurationError("truncated must be true, false, or omitted")
+    if truncated is True:
         raise MarkerError(
-            "Worker response does not begin with the expected result marker",
-            details={"expected": expected, "actual": first},
+            "truncated-response: native reader reported truncated: true",
+            details={"assignment_id": assignment_id},
         )
 
-    for line in lines[first_nonempty + 1 :]:
-        stripped = line.strip()
-        if stripped.startswith(RESULT_MARKER_PREFIX) and stripped != expected:
-            raise MarkerError(
-                "Worker response contains a mismatched assignment marker",
-                details={"expected": expected, "actual": stripped},
-            )
+    expected_root: str | None = None
+    expected_index: int | None = None
+    if paired_expectations[0]:
+        assert expected_root_assignment_id is not None
+        assert expected_chunk_index is not None
+        expected_root = validate_identifier(
+            expected_root_assignment_id, field="expected_root_assignment_id"
+        )
+        expected_index = _canonical_chunk_index(
+            expected_chunk_index, field="expected_chunk_index"
+        )
 
-    payload_lines = lines[first_nonempty + 1 :]
-    if payload_lines and payload_lines[0] == "":
-        payload_lines = payload_lines[1:]
-    payload = "\n".join(payload_lines).rstrip("\n")
-    return normalized, payload
+    raw = _response_bytes(response)
+    if b"\r" in raw:
+        raise MarkerError("response-cr-byte: response contains a CR byte")
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MarkerError("response-invalid-utf8: worker response is not valid UTF-8") from exc
+
+    marker = result_marker(assignment_id).encode("ascii")
+    footer = end_marker(assignment_id).encode("ascii")
+    prefix = marker + b"\n"
+    suffix = b"\n" + footer
+    if not raw.startswith(prefix):
+        raise MarkerError(
+            "response-marker-not-at-byte-zero: worker response does not begin with the expected result marker",
+            details={"assignment_id": assignment_id},
+        )
+    if not raw.endswith(suffix):
+        raise MarkerError(
+            "response-footer-missing-or-not-final: worker response must end with the exact end marker",
+            details={"assignment_id": assignment_id},
+        )
+
+    interior = raw[len(prefix) : len(raw) - len(suffix)]
+    first_body_line, has_body_separator, remaining_body = interior.partition(b"\n")
+
+    if expected_root is None:
+        if first_body_line.startswith(CONTINUATION_REQUIRED_PREFIX.encode("ascii")):
+            try:
+                control_line = first_body_line.decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise MarkerError("continuation-required-control-invalid") from exc
+            control_match = CONTROL_LINE_PATTERN.fullmatch(control_line)
+            if control_match and control_match.group("root") != assignment_id:
+                raise MarkerError(
+                    "control-root-mismatch: continuation control root does not match the assignment",
+                    details={"assignment_id": assignment_id},
+                )
+            if interior != _continuation_required_marker(assignment_id).encode("ascii"):
+                raise MarkerError("continuation-required-control-invalid")
+            return ParsedResult(
+                response=decoded,
+                payload="",
+                result_kind="continuation_required",
+                root_assignment_id=assignment_id,
+            )
+        if first_body_line.startswith(CHUNK_PREFIX.encode("ascii")):
+            raise MarkerError("chunk-arguments-required")
+        if not interior:
+            raise MarkerError("short-result-body-empty")
+        return ParsedResult(response=decoded, payload=interior.decode("utf-8"), result_kind="short")
+
+    if not first_body_line.startswith(CHUNK_PREFIX.encode("ascii")):
+        raise MarkerError("chunk-envelope-required")
+    try:
+        header_line = first_body_line.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise MarkerError("chunk-header-invalid") from exc
+    header_match = CHUNK_LINE_PATTERN.fullmatch(header_line)
+    if not header_match:
+        raise MarkerError("chunk-header-invalid")
+    root_assignment_id = header_match.group("root")
+    if root_assignment_id != expected_root:
+        raise MarkerError(
+            "chunk-root-mismatch",
+            details={"expected_root_assignment_id": expected_root},
+        )
+    try:
+        chunk_index = _canonical_chunk_index(
+            header_match.group("index"), field="chunk_index"
+        )
+    except ConfigurationError as exc:
+        raise MarkerError("chunk-index-invalid") from exc
+    if chunk_index != expected_index:
+        raise MarkerError(
+            "chunk-index-mismatch",
+            details={"expected_chunk_index": expected_index},
+        )
+    final_text = header_match.group("final")
+    if final_text not in {"0", "1"}:
+        raise MarkerError("chunk-final-invalid")
+    if not has_body_separator:
+        raise MarkerError("chunk-body-missing")
+    final = int(final_text)
+    if not remaining_body and (final == 0 or expected_index == 1):
+        raise MarkerError("chunk-body-empty")
+    return ParsedResult(
+        response=decoded,
+        payload=remaining_body.decode("utf-8"),
+        result_kind="chunk",
+        root_assignment_id=root_assignment_id,
+        chunk_index=chunk_index,
+        final=final,
+    )
+
+
+def parse_result(
+    response: str | bytes,
+    assignment_id: str,
+    *,
+    expected_root_assignment_id: str | None = None,
+    expected_chunk_index: int | str | None = None,
+    truncated: bool | None = None,
+) -> tuple[str, str]:
+    parsed = _parse_result(
+        response,
+        assignment_id,
+        expected_root_assignment_id=expected_root_assignment_id,
+        expected_chunk_index=expected_chunk_index,
+        truncated=truncated,
+    )
+    return parsed.response, parsed.payload
 
 
 @contextlib.contextmanager
@@ -523,6 +769,24 @@ def active_cooldown(
     return result
 
 
+def _reject_legacy_active_assignment(
+    value: Mapping[str, Any], *, operation: str
+) -> None:
+    if (
+        value.get("status") in ACTIVE_STATUSES
+        and value.get("result_protocol") != BOUNDED_RESULT_PROTOCOL
+    ):
+        raise StateError(
+            "legacy-active-assignment: v1.2 may only inspect, recover, or abandon "
+            "an active v1.1 receipt",
+            details={
+                "assignment_id": value.get("assignment_id"),
+                "status": value.get("status"),
+                "operation": operation,
+            },
+        )
+
+
 def prepare_assignment(
     prompt: str,
     *,
@@ -545,6 +809,7 @@ def prepare_assignment(
             )
         existing_active = active_assignment(runtime)
         if existing_active:
+            _reject_legacy_active_assignment(existing_active, operation="prepare")
             raise BusyError(
                 "Another dispatch is unresolved",
                 details={
@@ -589,6 +854,7 @@ def prepare_assignment(
             "wrapped_prompt_sha256": sha256_text(wrapped),
             "submission_count": 0,
             "response_marker": result_marker(resolved_id),
+            "result_protocol": BOUNDED_RESULT_PROTOCOL,
         }
         if continuation_of:
             receipt["continuation_of"] = continuation_of
@@ -617,6 +883,8 @@ def _transition(
     with state_lock(runtime):
         value = load_assignment(assignment_id, runtime)
         current = str(value["status"])
+        if target != "abandoned":
+            _reject_legacy_active_assignment(value, operation=target)
         if current not in allowed:
             raise StateError(
                 f"Cannot move assignment from {current} to {target}",
@@ -650,6 +918,7 @@ def mark_submitted(
     runtime = paths or default_paths()
     with state_lock(runtime):
         value = load_assignment(assignment_id, runtime)
+        _reject_legacy_active_assignment(value, operation="submitted")
         current = str(value.get("status"))
         submission_count = int(value.get("submission_count", 0))
         expected_hash = str(value.get("wrapped_prompt_sha256", ""))
@@ -806,6 +1075,7 @@ def mark_unusual_activity_403(
     allowed = {"armed", "submitted", "pending", "ambiguous", "indeterminate"}
     with state_lock(runtime):
         value = load_assignment(assignment_id, runtime)
+        _reject_legacy_active_assignment(value, operation="unusual-activity")
         current = str(value["status"])
         if current not in allowed:
             raise StateError(
@@ -889,24 +1159,36 @@ def abandon_assignment(
 
 def complete_assignment(
     assignment_id: str,
-    response: str,
+    response: str | bytes,
     paths: RuntimePaths | None = None,
+    *,
+    expected_root_assignment_id: str | None = None,
+    expected_chunk_index: int | str | None = None,
+    truncated: bool | None = None,
 ) -> tuple[dict[str, Any], str]:
     runtime = paths or default_paths()
-    normalized, payload = parse_result(response, assignment_id)
-    response_hash = sha256_text(normalized)
-    payload_hash = sha256_text(payload)
+    raw = _response_bytes(response)
 
     with state_lock(runtime):
         value = load_assignment(assignment_id, runtime)
         current = str(value["status"])
+        _reject_legacy_active_assignment(value, operation="complete")
+        parsed = _parse_result(
+            raw,
+            assignment_id,
+            expected_root_assignment_id=expected_root_assignment_id,
+            expected_chunk_index=expected_chunk_index,
+            truncated=truncated,
+        )
+        response_hash = hashlib.sha256(raw).hexdigest()
+        payload_hash = sha256_text(parsed.payload)
         if current == "complete":
             if value.get("response_sha256") != response_hash:
                 raise StateError(
                     "Completed assignment is immutable and the new response differs",
                     details={"assignment_id": assignment_id},
                 )
-            return value, payload
+            return value, parsed.payload
         if current in {"abandoned", "failed"}:
             raise StateError(
                 f"Cannot complete an assignment in terminal state {current}",
@@ -934,7 +1216,7 @@ def complete_assignment(
         value["result_marker_validated"] = True
         value["no_resend"] = True
         _save_assignment(assignment_id, value, runtime)
-        return value, payload
+        return value, parsed.payload
 
 
 def recovery_info(

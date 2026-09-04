@@ -48,7 +48,7 @@ If the native send reports `systemError`, first inspect any error payload expose
 2. Wait until the loaded conversation ID equals the configured worker ID.
 3. If outbound verification is incomplete, locate the existing user message by assignment marker and run `pro-dispatch submitted --sent-prompt-file` on its exact native read-back. This is verification, not a new send. If the first temporary file added exactly one trailing newline and the receipt reports `readback_correction_allowed: true`, re-extract the same native message without that artifact and verify it once more. Never normalize or retry other mismatches.
 4. Read the newest completed assistant response.
-5. Validate the first nonempty line against the assignment's exact result marker.
+5. Validate the current bounded envelope: the result marker begins at byte zero, the exact end marker is the final byte sequence, and explicit truncation is rejected. Apply the v1.2 control and chunk rules below.
 6. Reject stale or mismatched markers.
 7. Restore the exact parent Codex task ID in a `finally`-style cleanup path.
 
@@ -82,3 +82,70 @@ The clipboard must remain unchanged.
 | Wrong thread loaded | Stop and reject collection |
 | Result marker missing or mismatched | `pro-dispatch ambiguous`; never resend |
 | Parent restoration fails | Preserve assignment state and report the exact parent task ID |
+
+## v1.2 bounded-result overlay
+
+The v1.1 setup, submission, waiting, collection, recovery, visible fallback,
+and failure mapping above remain in force. For each newly prepared v1.2
+response, the native read additionally preserves exact response bytes and
+explicit native truncation metadata when supplied, selects a stable assistant
+item associated with the verified user message, and confirms its enclosing turn
+is completed. An explicit `truncated: true` is rejection evidence; omitted
+metadata is not silently treated as false.
+
+When the native reader explicitly reports truncation, preserve the exact bytes
+and pass `--truncated` to `complete`; otherwise omit that flag.
+
+The response is valid UTF-8, must contain no CR byte, begins at byte zero with
+the result marker, and ends as literal final bytes:
+
+```text
+[CODEX_PRO_DISPATCH_END assignment_id=<current-assignment-id>]
+```
+
+Never normalize newlines, strip body text, or scan opaque body bytes for
+marker-looking examples. Ten thousand UTF-8 bytes is a generation guideline,
+not an acceptance gate. The initial wrapper permits only a nonempty short body
+or the exact no-body continuation-required control form. For a normalized body
+whose first byte starts the exact continuation header, the wrapper permits only
+the matching chunk form:
+
+```text
+[CODEX_PRO_DISPATCH_CONTINUE root_assignment_id=<root-assignment-id> next_index=<index>]
+```
+
+Pass both `expected-root-assignment-id` and `expected-chunk-index` to complete
+a chunk. The root must match, index starts at canonical 1 and advances exactly
+through at most 16, and final is exactly 0 or 1. Nonfinal bodies are nonempty;
+an empty final body is valid only after a previous accepted nonempty chunk. The
+chunk response has the exact raw form:
+
+```text
+[CODEX_PRO_DISPATCH_RESULT assignment_id=<current-assignment-id>]
+[CODEX_PRO_DISPATCH_CHUNK root_assignment_id=<root-assignment-id> index=<index> final=<0-or-1>]
+<chunk body>
+[CODEX_PRO_DISPATCH_END assignment_id=<current-assignment-id>]
+```
+
+The parent appends the returned payload byte-for-byte to one private mode-0600
+assembly file, then flushes and fsyncs before advancing the accepted index. At
+chunk 16 with final=0, stop before chunk 17.
+
+Malformed, truncated, wrong-worker, wrong-assignment, wrong-root, wrong-index,
+or incomplete output is rejected before receipt completion. A response above
+the 10,000-byte guideline is still accepted when its envelope is intact. Do not
+append rejected output, advance the logical index, or resend it. The operator may make
+exactly one operator-authorized replacement for a rejected native chunk at an
+expected index: abandon the failed active assignment, set the in-task guard,
+then prepare a new assignment for the same index with `continuation_of` the last
+accepted assignment and send it once. A failed replacement stops collection.
+
+If assembly opening, writing, flushing, fsyncing, or permission verification
+fails, including after a partial write, discard the partial file and all
+transient logical state. Do not reconstruct, replay, prepare another
+continuation, or return a logical result. An app or parent restart also stops
+collection and requires separately authorized fresh dispatch from the beginning.
+
+New receipts carry `result_protocol: "bounded-footer-v1"`. Active legacy
+receipts without it permit status, recover, or explicit abandon only; terminal
+legacy receipts remain readable and immutable.

@@ -41,6 +41,7 @@ The helper's deterministic state logic is tested on macOS and Linux, but Linux C
 
 | Skill version | App version | App build | macOS | Native matrix | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| 1.2.0 | 26.901.31953 | 7868 | 26.6.2 | Long-result gate passed; v1.1 safety matrix retained | [Redacted long-result receipt](releases/v1.2.0-long-result-acceptance.md) |
 | 1.1.0 | 26.820.60940 | 7119 | 26.6.2 | Passed | [Redacted release receipt](releases/v1.1.0-acceptance.md) |
 
 Earlier development runs are not treated as release evidence because they were not executed against the v1.1.0 release candidate with a complete build receipt.

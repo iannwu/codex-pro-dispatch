@@ -172,6 +172,21 @@ Expected:
 - the sentinel is absent from status output and the on-disk receipt
 - corrupt receipts still produce structured unhealthy JSON and a nonzero exit
 
+## L. Long-result continuation
+
+Ask the worker for a deterministic result longer than 30,000 characters.
+
+Expected:
+
+- the initial response requests continuation without returning partial content
+- each continuation uses the same worker and a new assignment ID
+- accepted chunks are appended byte-for-byte in order and fsynced privately
+- a complete response above the 10,000-byte generation guideline is accepted
+- the final assembled bytes match the requested result exactly
+- an explicit truncation report, missing footer, wrong index, or partial local
+  write stops collection without resending or advancing
+- the exact parent task is restored and transient files are removed
+
 ## Release gate
 
-The candidate is ready to be called stable only when A through K pass on the exact candidate commit. H may retain the documented brief foreground collection limitation, but missing native capabilities, clipboard changes, duplicate submission, cooldown bypass, wrong-thread collection, stale response acceptance, sensitive temp-file residue, unredacted legacy diagnostics, or failed parent restoration are blockers.
+The candidate is ready to be called stable only when A through L pass on the exact candidate commit. H may retain the documented brief foreground collection limitation, but missing native capabilities, clipboard changes, duplicate submission, cooldown bypass, wrong-thread collection, stale response acceptance, incorrect chunk assembly, sensitive temp-file residue, unredacted legacy diagnostics, or failed parent restoration are blockers.

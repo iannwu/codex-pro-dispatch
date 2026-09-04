@@ -65,6 +65,13 @@ class CliTests(unittest.TestCase):
         self.assertEqual(armed.returncode, 0, armed.stderr)
         return payload
 
+    def bounded_response(self, assignment_id: str, body: str) -> str:
+        return (
+            f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
+            f"{body}\n"
+            f"[CODEX_PRO_DISPATCH_END assignment_id={assignment_id}]"
+        )
+
     def test_help(self) -> None:
         completed = self.run_cli("--help")
         self.assertEqual(completed.returncode, 0)
@@ -147,10 +154,7 @@ class CliTests(unittest.TestCase):
         completed = self.run_cli(
             "complete",
             "dispatch-cli-7319",
-            input_text=(
-                "[CODEX_PRO_DISPATCH_RESULT assignment_id=dispatch-cli-7319]\n"
-                "READY"
-            ),
+            input_text=self.bounded_response("dispatch-cli-7319", "READY"),
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["payload"], "READY")
@@ -256,13 +260,92 @@ class CliTests(unittest.TestCase):
         completed = self.run_cli(
             "complete",
             assignment_id,
-            input_text=(
-                f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
-                "RECOVERED"
-            ),
+            input_text=self.bounded_response(assignment_id, "RECOVERED"),
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["payload"], "RECOVERED")
+
+    def test_complete_reports_bounded_result_kind_and_chunk_fields(self) -> None:
+        assignment_id = "dispatch-cli-chunk-7319"
+        prepared = self.configure_and_prepare(assignment_id)
+        submitted = self.run_cli(
+            "submitted",
+            assignment_id,
+            "--sent-prompt-file",
+            "-",
+            input_text=str(prepared["wrapped_prompt"]),
+        )
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        response = (
+            f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
+            "[CODEX_PRO_DISPATCH_CHUNK root_assignment_id=dispatch-root-7319 "
+            "index=1 final=0]\n"
+            "chunk bytes\n"
+            f"[CODEX_PRO_DISPATCH_END assignment_id={assignment_id}]"
+        )
+        completed = self.run_cli(
+            "complete",
+            assignment_id,
+            "--expected-root-assignment-id",
+            "dispatch-root-7319",
+            "--expected-chunk-index",
+            "1",
+            input_text=response,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(payload["payload"], "chunk bytes")
+        self.assertEqual(payload["result_kind"], "chunk")
+        self.assertEqual(payload["chunk_index"], 1)
+        self.assertEqual(payload["final"], 0)
+        self.assertNotIn("chunk_body", payload)
+        self.assertNotIn("result_kind", payload["assignment"])
+        self.assertNotIn("result_root_assignment_id", payload["assignment"])
+        self.assertNotIn("chunk_index", payload["assignment"])
+        self.assertNotIn("final", payload["assignment"])
+
+    def test_complete_rejects_unpaired_expectations_truncation_and_invalid_raw_bytes(self) -> None:
+        assignment_id = "dispatch-cli-envelope-7319"
+        prepared = self.configure_and_prepare(assignment_id)
+        submitted = self.run_cli(
+            "submitted",
+            assignment_id,
+            "--sent-prompt-file",
+            "-",
+            input_text=str(prepared["wrapped_prompt"]),
+        )
+        self.assertEqual(submitted.returncode, 0, submitted.stderr)
+        response = self.bounded_response(assignment_id, "READY")
+        unpaired = self.run_cli(
+            "complete",
+            assignment_id,
+            "--expected-root-assignment-id",
+            "dispatch-root-7319",
+            input_text=response,
+        )
+        self.assertEqual(unpaired.returncode, 2)
+        self.assertEqual(json.loads(unpaired.stderr)["error_type"], "ConfigurationError")
+
+        truncated = self.run_cli(
+            "complete", assignment_id, "--truncated", input_text=response
+        )
+        self.assertEqual(truncated.returncode, 5)
+        self.assertIn("truncated-response", json.loads(truncated.stderr)["error"])
+
+        raw_path = Path(self.temporary.name) / "invalid-response.bin"
+        raw_path.write_bytes(
+            f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n".encode("ascii")
+            + b"\xff\n"
+            + f"[CODEX_PRO_DISPATCH_END assignment_id={assignment_id}]".encode("ascii")
+        )
+        invalid = self.run_cli(
+            "complete", assignment_id, "--response-file", str(raw_path)
+        )
+        self.assertEqual(invalid.returncode, 5)
+        self.assertIn("response-invalid-utf8", json.loads(invalid.stderr)["error"])
+        status = self.run_cli("status", assignment_id)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)["assignment"]["status"], "submitted")
 
     def test_reason_file_hashes_untrusted_text_without_persisting_or_interpolating(self) -> None:
         assignment_id = "dispatch-reason-file-7319"

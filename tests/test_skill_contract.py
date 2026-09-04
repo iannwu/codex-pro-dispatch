@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "codex-pro-dispatch" / "SKILL.md"
+NATIVE_PROTOCOL = ROOT / "skills" / "codex-pro-dispatch" / "references" / "native-protocol.md"
 OPENAI_YAML = ROOT / "skills" / "codex-pro-dispatch" / "agents" / "openai.yaml"
 PLUGIN_MANIFEST = ROOT / ".codex-plugin" / "plugin.json"
 VERSION = ROOT / "VERSION"
@@ -60,6 +61,81 @@ class SkillContractTests(unittest.TestCase):
         ]:
             self.assertIn(phrase, text)
         self.assertNotIn("--reason '<exact", text)
+
+    def test_skill_documents_the_exact_bounded_continuation_contract(self) -> None:
+        text = SKILL.read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        continuation = (
+            "[CODEX_PRO_DISPATCH_CONTINUE root_assignment_id=<root-assignment-id> "
+            "next_index=<index>]\n\n"
+            "Return only chunk <index> of the same deliverable.\n"
+            "Continue from the last accepted boundary without repeating or summarizing accepted text.\n"
+            "Use the required chunk envelope.\n"
+            "Aim to keep the entire response below 10,000 UTF-8 bytes.\n"
+            "Set final=1 only when this chunk completes the deliverable.\n"
+            "Otherwise set final=0."
+        )
+        self.assertIn(continuation, text)
+        for phrase in [
+            "result_protocol: \"bounded-footer-v1\"",
+            "expected-root-assignment-id",
+            "expected-chunk-index",
+            "Parse the helper's completion JSON with a real JSON parser",
+            "never use eval",
+            "flush, fsync, and verify mode 0600",
+            "including after a partial write",
+            "At index 16 with final=0, stop",
+            "exactly one replacement",
+            "never resent",
+            "legacy-active-assignment",
+            "stable assistant item",
+            "completed enclosing turn",
+            "truncated: true",
+            "For a repository-write assignment, first confirm the GitHub prerequisites",
+            "independently verifies every reported branch, commit, file change, and CI result",
+            "outbound_prompt_verified",
+            "This recovery command verifies the already-existing message; it does not send anything",
+            "single-trailing-newline artifact",
+            "inspect the error payload exposed by the native control",
+            "starts a fixed 30-minute cooldown",
+            "pro-dispatch prepare` must remain blocked until the cooldown expires",
+            "Wait using the worker conversation's native metadata or timestamp",
+            "Do not repeatedly reopen the worker while it is generating",
+            "open the worker by its exact conversation ID",
+            "`worker reset --force` and `purge --yes --force` are break-glass operations",
+            "## Same-worker continuation",
+            "--continuation-of '<completed-assignment-id>'",
+            "Collect when the user returns to ChatGPT/Codex, unless the user explicitly permits interruption",
+            "Native desktop acceptance remains a release gate",
+        ]:
+            self.assertIn(phrase, normalized)
+        for forbidden in [
+            "pro-dispatch collect",
+            "pro-dispatch result",
+            "pro-dispatch artifact",
+            "--result-mode",
+            "--allow-empty-final",
+            "chunk_body",
+        ]:
+            self.assertNotIn(forbidden, text)
+
+    def test_native_protocol_preserves_raw_envelope_and_fail_stop_rules(self) -> None:
+        text = NATIVE_PROTOCOL.read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        for phrase in [
+            "exact response bytes",
+            "explicit native truncation metadata",
+            "valid UTF-8",
+            "contain no CR byte",
+            "generation guideline, not an acceptance gate",
+            "Never normalize newlines, strip body text",
+            "at most 16",
+            "flushes and fsyncs before advancing",
+            "exactly one operator-authorized replacement",
+            "including after a partial write",
+            "requires separately authorized fresh dispatch from the beginning",
+        ]:
+            self.assertIn(phrase, normalized)
 
     def test_readme_discloses_desktop_and_connector_prerequisites(self) -> None:
         text = README.read_text(encoding="utf-8")
