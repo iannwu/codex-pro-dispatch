@@ -6,7 +6,8 @@ Codex Pro Dispatch is a source-visible Codex skill, plugin package, and small lo
 
 | Version | Security support |
 | --- | --- |
-| 1.1.x | Supported after stable release |
+| 1.2.x | Supported |
+| 1.1.x | Supported |
 | 1.0.x and earlier | Upgrade required; public-contract corrections are not backported |
 
 ## Trust boundary

@@ -48,7 +48,7 @@ If the native send reports `systemError`, first inspect any error payload expose
 2. Wait until the loaded conversation ID equals the configured worker ID.
 3. If outbound verification is incomplete, locate the existing user message by assignment marker and run `pro-dispatch submitted --sent-prompt-file` on its exact native read-back. This is verification, not a new send. If the first temporary file added exactly one trailing newline and the receipt reports `readback_correction_allowed: true`, re-extract the same native message without that artifact and verify it once more. Never normalize or retry other mismatches.
 4. Read the newest completed assistant response.
-5. Validate the first nonempty line against the assignment's exact result marker.
+5. Validate the current bounded envelope: the result marker begins at byte zero, the exact end marker is the final byte sequence, and explicit truncation is rejected. Apply the v1.2 control and chunk rules below.
 6. Reject stale or mismatched markers.
 7. Restore the exact parent Codex task ID in a `finally`-style cleanup path.
 
