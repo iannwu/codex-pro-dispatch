@@ -958,6 +958,21 @@ def mark_submitted(
                 },
             )
 
+        readback_marker = re.match(
+            rf"\[CODEX_PRO_DISPATCH assignment_id=({IDENTIFIER_TOKEN})\]\n",
+            sent_prompt,
+        )
+        if readback_marker and readback_marker.group(1) != assignment_id:
+            raise StateError(
+                "Read-back belongs to another assignment; wait for the current message, never resend",
+                details={
+                    "assignment_id": assignment_id,
+                    "status": current,
+                    "no_resend": True,
+                    "reason": "stale-readback",
+                },
+            )
+
         verified_at = utc_now()
         if not is_readback_correction:
             value["submitted_at"] = verified_at

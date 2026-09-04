@@ -115,7 +115,7 @@ pro-dispatch arm '<assignment-id>'
 
 Do not call the native send unless arming succeeds. Once arming succeeds, `no_resend` is permanent for that assignment, including across an app crash.
 5. Make at most one native send attempt for `wrapped_prompt` to `worker_conversation_id`. Arming does not guarantee delivery: an interruption can leave the assignment with zero sends and permanently collect-only.
-6. After native submission is confirmed, read back the exact submitted user message from that worker conversation using native controls and save those bytes to the private temporary directory as UTF-8. Do not reconstruct it from the prepared JSON.
+6. After native submission is confirmed, select the user message whose first line is exactly `[CODEX_PRO_DISPATCH assignment_id=<current-assignment-id>]` from the configured worker. A native read may still return an older completed turn while the new turn is active. If the matching message is absent, wait within a bounded timeout or record `indeterminate` and recover collect-only; do not pass an older message to `submitted`. Save the matching native bytes to the private temporary directory as UTF-8. Do not reconstruct them from the prepared JSON.
 7. Verify the read-back before recording submission:
 
 ```bash
@@ -123,7 +123,7 @@ pro-dispatch submitted '<assignment-id>' \
   --sent-prompt-file '<native-read-back-file>'
 ```
 
-The helper compares the read-back bytes with the prepared `wrapped_prompt` hash. If they differ by any byte, including whitespace or a newline, it records one observed send as `indeterminate`, sets `no_resend`, and returns an error. Never repair the text by resending it.
+The helper first rejects a leading assignment marker for another assignment as `stale-readback`, leaving the receipt unchanged and resending prohibited. Wait for the matching native message. Otherwise it compares the read-back bytes with the prepared `wrapped_prompt` hash. If they differ by any byte, including whitespace or a newline, it records one observed send as `indeterminate`, sets `no_resend`, and returns an error. Never repair the text by resending it.
 
 If the error reports `readback_correction_allowed: true`, the temporary read-back file was proven to equal the expected prompt plus exactly one trailing newline. Re-extract the same existing native user message without adding that file artifact, then run `pro-dispatch submitted` once more against the corrected file. This is read-back verification, not a second submission; `submission_count` remains one. Do not strip, normalize, or retry any other mismatch.
 
