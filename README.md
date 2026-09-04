@@ -202,6 +202,7 @@ That distinction matters: if the app stops after arming but before transport, th
 | Worker can read GitHub but cannot commit | The connector is read-only, lacks repository permission, or is blocked by organization/SSO policy. Use prompt-only review mode or obtain write access before retrying on a new assignment. |
 | `python3` is missing or older than 3.9 | Install a supported Python and make sure `python3` resolves to it before invoking the skill. |
 | Source install works but `pro-dispatch` is not found | Add `$HOME/.local/bin` to `PATH`, or let the skill use its bundled helper by absolute path. |
+| An assignment started on v1.1 reports `legacy-active-assignment` after upgrading | v1.2 can inspect, recover, or explicitly abandon the old receipt, but it cannot continue or complete it. Switch back to v1.1 to finish that assignment, or abandon it before starting a new v1.2 assignment; never resend it automatically. |
 | A new dispatch says another assignment is active | Recover or explicitly abandon the existing assignment. Do not delete its receipt or resend it. |
 | Dispatch is `armed`, `indeterminate`, or timed out | Run recovery against the saved worker. Never resend the same assignment; it may already have been delivered. |
 
