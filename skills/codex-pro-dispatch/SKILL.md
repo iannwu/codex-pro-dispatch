@@ -243,3 +243,166 @@ pro-dispatch doctor --native-controls-confirmed
 If native conversation controls are unavailable, stop with the exact blocker. Do not silently substitute another transport.
 
 `worker reset --force` and `purge --yes --force` are break-glass operations. They can erase recovery identity or receipts for unresolved work, destroying the workflow's no-resend evidence. Never use them during normal operation; require explicit user authorization and explain that recovery guarantees will be lost.
+
+## v1.2 bounded long-result overlay
+
+This overlay applies to every newly prepared v1.2 response. It changes only the
+result envelope and the explicit long-result path; every v1.1 send, read-back,
+recovery, identity, cooldown, follow-up, foreground, verification, and
+break-glass rule above remains mandatory.
+
+### Native evidence and exact response envelope
+
+One native collection read must establish the configured and loaded worker IDs,
+a stable assistant item ID associated with the verified submitted user message,
+a completed enclosing turn, exact response bytes, and explicit native truncation
+metadata when supplied. Do not silently interpret an omitted `truncated` field
+as false. An explicit `truncated: true` is always rejected.
+
+If the native reader reports it, preserve the exact response bytes and invoke
+the normal command with `--truncated`; otherwise omit that flag:
+
+```bash
+pro-dispatch complete '<assignment-id>' --response-file '<response-file>' --truncated
+```
+
+The parent independently verifies every reported branch, commit, file change,
+and CI result for any separately authorized repository-write assignment.
+
+Every accepted response is valid UTF-8, contains no CR byte, is at most 10,000
+UTF-8 bytes, begins at byte zero with the exact result marker, and ends with
+this exact footer as the literal final byte sequence:
+
+```text
+[CODEX_PRO_DISPATCH_END assignment_id=<current-assignment-id>]
+```
+
+Never normalize newlines, strip body text, or search opaque body bytes for
+marker-looking examples. The parent enforces the byte ceiling; prompt the worker
+to target no more than 6,000 body characters.
+
+For an initial assignment, `wrap_prompt` permits only a nonempty short result
+or this exact no-body control form; it must not advertise chunks:
+
+```text
+[CODEX_PRO_DISPATCH_RESULT assignment_id=<root-assignment-id>]
+[CODEX_PRO_DISPATCH_CONTINUATION_REQUIRED root_assignment_id=<root-assignment-id>]
+[CODEX_PRO_DISPATCH_END assignment_id=<root-assignment-id>]
+```
+
+If the normalized body begins at byte zero with this exact continuation line,
+the wrapper permits only the matching chunk form; it must not advertise a short
+result or the control form:
+
+```text
+[CODEX_PRO_DISPATCH_CONTINUE root_assignment_id=<root-assignment-id> next_index=<index>]
+```
+
+With neither expected chunk argument, `complete` accepts only a short result or
+the exact control form. It returns the existing `payload` and a `result_kind`
+of `short` or `continuation_required`. A control or chunk-looking literal after
+any earlier body byte, including an initial LF, remains opaque body.
+
+For a chunk, supply both arguments; supplying exactly one is an error:
+
+```bash
+pro-dispatch complete '<current-assignment-id>' \
+  --response-file '<response-file>' \
+  --expected-root-assignment-id '<root-assignment-id>' \
+  --expected-chunk-index '<next-index>'
+```
+
+The chunk response must be only:
+
+```text
+[CODEX_PRO_DISPATCH_RESULT assignment_id=<current-assignment-id>]
+[CODEX_PRO_DISPATCH_CHUNK root_assignment_id=<root-assignment-id> index=<index> final=<0-or-1>]
+<chunk body>
+[CODEX_PRO_DISPATCH_END assignment_id=<current-assignment-id>]
+```
+
+The root must match. The index is canonical decimal 1 through 16 and equals the
+expected next index; `final` is exactly 0 or 1. A nonfinal body is nonempty. An
+empty final body is valid only after an earlier accepted nonempty chunk. The JSON
+keeps `payload` and adds `result_kind`; chunks also add `chunk_index` and
+`final`; no second chunk-body JSON field exists.
+
+New receipts add `result_protocol: "bounded-footer-v1"` under the existing
+schema version. There is no migration or backfill. A terminal legacy receipt is
+readable and immutable. An active receipt without that discriminator permits
+only `status`, `recover`, or explicit `abandon`; `arm`, `submitted`, `pending`,
+`complete`, and continuation progression fail with
+`legacy-active-assignment`. v1.2 never accepts the old leading-marker-only
+result form.
+
+### Continuation and transient assembly
+
+After the exact initial control response completes, initialize only this
+transient parent-task context:
+
+```text
+root_assignment_id
+accepted_chunk_index
+assembly_file_path
+last_accepted_assignment_id
+recovery_used_for_index
+```
+
+Create one exclusive mode-0600 assembly file inside the existing private
+mode-0700 directory. The control response prepares but never arms or sends its
+first continuation. For each expected index, write this exact deterministic
+body to a new private prompt file without extra bytes:
+
+```text
+[CODEX_PRO_DISPATCH_CONTINUE root_assignment_id=<root-assignment-id> next_index=<index>]
+
+Return only chunk <index> of the same deliverable.
+Continue from the last accepted boundary without repeating or summarizing accepted text.
+Use the required chunk envelope.
+Keep the entire response below 10,000 UTF-8 bytes.
+Set final=1 only when this chunk completes the deliverable.
+Otherwise set final=0.
+```
+
+Prepare it with the existing command, then use the normal v1.1 arm-and-one-send
+sequence exactly once:
+
+```bash
+pro-dispatch prepare \
+  --parent-task-id '<parent-task-id>' \
+  --continuation-of '<last-accepted-assignment-id>' \
+  --prompt-file '<continuation-prompt-file>' \
+  --native-controls-confirmed
+```
+
+Parse the helper's completion JSON with a real JSON parser; never use eval,
+shell substitution, regex extraction, or line splitting. Require
+`result_kind: "chunk"`, encode `payload` as UTF-8 without normalization, append
+exactly those bytes to the assembly file, then flush, fsync, and verify mode
+0600 before advancing the accepted index or last accepted assignment ID.
+
+If opening, writing, flushing, fsyncing, or permission checking fails,
+including after a partial write, do not advance, restore a logical result,
+prepare another continuation, or reuse the file. Discard all transient logical
+state. The completed native receipt remains immutable. A restart also stops
+collection and requires separately authorized fresh dispatch from the beginning.
+
+For a valid nonfinal chunk below index 16, prepare the next continuation. At
+index 16 with final=0, stop with an incomplete-result error before preparing or
+sending chunk 17. On final=1, restore the exact assembly bytes to the original
+parent, then clean up only after restoration succeeds or its normal failure is
+reported.
+
+A rejected native chunk is never resent. The operator may authorize exactly one
+replacement for an expected index only when `recovery_used_for_index` is not
+that index: first use the existing ambiguity and explicit abandon path, set the
+guard before preparation, then prepare a new assignment with a new ID, the same
+continuation body, and `--continuation-of` the last accepted assignment. Send
+that replacement once. If it fails, or the guard already matches, stop with an
+incomplete result. Clear the guard only after a successful append and index
+advance. Local assembly failure never consumes or permits this replacement.
+
+Native desktop acceptance remains a release gate: reject truncation; reconstruct
+a result over 30,000 characters from sub-10,000-byte chunks with exact bytes and
+parent restoration; and exercise multi-chunk assembly write-failure
+stop-and-cleanup.

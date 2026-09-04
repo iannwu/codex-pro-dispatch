@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from . import __version__
 from .core import (
     DispatchError,
+    _parse_result,
     abandon_assignment,
     active_cooldown,
     active_assignment,
@@ -47,6 +48,12 @@ def read_exact_text_source(path: str) -> str:
     if path == "-":
         return sys.stdin.buffer.read().decode("utf-8")
     return Path(path).read_bytes().decode("utf-8")
+
+
+def read_exact_bytes_source(path: str) -> bytes:
+    if path == "-":
+        return sys.stdin.buffer.read()
+    return Path(path).read_bytes()
 
 
 def add_reason_source(parser: argparse.ArgumentParser) -> None:
@@ -147,10 +154,23 @@ def build_parser() -> argparse.ArgumentParser:
     add_reason_source(ambiguous)
 
     complete = subparsers.add_parser(
-        "complete", help="Validate the result marker and complete an assignment"
+        "complete", help="Validate a bounded result envelope and complete an assignment"
     )
     complete.add_argument("assignment_id")
     complete.add_argument("--response-file", default="-", help="UTF-8 response file, or - for stdin")
+    complete.add_argument(
+        "--expected-root-assignment-id",
+        help="Require a chunk for this logical root; must be paired with --expected-chunk-index",
+    )
+    complete.add_argument(
+        "--expected-chunk-index",
+        help="Require this canonical chunk index; must be paired with --expected-root-assignment-id",
+    )
+    complete.add_argument(
+        "--truncated",
+        action="store_true",
+        help="Reject because the native reader explicitly reported truncated: true",
+    )
 
     recover = subparsers.add_parser(
         "recover", help="Show the saved worker and parent IDs without resending"
@@ -278,9 +298,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"ok": True, "assignment": value, "collect_only": True}
 
     if args.command == "complete":
-        response = read_text_source(args.response_file)
-        value, payload = complete_assignment(args.assignment_id, response, paths)
-        return {"ok": True, "assignment": value, "payload": payload}
+        response = read_exact_bytes_source(args.response_file)
+        value, payload = complete_assignment(
+            args.assignment_id,
+            response,
+            paths,
+            expected_root_assignment_id=args.expected_root_assignment_id,
+            expected_chunk_index=args.expected_chunk_index,
+            truncated=True if args.truncated else None,
+        )
+        parsed = _parse_result(
+            response,
+            args.assignment_id,
+            expected_root_assignment_id=args.expected_root_assignment_id,
+            expected_chunk_index=args.expected_chunk_index,
+            truncated=True if args.truncated else None,
+        )
+        result: dict[str, Any] = {
+            "ok": True,
+            "assignment": value,
+            "payload": payload,
+            "result_kind": parsed.result_kind,
+        }
+        if parsed.result_kind == "chunk":
+            result["chunk_index"] = parsed.chunk_index
+            result["final"] = parsed.final
+        return result
 
     if args.command == "recover":
         return {"ok": True, "recovery": recovery_info(args.assignment_id, paths)}
