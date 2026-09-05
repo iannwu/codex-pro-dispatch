@@ -9,7 +9,7 @@ An independent macOS safety wrapper for a supported Codex desktop workflow. It h
 
 **Desktop-only:** the dispatch workflow runs only inside the official ChatGPT desktop app for macOS with Codex. It does not run from ChatGPT on the web, Codex CLI alone, an IDE extension, Windows, or Linux. The Codex CLI is used only to install and manage the plugin.
 
-**Version: v1.2.1 recovery candidate.** Long results continue in bounded chunks and are
+**Version: v1.2.2-rc.1 recovery prerelease.** Long results continue in bounded chunks and are
 reassembled exactly without weakening the existing no-resend contract. The
 v1.2.1 patch rejects a stale native user-message read-back from another
 assignment without changing the current receipt, so the matching message can
@@ -88,7 +88,7 @@ git --version
 | Plugin manifest | Validated against the current Codex plugin schema |
 | Manual skill discovery | `$HOME/.agents/skills` |
 | Native end-to-end workflow | v1.1.0 full matrix, v1.2.0 long-result, and v1.2.1 stale-readback gates passed; compatibility remains build-sensitive |
-| Current maintainer app build | `26.901.31953` (`7868`) on macOS 26.6.2; v1.2.0 long-result and v1.2.1 stale-readback gates passed |
+| Current maintainer app build | `26.901.41600` (`7982`); bounded native recovery passed short, long-result, GitHub-read, and GitHub-write tests; see the [recovery receipt](docs/releases/v1.2.2-rc.1-recovery.md) |
 
 See [docs/compatibility.md](docs/compatibility.md) for the exact capability contract and tested-build policy.
 
@@ -96,7 +96,20 @@ See [docs/compatibility.md](docs/compatibility.md) for the exact capability cont
 
 OpenAI's current guidance packages reusable skills as plugins. This repository includes the plugin manifest and marketplace catalog needed for a normal Codex install. See the official [skills](https://developers.openai.com/codex/skills) and [plugin packaging](https://developers.openai.com/plugins/build/plugins) documentation.
 
-Install the current stable release from the immutable `v1.2.1` tag:
+To install the recovery prerelease tested on build `7982`:
+
+```bash
+codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.2.2-rc.1
+codex plugin add codex-pro-dispatch@codex-pro-dispatch
+```
+
+This prerelease validates bounded native summaries. It does not establish original
+source-byte integrity or generation finality, and the full A–L stable matrix has
+not been rerun. The [recovery receipt](docs/releases/v1.2.2-rc.1-recovery.md)
+lists the exercised cases and remaining release gates.
+
+The previous stable release is available from the immutable `v1.2.1` tag and
+does not contain the September 5 recovery changes:
 
 ```bash
 codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.2.1
@@ -112,12 +125,13 @@ codex plugin remove codex-pro-dispatch@codex-pro-dispatch
 codex plugin marketplace remove codex-pro-dispatch
 ```
 
-For source development or audit-first installation, clone and pin the same immutable tag, then use the transparent symlink installer:
+For source development or audit-first installation of the recovery prerelease,
+clone and pin its immutable tag, then use the transparent symlink installer:
 
 ```bash
 git clone https://github.com/iannwu/codex-pro-dispatch.git
 cd codex-pro-dispatch
-git checkout v1.2.1
+git checkout v1.2.2-rc.1
 ./install.sh
 ```
 
@@ -261,5 +275,6 @@ The recovery candidate retains the lean footer/chunk protocol and adds
 It reports `bounded_native_summary` verification, not original source-byte or
 generation-finality verification. The 20K reader boundary, visible truncation,
 wrong worker/message association, and missing footer all reject collection.
-A successful hello is not evidence that arbitrary long results or Git writes work;
-see the current recovery acceptance receipt when available.
+The [recovery receipt](docs/releases/v1.2.2-rc.1-recovery.md) records passing
+short dispatch, a 26,236-byte four-chunk result, a real GitHub review, an
+independently verified GitHub write, and a fresh-task/fresh-worker smoke test.

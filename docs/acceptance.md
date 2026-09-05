@@ -4,6 +4,9 @@ The unit tests verify state, markers, privacy, and no-resend behavior. They cann
 
 Run this matrix against the exact release-candidate commit before marking a release stable. Record the app version/build, macOS version, native capability names, candidate SHA, and results in a redacted release receipt.
 
+The [v1.2.2-rc.1 recovery receipt](releases/v1.2.2-rc.1-recovery.md) records
+the exercised recovery subset. It does not waive any A–L stable-release gate.
+
 The 2026-08-24 development run is historical evidence only. It was not performed against the current release candidate and must not be represented as the current release result.
 
 ## A. Setup

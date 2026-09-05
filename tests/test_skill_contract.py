@@ -29,7 +29,7 @@ class SkillContractTests(unittest.TestCase):
 
     def test_public_release_version_is_consistent(self) -> None:
         version = VERSION.read_text(encoding="utf-8").strip()
-        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertRegex(version, r"^\d+\.\d+\.\d+(?:-rc\.[1-9]\d*)?$")
         skill = SKILL.read_text(encoding="utf-8")
         frontmatter = skill.split("---\n", 2)[1]
         self.assertIn(f'version: "{version}"', frontmatter)
