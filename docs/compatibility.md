@@ -1,64 +1,104 @@
 # Compatibility contract
 
-Codex Pro Dispatch is a protocol and local state helper for a native workflow supplied by the official combined ChatGPT/Codex desktop app. It is compatible only when the current Codex task can prove every capability below.
-
-The workflow is desktop-only. ChatGPT on the web, Codex CLI alone, IDE extensions, Windows, and Linux do not satisfy the supported host contract. The helper's tests may run elsewhere, but that does not make the native dispatch workflow available there.
+Codex Pro Dispatch is a protocol and local state helper for a native workflow
+supplied by the official combined ChatGPT/Codex desktop app. It is compatible only
+when the current Codex task can prove every required semantic capability below.
+The helper's Linux/macOS unit tests do not imply native workflow support on Linux,
+ChatGPT on the web, Codex CLI alone, an IDE extension, or another app surface.
 
 ## Required native capabilities
 
-| Capability | Required evidence before dispatch |
+| Capability | Evidence required before prepare or worker configuration |
 | --- | --- |
-| Parent identity | Read the stable ID of the current Codex parent task |
-| Worker identity | List or resolve Chat conversations and address the configured worker by stable ID, never title or position |
-| Native submission | Make one user-message send attempt to that exact worker |
-| Outbound verification | Read the exact existing submitted user message for byte-level verification |
-| Completion read | Read one stable assistant message ID, exact text, generation-finality provenance, explicit message and selected-result outer truncation metadata, and the exact submitted user-message association from one native result |
-| Navigation | Open the exact worker and restore the exact parent task by stable ID |
+| Parent identity | Stable current Codex parent-task ID |
+| Worker identity | Resolve/open the configured Chat conversation by stable ID, never title/position |
+| Native submission | One user-message send attempt to that exact worker |
+| Outbound verification | Exact bytes and stable ID of the existing submitted user message |
+| Item collection | One selected assistant-message ID, exact text, exact submitted-user association, role, item-level finality status/provenance, raw message truncation, and raw selected-result outer truncation/provenance from one native read |
+| Navigation | Open exact worker and restore exact parent task by stable ID |
 
-Tool names are host implementation details. For example, a build may expose operations resembling `list_threads`, `send_message_to_thread`, `read_thread`, and exact-ID navigation. Similar names are not proof of compatibility: the semantic inputs, outputs, stable identities, and read-back behavior must all be present.
+Tool names are implementation details. Similar looking API names are not enough:
+their inputs, stable identities, and semantic outputs must meet the table. The
+skill repeats this preflight every invocation and passes the result to
+`pro-dispatch doctor --native-controls-confirmed`; that flag is an assertion, not
+automatic tool inspection.
 
-The skill repeats this preflight on every invocation. `pro-dispatch doctor --native-controls-confirmed` accepts the result as an assertion for that invocation; the standalone Python process cannot inspect the host's tool inventory itself. A host that cannot supply the collection fields together is unsupported for inline completion. A missing `truncated` field is unknown, not false, unless a reviewed helper release contains an allowlisted, version-scoped adapter contract proving that omission reports no shortening.
+### Collection adapter acceptance
+
+Native evidence names a helper-owned `adapter_contract_id`. The helper allowlists
+that ID and binds it to one host/version-scoped contract. It records message and
+outer truncation separately as raw `true`/`false`/`omitted` and normalized
+`true`/`false`/`null` values.
+
+An omission can normalize to `false` only if the released helper's exact adapter
+contract proves the deployed host always reports shortening as `true`. Examples,
+model prose, an observed successful run, a caller boolean, or a host title do not
+establish that contract. The v1.2.0 shipped desktop adapter requires both fields,
+so an omission currently fails closed. It allows a complete reread upgrade only
+where the adapter contract explicitly supports it. Finality must describe the
+selected item; finality inferred from an enclosing conversation/turn is rejected.
+
+If an inline/chunk collection capability is missing, those modes are unsupported.
+The only narrow exception is artifact discovery for an assignment that was already
+prepared in explicit artifact mode: parent-side Git verification may prove the
+pre-authorized branch/path even when readable chat evidence is unavailable.
 
 ## Supported environment
 
 - macOS
 - official combined ChatGPT/Codex desktop app
-- ChatGPT account where the user can visibly choose Pro in a dedicated Chat conversation
+- ChatGPT account/workspace where the user visibly selects Pro in a dedicated Chat
+  conversation
 - Python 3.9 or newer
 - explicit `$codex-pro-dispatch` invocation
 
-## External connectors and repository visibility
+## Repository artifacts and visibility
 
-Prompt-only review and research do not require an external connector. Repository mutations require a GitHub connector or tool in the dedicated Pro worker that is authorized for the exact repository and exposes the requested write action. This plugin does not bundle or authenticate that connector.
+Prompt-only review and chunked mode need no external connector. Artifact mode
+requires a separately installed/authorized GitHub connector in the dedicated Pro
+worker that can perform the exact contract write. The plugin neither bundles nor
+authenticates it.
 
-The worker can operate only on repository state visible through its authorized tools. Local-only branches, uncommitted changes, and Codex worktrees are not implicitly shared with the Pro conversation. Push the intended starting commit or provide the necessary context through an approved mechanism before dispatch.
+The worker sees only repository state reachable through its authorized remote
+tools. Local-only branches, uncommitted changes, and Codex worktrees are not
+implicitly shared. The parent needs independent remote read access to verify
+canonical repository identity, prepared base/protected refs, exact commit/tree/blob
+objects, artifact branch stability, and moving-base rules in a private bare repo.
 
-The parent Codex task needs an independent read path to the remote repository so it can verify the reported branch, commit SHA, changed files, tests, and protected refs. A connector's availability does not prove its permissions; verify write mode first on a disposable unprotected branch.
-
-The helper's deterministic state logic is tested on macOS and Linux, but Linux CI does not imply native workflow support on Linux.
-
-## Tested builds
+## Tested builds and acceptance status
 
 | Skill version | App version | App build | macOS | Native matrix | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| 1.1.0 | 26.820.60940 | 7119 | 26.6.2 | Passed | [Redacted release receipt](releases/v1.1.0-acceptance.md) |
+| 1.1.0 | 26.820.60940 | 7119 | 26.6.2 | Passed | [Historical redacted receipt](releases/v1.1.0-acceptance.md) |
+| 1.2.0 candidate | — | — | — | Not yet run | No host acceptance claim |
 
-Earlier development runs are not treated as release evidence because they were not executed against the v1.1.0 release candidate with a complete build receipt.
+The historical v1.1.0 run is not evidence for v1.2.0. Until the v1.2.0 candidate
+passes the matrix below on an inspected host and a redacted receipt is recorded,
+unsupported hosts must fail closed.
 
-## Release evidence policy
+## Release-evidence policy
 
-Before a version is called stable, the maintainer must run [acceptance.md](acceptance.md) against the exact candidate commit and publish a redacted receipt containing:
+Before any version is called stable, run [acceptance.md](acceptance.md) against
+the exact candidate commit and retain a redacted receipt containing:
 
-- candidate commit SHA and intended tag
-- ChatGPT/Codex app version and build
-- macOS version and architecture
-- semantic native capabilities used, with tool names when public
-- pass/fail result for every matrix section
-- confirmation that temporary files were private and removed
-- confirmation that the clipboard and protected Git refs were unchanged
+- candidate SHA and intended tag (if any);
+- desktop app version/build, macOS version, architecture, and named native
+  capability implementation;
+- exact adapter-contract ID and the evidence supporting every omission
+  normalization/reread capability it claims;
+- pass/fail for inline, truncation, chunk, recovery, artifact, migration,
+  retention, privacy, and parent-restoration cases;
+- confirmation that private temporary/spool files were removed when permitted and
+  clipboard/protected refs were unchanged.
 
-Any missing capability, duplicate send, wrong-thread read, stale-result acceptance, uncleaned sensitive temp file, or failed parent restoration blocks stable release.
+Missing native fields, an unaccepted adapter claim, duplicate send, wrong-thread
+read, stale-result acceptance, incorrect chunk reassembly, protected-ref movement,
+uncleaned sensitive temporary material, or failed parent restoration blocks
+stability.
 
 ## Unsupported fallbacks
 
-The skill must not replace missing native capabilities with ChatGPT Web, Codex Web GPT, ChatGPT Classic, CDP, AppleScript, Accessibility automation, clipboard injection, or title-based thread selection.
+Never replace missing capabilities with ChatGPT Web, Codex Web GPT, ChatGPT
+Classic, CDP, AppleScript, Accessibility automation, browser scraping, clipboard
+injection, title-based selection, a caller-supplied truncation flag, or a local
+checkout presented as artifact proof.

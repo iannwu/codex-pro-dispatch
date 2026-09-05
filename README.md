@@ -5,11 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-black.svg)](#requirements)
 
-An independent macOS safety wrapper for a supported Codex desktop workflow. It hands one bounded implementation, review, or research job to a dedicated ChatGPT Pro conversation with at most one native send attempt, collect-only recovery, and independent verification of the result.
+An independent macOS safety wrapper for a supported Codex desktop workflow. It
+hands one bounded implementation, review, or research job to a dedicated ChatGPT
+Pro conversation with at most one native send attempt per durable turn,
+collect-only recovery, and independent verification of the result.
 
 **Desktop-only:** the dispatch workflow runs only inside the official ChatGPT desktop app for macOS with Codex. It does not run from ChatGPT on the web, Codex CLI alone, an IDE extension, Windows, or Linux. The Codex CLI is used only to install and manage the plugin.
 
-**Version: v1.1.1 candidate.** This branch closes response-only completion: a marker-bearing prefix cannot complete without strict native collection evidence proving the selected message is final and untruncated. It has not been released or accepted on a live host yet.
+**Version: v1.2.0 candidate.** This unreleased branch keeps the v1.1.1 fail-closed collection gate and adds explicit `inline`, `chunked`, and separately authorized `artifact` result modes. It has not been released or accepted on a live host yet.
 
 This project is independent and unofficial. It is not affiliated with, endorsed by, or maintained by OpenAI.
 
@@ -26,10 +29,12 @@ Codex parent task
 Codex Pro Dispatch provides the safety protocol around that handoff:
 
 - stable worker and parent-task identity
-- at-most-one native send attempt per assignment
+- at-most-one native send attempt per durable turn
 - exact native read-back verification
 - no automatic resend after ambiguity, timeout, or restart
 - result markers, explicit native collection integrity, and stale-response rejection
+- explicit `inline`, read-only `chunked`, and separately authorized `artifact` result modes
+- raw/normalized truncation and finality provenance without a caller-controlled flag
 - same-worker follow-ups with new assignment IDs
 - independent verification of worker-reported repository changes
 
@@ -79,8 +84,8 @@ git --version
 | Local state machine | Tested on macOS and Linux in CI |
 | Plugin manifest | Validated against the current Codex plugin schema |
 | Manual skill discovery | `$HOME/.agents/skills` |
-| Native end-to-end workflow | v1.1.0 matrix passed on the tested maintainer build; compatibility remains build-sensitive |
-| Current maintainer app build | `26.820.60940` (`7119`) on macOS 26.6.2; v1.1.0 matrix passed |
+| Native end-to-end workflow | v1.1.0 matrix passed on the historical maintainer build; v1.2.0 is not yet host-accepted |
+| Current maintainer app build | No v1.2.0 acceptance claim; compatibility remains build-sensitive and unsupported until the current matrix passes |
 
 See [docs/compatibility.md](docs/compatibility.md) for the exact capability contract and tested-build policy.
 
@@ -88,7 +93,8 @@ See [docs/compatibility.md](docs/compatibility.md) for the exact capability cont
 
 OpenAI's current guidance packages reusable skills as plugins. This repository includes the plugin manifest and marketplace catalog needed for a normal Codex install. See the official [skills](https://developers.openai.com/codex/skills) and [plugin packaging](https://developers.openai.com/plugins/build/plugins) documentation.
 
-Install the stable release from the immutable `v1.1.0` tag:
+The latest stable release remains the immutable `v1.1.0` tag. This v1.2.0 branch
+is an unreleased candidate and must not be represented as a published release:
 
 ```bash
 codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.1.0
@@ -104,7 +110,9 @@ codex plugin remove codex-pro-dispatch@codex-pro-dispatch
 codex plugin marketplace remove codex-pro-dispatch
 ```
 
-For source development or audit-first installation, clone and pin the same immutable tag, then use the transparent symlink installer:
+For source development or audit-first installation, clone and pin the stable tag,
+or inspect the unreleased branch explicitly, then use the transparent symlink
+installer:
 
 ```bash
 git clone https://github.com/iannwu/codex-pro-dispatch.git
@@ -165,13 +173,17 @@ The native interface does not machine-verify the selected model, so Pro selectio
 
 You do **not** need a connector when the Pro worker only reviews or researches the prompt you send it.
 
-If you want the worker to create a branch or commit, all of the following must be true:
+If you want the worker to create a branch or commit through explicit `artifact`
+mode, all of the following must be true:
 
 1. A GitHub connector or tool is enabled for the dedicated Pro worker and authorized for the exact repository.
 2. That connector exposes the required write action. Read-only repository access is not enough; connector capabilities and workspace policy can vary.
 3. The relevant repository and starting commit exist on GitHub. The Pro conversation cannot see uncommitted files, local-only branches, or your Codex worktree unless you explicitly provide that content through an approved tool.
 4. The Codex parent can independently fetch and inspect the returned commit, using local Git credentials or another read path. Worker claims are never accepted without verification.
-5. The first write test uses a disposable, unprotected branch. Never use the connector's first test against `main`, another protected branch, or a private repository containing sensitive material.
+5. The assignment contains a strict contract binding one currently absent
+   disposable branch, one currently absent UTF-8 Markdown path, one prepared base
+   SHA, and every protected ref.
+6. The first write test uses a disposable, unprotected branch. Never use the connector's first test against `main`, another protected branch, or a private repository containing sensitive material.
 
 This plugin does not install, authenticate, or broaden permissions for the GitHub connector. Repository owners and workspace administrators may need to approve the connector, organization SSO, and repository access separately.
 
@@ -184,6 +196,32 @@ Use $codex-pro-dispatch to send this bounded implementation to my ChatGPT Pro wo
 The workflow arms a durable receipt immediately before transport and then permits at most one native send attempt. It verifies delivery only through exact native read-back.
 
 That distinction matters: if the app stops after arming but before transport, the assignment may have zero sends and still become permanently collect-only. This favors duplicate prevention over guaranteed delivery. Start a fresh assignment only after bounded inspection and explicit user authorization.
+
+## Long results in v1.2
+
+Choose the result transport at preparation time; `auto` is intentionally not
+available.
+
+| Mode | Meaning | Cannot do |
+| --- | --- | --- |
+| `inline` | Default short result with strict native collection evidence | Complete from response text or a marker alone |
+| `chunked` | Read-only sequence of separately armed/sent turns, exact JSON payload framing, private crash-safe spool, and lossless reassembly | Insert separators, trust an unframed Markdown chunk, or resend a child |
+| `artifact` | Explicit one-commit, one-new-Markdown-file Git contract verified from a private bare repository | Automatically write, use a checkout as proof, or act on a public repository without retention acknowledgement |
+
+The helper records raw truncation as `true`, `false`, or `omitted` and a normalized
+value as `true`, `false`, or `null`. An omitted field is unknown unless an exact
+helper-allowlisted adapter contract proves otherwise. It records the requested and
+loaded worker IDs, selected assistant ID, submitted user ID, item-level finality
+provenance, and selected-result outer integrity from the same native read. A
+later observation time alone is idempotent; changed accepted source or content is
+an immutable conflict.
+
+An exact `CHUNKED_REQUIRED` control or a proven truncation can atomically close a
+verified predecessor as `response_rejected` and prepare one recovery child. The
+host must still arm and send that child. Uncertain sends cannot transition, and
+completion remains separate from delivery and parent restoration. See the
+[long-result reference](skills/codex-pro-dispatch/references/long-results.md) for
+the strict chunk, artifact, and Git-object protocols.
 
 ## Common first-run problems
 
@@ -210,13 +248,28 @@ A timeout, restart, stale UI, or `thread not loaded` result never authorizes a r
 pro-dispatch recover '<assignment-id>'
 ```
 
-The skill opens the saved worker ID, verifies any existing outbound message, collects only a matching completed response, and restores the exact parent task. An unusual-activity HTTP 403 remains collect-only and starts a fixed 30-minute cooldown before any fresh assignment.
+The skill opens the saved worker ID, verifies any existing outbound message, and
+collects only a matching completed response with trusted item-level finality and
+integrity evidence. A `response_rejected` turn cannot send again; recovery may
+only use an already prepared successor. Immutable content completion remains
+separate from materialization and exact parent restoration. An unusual-activity
+HTTP 403 remains collect-only and starts a fixed 30-minute cooldown before any
+fresh assignment.
 
 ## Safety and privacy
 
 The helper stores only worker identity, parent and assignment IDs, timestamps, state transitions, markers, prompt/response hashes, and an OpenAI request ID when one is available for unusual-activity HTTP 403 recovery. Config directories use mode `0700`; receipt and lock files use `0600`.
 
-The helper does not retain prompt bodies, response transcripts, raw diagnostic bodies, credentials, cookies, browser profiles, or repository source. Diagnostic commands store only a category and SHA-256 hash. `doctor` durably redacts raw diagnostic bodies left by releases before v1.1. During a dispatch, the skill may need short-lived prompt, read-back, response, and error files. It requires a private temporary directory, restrictive permissions, minimal output, and cleanup after parent restoration. Host and terminal logs remain outside the helper's storage guarantee.
+Receipts do not retain prompt bodies, response transcripts, raw diagnostic bodies,
+credentials, cookies, browser profiles, or repository source. Diagnostic commands
+store only a category and SHA-256 hash. `doctor` durably redacts raw diagnostic
+bodies left by releases before v1.1. Chunked mode intentionally retains verified
+payload bytes in a private `0700` crash-recovery spool until materialization and
+parent restoration permit cleanup; it is never placed in JSON receipts. During a
+dispatch, the skill may also need short-lived prompt, read-back, response, and
+error files. It requires a private temporary directory, restrictive permissions,
+minimal output, and cleanup after parent restoration. Host and terminal logs
+remain outside the helper's storage guarantee.
 
 `worker reset --force` and `purge --yes --force` are break-glass commands. They can erase recovery identity or unresolved receipts and therefore destroy the workflow's no-resend evidence. They are not part of normal operation.
 

@@ -1,84 +1,104 @@
 # Official-app native conversation protocol
 
-Read this reference for first-time setup, collection, or recovery.
+Use this reference for setup, a native send, collection, or recovery. The
+official combined ChatGPT/Codex desktop app supplies the native controls; exact
+tool names are not part of the protocol. Do not replace unavailable controls with
+shell UI automation, a browser, CDP, AppleScript, Accessibility, or clipboard
+injection.
 
-## Assumptions
+## Preflight and stable identities
 
-- Chat and Codex are separate task surfaces inside the official combined desktop app.
-- The host exposes native controls that can resolve conversation IDs, submit a message, observe conversation metadata, open a conversation by ID, read the latest completed assistant response, and return to a Codex task by ID.
-- Exact tool names may vary by Codex build. Use the available native controls semantically. Do not replace them with shell UI automation.
+On every invocation, prove the semantic capabilities listed in `SKILL.md` before
+writing worker or assignment state. In particular, a collection read must bind:
 
-Do not treat these assumptions as satisfied automatically. Complete the six-capability host preflight in `SKILL.md` on every invocation. If any capability is missing, stop before configuration or assignment preparation.
+- requested and loaded worker conversation IDs;
+- the selected assistant message ID and the exact submitted user message ID;
+- assistant role and message-level completed-generation provenance;
+- raw item `truncated` and raw selected-result outer truncation, each with trusted
+  adapter provenance; and
+- exact assistant text from that same read operation.
 
-## Worker setup
+Do not call an enclosing turn "complete" evidence for an item. A missing
+truncation field stays unknown unless the reviewed helper release allowlists the
+adapter contract and explicitly proves omission semantics. The current adapter
+does not normalize omissions.
 
-1. The user opens one dedicated Chat conversation.
-2. The user visibly selects Pro.
-3. Resolve and save its stable conversation ID.
-4. Treat the model as `user-confirmed-pro`, not machine verified.
+The user selects Pro visibly in one dedicated Chat conversation. Save its stable
+conversation ID with `worker set`; a title and a claimed model are never identity
+or machine-verifiable model evidence.
 
-A worker title is a label only. Conversation identity comes from the stable ID.
+## One turn: arm, send once, then read back
 
-## Submission sequence
+1. Capture the stable parent Codex task ID.
+2. `prepare` the selected explicit result mode using a private prompt file.
+3. Use the returned exact `turn_id`, worker ID, and wrapped prompt.
+4. Immediately before native transport, run
+   `pro-dispatch arm '<assignment-id>' --turn-id '<turn-id>'`.
+5. Send the returned prompt at most once to the returned worker ID.
+6. Read the existing native user message bytes and stable ID without reconstructing
+   or editing them. Run `submitted` with both.
 
-1. Capture the parent Codex task ID before leaving it.
-2. Prepare the assignment with `pro-dispatch prepare`.
-3. Resolve the configured worker by ID.
-4. Immediately before sending, run `pro-dispatch arm '<assignment-id>'`. Do not send unless it succeeds.
-5. Make at most one native send attempt for `wrapped_prompt`. After `arm`, the assignment is permanently collect-only if the app crashes or the send outcome is uncertain. An interruption before transport can therefore result in zero sends; this is deliberate fail-closed behavior.
-6. After confirmation, use native controls to read back the exact submitted user message from the worker and save it as UTF-8 without reconstructing or editing it.
-7. Run `pro-dispatch submitted '<assignment-id>' --sent-prompt-file '<native-read-back-file>'` so the helper compares the read-back bytes with the prepared `wrapped_prompt` hash.
-8. If the hash differs, keep the helper's `indeterminate` collect-only state and never resend. If confirmation itself is indeterminate, record `indeterminate` and switch to collection-only recovery.
+Arming happens before transport and permanently prohibits resending that turn. A
+crash before, during, or after the native send can leave an unknown outcome or
+zero known sends. That is deliberately collect-only.
 
-The helper intentionally blocks a second unresolved assignment.
+If exact read-back differs by any byte, do not resend. Only a receipt-explicit
+single trailing-LF extraction artifact permits one re-read of the same existing
+native message. For a native-send outcome that may have happened, record
+`indeterminate`; later `submitted` verification is allowed only for the existing
+message, never through a second send.
 
-## Waiting
+If native diagnostics show unusual activity, save the untrusted detail in a
+private reason file and call `unusual-activity`. Report HTTP 403 explicitly,
+preserve the optional request ID, and respect the 30-minute cooldown. Do not
+collapse it into generic `systemError`.
 
-Use a bounded poll of native conversation metadata. An update signal is only permission to collect. It is not proof that the response belongs to the assignment.
+## Collection protocol
 
-Do not reopen the worker repeatedly during generation. Do not retry a message because the UI is slow.
+1. Open the saved worker by exact ID and wait for the loaded ID to match.
+2. If outbound verification is incomplete, identify the existing native user
+   message by the receipt marker and verify it through `submitted`; do not send.
+3. Ask the host for one native collection evidence object for the selected result.
+4. Save that JSON and use `collect` with the exact `turn_id` and a private output
+   file when the result will materialize.
+5. Restore the exact parent task after outcome handling.
 
-Native send acknowledgement may become visible through read-back after a delay. If the exact user message is temporarily absent, record `indeterminate`, wait, and recover without resending. Absence in an immediate read is not proof that the send failed.
+An update timestamp is permission to attempt collection, not proof of result
+identity. A later reading of the same accepted message can have a different
+`observed_at`; this is idempotent only when all immutable source/content identity
+remains the same. Changed accepted content or a different source is a conflict.
 
-If the native send reports `systemError`, first inspect any error payload exposed by that control. If no payload is exposed, inspect the official app log read-only around that one send for the HTTP status, response detail, and request ID. Do not emit unrelated log content. An unusual-activity HTTP 403 must be recorded with `pro-dispatch unusual-activity`, not collapsed into a generic transport error.
+For inline output, an exact two-line `CHUNKED_REQUIRED` control or a proven
+truncated response can create a `response_rejected` predecessor plus exactly one
+prepared recovery child. That transition requires verified outbound delivery and
+proven generation completion under the receipt lock. The caller still must arm and
+send the child. No uncertain send can create a child.
 
-## Collection
-
-1. Open the worker by exact conversation ID.
-2. Wait until the loaded conversation ID equals the configured worker ID.
-3. If outbound verification is incomplete, locate the existing user message by assignment marker and run `pro-dispatch submitted --sent-prompt-file` on its exact native read-back. This is verification, not a new send. If the first temporary file added exactly one trailing newline and the receipt reports `readback_correction_allowed: true`, re-extract the same native message without that artifact and verify it once more. Never normalize or retry other mismatches.
-4. Read the newest completed assistant response.
-5. Validate the first nonempty line against the assignment's exact result marker.
-6. Reject stale or mismatched markers.
-7. Restore the exact parent Codex task ID in a `finally`-style cleanup path.
-
-If the native control reports `thread not loaded`, explicitly open the worker by ID and wait. Do not resend.
-
-## Visible fallback
-
-Current official-app collection may foreground ChatGPT and move the pointer. This is an accepted v1 limitation.
-
-Prefer this behavior:
-
-1. Submit and wait in the background.
-2. If the user is working in another app, defer collection.
-3. When ChatGPT/Codex is frontmost again, open the worker, collect, and restore the parent task.
-
-The clipboard must remain unchanged.
+For chunked output, use the strict frame from `long-results.md` and collect every
+child separately. A visible truncated prefix is never a chunk. For artifact output,
+collect a valid manifest only as a hint and then use parent-side bare-Git
+verification; `--discover` is permitted only for an already-authorized artifact
+receipt with unreadable chat evidence.
 
 ## Failure mapping
 
-| Native result | Required action |
+| Native situation | Required action |
 | --- | --- |
-| Crash or interruption after `arm` | Recover the exact worker collect-only; never send that assignment again |
-| Send confirmed and exact read-back available | `pro-dispatch submitted --sent-prompt-file '<native-read-back-file>'` |
-| Send acknowledged but read-back temporarily absent | `pro-dispatch indeterminate`; wait and late-verify the existing message without resend |
-| Read-back file equals expected prompt plus one trailing newline | Re-extract the same native message without the file artifact and verify again; never resend |
-| Read-back differs by any other byte | Keep the helper's `indeterminate` state; do not retry verification or resend |
-| Send may have happened | `pro-dispatch indeterminate`; never resend |
-| Native diagnostics show an unusual-activity HTTP 403 | Preserve the exact response and request ID with `pro-dispatch unusual-activity`; report HTTP 403 explicitly, remain collect-only, and enforce the 30-minute cooldown before any fresh assignment |
-| Worker unchanged | Keep waiting within the bounded timeout |
-| Thread not loaded | Open exact worker ID and wait |
-| Wrong thread loaded | Stop and reject collection |
-| Result marker missing or mismatched | `pro-dispatch ambiguous`; never resend |
-| Parent restoration fails | Preserve assignment state and report the exact parent task ID |
+| Crash/interruption after arm | Recover exact worker collect-only; do not send that turn again |
+| Exact native read-back exists | `submitted` with exact bytes and native user ID |
+| Send acknowledged but read-back temporarily absent | `indeterminate`; wait and later verify the existing message |
+| One trailing-LF read-back artifact | Re-extract the same native message once; never resend |
+| Other read-back drift | Keep `indeterminate`; do not retry or resend |
+| `thread not loaded` | Open exact worker ID, wait, and recover read-only |
+| Wrong worker loaded | Stop and reject collection |
+| Missing/mismatched marker or malformed collection evidence | Record `ambiguous`/fail closed; never resend |
+| Message or outer truncation true/unknown | Reject it; re-read only where adapter contract permits or use an authorized chunk child |
+| Native unusual-activity HTTP 403 | `unusual-activity`; collect-only and fixed cooldown |
+| Parent restoration fails | Preserve immutable result/delivery state and report parent ID; navigation retry cannot reopen content |
+
+## Foreground behavior
+
+Current official-app collection can briefly foreground ChatGPT and move the
+pointer. Submit and wait in the background where possible; if the user is working
+in another app, defer collection until focus returns unless the user explicitly
+permits interruption. The clipboard must remain unchanged.

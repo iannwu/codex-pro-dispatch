@@ -28,7 +28,14 @@ from .errors import (
 )
 
 APP_NAME = "codex-pro-dispatch"
-SCHEMA_VERSION = 1
+# Worker configuration deliberately remains v1.  Dispatch receipts have their
+# own lifecycle and advance independently in the long-result transport.
+WORKER_SCHEMA_VERSION = 1
+ASSIGNMENT_SCHEMA_VERSION = 2
+# Deprecated source-compatible name for the logical dispatch receipt.  Worker
+# configuration deliberately has its own named v1 constant; new code must not
+# use this alias for worker data.
+SCHEMA_VERSION = ASSIGNMENT_SCHEMA_VERSION
 
 ACTIVE_STATUSES = frozenset(
     {"prepared", "armed", "submitted", "pending", "indeterminate", "ambiguous"}
@@ -58,6 +65,14 @@ class RuntimePaths:
     def lock_file(self) -> Path:
         return self.state_dir / "state.lock"
 
+    @property
+    def spool_dir(self) -> Path:
+        return self.state_dir / "spool"
+
+    @property
+    def results_dir(self) -> Path:
+        return self.state_dir / "results"
+
 
 @dataclass(frozen=True)
 class WorkerConfig:
@@ -75,6 +90,11 @@ class PreparedAssignment:
     receipt_path: Path
     wrapped_prompt: str
     continuation_of: str | None = None
+    turn_id: str | None = None
+    result_mode: str = "inline"
+    # Turn order is explicit so a host cannot infer recovery ownership from an
+    # opaque identifier or accidentally re-arm the original assignment.
+    sequence: int = 1
 
 
 def default_paths() -> RuntimePaths:
@@ -336,7 +356,7 @@ def save_worker(
         atomic_write_json(
             runtime.worker_file,
             {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": WORKER_SCHEMA_VERSION,
                 "conversation_id": worker.conversation_id,
                 "label": worker.label,
                 "model_confirmation": worker.model_confirmation,
@@ -349,7 +369,7 @@ def save_worker(
 def load_worker(paths: RuntimePaths | None = None) -> WorkerConfig:
     runtime = paths or default_paths()
     value = read_json(runtime.worker_file)
-    if value.get("schema_version") != SCHEMA_VERSION:
+    if value.get("schema_version") != WORKER_SCHEMA_VERSION:
         raise ConfigurationError(f"Unsupported worker config schema: {runtime.worker_file}")
     conversation_id = validate_identifier(
         str(value.get("conversation_id", "")), field="conversation_id"
@@ -1087,3 +1107,60 @@ def purge_local_state(
             "worker_removed": worker_removed,
             "assignments_removed": assignments_removed,
         }
+
+
+# Schema-v2 logical dispatch API.  The imports are intentionally at end of this
+# module: transport reuses the established private-file and worker helpers above,
+# while public callers receive only the v2 state machine.
+from .transport import (  # noqa: E402
+    DISPATCH_ACTIVE_STATUSES,
+    DISPATCH_STATUSES,
+    CleanupResult,
+    CollectionOutcome,
+    ResultDescriptor,
+    abandon_assignment_v2,
+    active_assignment_v2,
+    active_cooldown_v2,
+    arm_assignment_v2,
+    cleanup_result_v2,
+    collect_turn_v2,
+    complete_assignment_v2,
+    list_assignments_v2,
+    load_assignment_v2,
+    mark_ambiguous_v2,
+    mark_indeterminate_v2,
+    mark_pending_v2,
+    mark_submitted_v2,
+    mark_unusual_activity_403_v2,
+    materialize_result_v2,
+    prepare_assignment_v2,
+    purge_local_state_v2,
+    record_parent_restoration_v2,
+    recovery_info_v2,
+    redact_stored_diagnostics_v2,
+    verify_artifact_v2,
+)
+
+ACTIVE_STATUSES = DISPATCH_ACTIVE_STATUSES
+ALL_STATUSES = DISPATCH_STATUSES
+prepare_assignment = prepare_assignment_v2
+load_assignment = load_assignment_v2
+list_assignments = list_assignments_v2
+active_assignment = active_assignment_v2
+active_cooldown = active_cooldown_v2
+arm_assignment = arm_assignment_v2
+mark_submitted = mark_submitted_v2
+mark_pending = mark_pending_v2
+mark_indeterminate = mark_indeterminate_v2
+mark_ambiguous = mark_ambiguous_v2
+mark_unusual_activity_403 = mark_unusual_activity_403_v2
+abandon_assignment = abandon_assignment_v2
+complete_assignment = complete_assignment_v2
+recovery_info = recovery_info_v2
+redact_stored_diagnostics = redact_stored_diagnostics_v2
+collect_turn = collect_turn_v2
+verify_artifact = verify_artifact_v2
+materialize_result = materialize_result_v2
+cleanup_result = cleanup_result_v2
+record_parent_restoration = record_parent_restoration_v2
+purge_local_state = purge_local_state_v2

@@ -63,7 +63,11 @@ def strict_json_object(raw: bytes, *, maximum_bytes: int = MAX_EVIDENCE_BYTES) -
             "Native collection evidence is not strict JSON",
             error_code="collection_evidence_invalid",
         ) from exc
-    if text[end:].strip():
+    # RFC 8259 permits only these four code points outside the JSON value.
+    # ``str.strip`` is deliberately not used: Python treats several additional
+    # control characters (for example vertical tab and record separator) as
+    # whitespace, while they are trailing data in JSON.
+    if any(character not in " \t\r\n" for character in text[end:]):
         raise CollectionEvidenceError(
             "Native collection evidence contains trailing data",
             error_code="collection_evidence_invalid",
@@ -138,6 +142,7 @@ class NativeAdapterContract:
     omitted_outer_truncated_is_false: bool
     supports_complete_reread_upgrade: bool
     generation_finality_provenance: frozenset[str]
+    outer_integrity_provenance: frozenset[str]
 
 
 # The currently shipped adapter is deliberately conservative: it requires both
@@ -152,6 +157,7 @@ NATIVE_ADAPTER_CONTRACTS: dict[str, NativeAdapterContract] = {
         omitted_outer_truncated_is_false=False,
         supports_complete_reread_upgrade=True,
         generation_finality_provenance=frozenset({"native-message-status"}),
+        outer_integrity_provenance=frozenset({"native-result-envelope"}),
     ),
 }
 
@@ -268,6 +274,11 @@ class NativeCollectionEvidence:
             value.get("requested_conversation_id"), field="requested_conversation_id"
         )
         loaded = _safe_native_id(value.get("loaded_conversation_id"), field="loaded_conversation_id")
+        if requested != loaded:
+            raise CollectionEvidenceError(
+                "Requested and loaded native conversation IDs differ",
+                error_code="collection_evidence_invalid",
+            )
         assistant_id = _safe_native_id(value.get("assistant_message_id"), field="assistant_message_id")
         submitted_id = _safe_native_id(
             value.get("submitted_user_message_id"), field="submitted_user_message_id"
@@ -295,11 +306,14 @@ class NativeCollectionEvidence:
                 error_code="collection_evidence_invalid",
             )
         outer_provenance = outer.get("provenance")
-        if not isinstance(outer_provenance, str) or not outer_provenance or any(
-            ord(char) < 32 for char in outer_provenance
+        if (
+            not isinstance(outer_provenance, str)
+            or not outer_provenance
+            or any(ord(char) < 32 for char in outer_provenance)
+            or outer_provenance not in contract.outer_integrity_provenance
         ):
             raise CollectionEvidenceError(
-                "Selected result outer integrity provenance is invalid",
+                "Selected result outer integrity lacks trusted adapter provenance",
                 error_code="collection_evidence_invalid",
             )
         raw_truncated, normalized_truncated = _raw_truncation(
@@ -365,6 +379,12 @@ class NativeCollectionEvidence:
         return {
             "collection_schema": self.schema,
             "adapter_contract_id": self.adapter_contract_id,
+            # Keep the exact host-side association durable alongside the
+            # dispatch-level configured worker ID.  These are identifiers only,
+            # never the collected body, and make an audit able to prove that the
+            # requested and loaded worker matched the submitted native message.
+            "requested_conversation_id": self.requested_conversation_id,
+            "loaded_conversation_id": self.loaded_conversation_id,
             "assistant_message_id": self.assistant_message_id,
             "submitted_user_message_id": self.submitted_user_message_id,
             "collection_evidence_sha256": self.evidence_sha256,

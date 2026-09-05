@@ -1,58 +1,77 @@
-# GitHub verification contract
+# GitHub artifact verification contract
 
-Read this reference before authorizing a GitHub mutation and again when Chat Pro reports one.
+Read this reference before an `artifact`-mode assignment. Ordinary prompt-only
+review and `chunked` mode are read-only and do not use it.
 
-## Before dispatch
+## Required authority before preparation
 
-Repository-write mode requires all of the following:
+Artifact mode is explicit per assignment. Before `prepare`, the parent must have
+all of the following:
 
-- the dedicated Pro worker exposes a GitHub connector or tool with the required write action for the exact repository
-- the relevant starting commit and branch are remotely visible; local-only and uncommitted code is not implicitly shared
-- organization, SSO, branch-protection, and repository policies permit the proposed disposable branch action
-- the parent has independent remote read access for verification
+- a dedicated Pro worker whose separately installed GitHub connector exposes the
+  exact write action for the exact remote repository;
+- an independently observed repository ID, canonical credential-free GitHub HTTPS
+  URL, visibility, prepared base branch/SHA, and every protected ref/SHA;
+- a currently absent disposable artifact branch and currently absent exact
+  Markdown path at the prepared base;
+- one strict artifact contract with a single `add-single-markdown` change; and
+- independent parent remote read access for exact Git object verification.
 
-Connector presence does not prove write permission. If the worker has read-only access, keep the assignment prompt-only. Test new connector authorization on a disposable unprotected branch, never a protected ref.
+This plugin does not install, authenticate, or broaden the GitHub connector.
+Connector presence does not prove write permission. Local-only branches,
+uncommitted files, checked-out worktrees, or worker prose do not satisfy the
+contract. Do not use a protected ref, PR, merge, tag, release, deployment, issue,
+workflow, or settings change as transport.
 
-## Worker responsibility
+For a public repository, the parent must pass `--allow-public-artifact` and
+explicitly acknowledge durable public Git retention. Contracts marked `secret`,
+`personal`, or `regulated` are never public. The helper performs no implicit
+write and does not delete the branch automatically.
 
-The Chat Pro worker performs only the repository actions authorized by the assignment, using the GitHub connector available inside its own Chat conversation. Codex Pro Dispatch does not install, authenticate, or broaden that connector.
+## Exact allowed Git object
 
-The worker should return concrete remote evidence, normally:
+The worker is authorized to create only one commit on the contract branch. Parent
+verification accepts it only if it has:
 
-- repository
-- verified base SHA
-- branch name
-- created commit SHA
-- final branch SHA
-- changed files
-- CI or workflow results it actually inspected
-- confirmation that protected refs were unchanged
+1. exactly one parent equal to the prepared base SHA;
+2. exactly the contract commit message;
+3. exactly one changed path, an added (not modified, deleted, renamed, symlinked,
+   executable, or submodule) regular `100644` blob at the contract Markdown path;
+4. strict UTF-8 bytes with no BOM, CR, NUL, binary content, or missing final LF;
+5. exact contract/manifest size and SHA-256; and
+6. an artifact branch still pointing at that commit.
 
-The parent Codex task must not silently make the requested write on behalf of the worker and then attribute it to Pro.
+The prepared base may fast-forward only if it retains the prepared base and does
+not contain the artifact commit. Base rewrite/deletion, artifact merge, branch
+movement, or any protected-ref change outside a contract-permitted base
+fast-forward fails closed.
 
-## Parent verification
+## Parent-side verification sequence
 
-After collecting the worker result, independently verify through local Git or the parent GitHub connector:
+`pro-dispatch artifact verify` initializes a private bare repository. It never
+trusts a checkout or a caller-supplied file. It fetches only exact object IDs and
+proves the branch, parent, commit message, tree entry, blob bytes, digest, branch
+stability, and protected refs before it marks the immutable result complete.
 
-1. The reported commit exists remotely.
-2. Its parent or base is the required SHA.
-3. The branch head equals the reported final SHA.
-4. Commit message and changed files match the assignment.
-5. Protected branches remain unchanged.
-6. CI results are real and correspond to the reported SHA.
-7. Local-only checks are run by the parent when required.
+Use:
 
-A worker's statement is not verification.
+```bash
+pro-dispatch artifact verify '<assignment-id>' --result-file '<private-result-file>'
+```
 
-## Ambiguous transport result
+Use `--discover` only when the assignment was already prepared in artifact mode
+and readable chat evidence is unavailable. Discovery verifies the same stored
+contract against the remote branch/path; it is not permission to discover or
+write arbitrary repository content.
 
-A response retrieval failure does not prove the GitHub work failed. Before any follow-up, inspect the expected branch and commit state. Never resend the whole assignment automatically.
+Keep these states distinct in reports:
 
-## Completion language
+- worker-reported remote work;
+- parent-verified immutable artifact object;
+- parent-run local tests; and
+- unverified host-specific behavior.
 
-Distinguish clearly:
-
-- worker-reported remote work
-- parent-verified remote work
-- parent-run local tests
-- unverified physical or environment-specific behavior
+No response retrieval failure proves that a Git write did not happen. Inspect only
+the pre-authorized remote branch/path and recover without resending the original
+assignment. The parent must not silently make a replacement write and attribute it
+to Pro.

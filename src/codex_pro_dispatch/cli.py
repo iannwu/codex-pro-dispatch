@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import platform
 import sys
@@ -9,6 +10,7 @@ from typing import Any, Sequence
 
 from . import __version__
 from .collection import NativeCollectionEvidence
+from .artifact import ArtifactContract
 from .core import (
     DispatchError,
     abandon_assignment,
@@ -16,6 +18,8 @@ from .core import (
     active_assignment,
     arm_assignment,
     complete_assignment,
+    cleanup_result,
+    collect_turn,
     default_paths,
     list_assignments,
     load_assignment,
@@ -25,12 +29,15 @@ from .core import (
     mark_unusual_activity_403,
     mark_pending,
     mark_submitted,
+    materialize_result,
     prepare_assignment,
     purge_local_state,
     redact_stored_diagnostics,
     recovery_info,
+    record_parent_restoration,
     reset_worker,
     save_worker,
+    verify_artifact,
 )
 
 
@@ -102,6 +109,31 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--continuation-of")
     prepare.add_argument("--assignment-id")
     prepare.add_argument(
+        "--result-mode",
+        choices=("inline", "artifact", "chunked"),
+        default="inline",
+        help="Explicit complete-result transport; auto is intentionally unsupported",
+    )
+    prepare.add_argument(
+        "--artifact-contract-file",
+        help="Strict UTF-8 artifact contract; valid only with --result-mode artifact",
+    )
+    prepare.add_argument(
+        "--authorize-artifact-write",
+        action="store_true",
+        help="Record this assignment's explicit one-commit artifact authorization",
+    )
+    prepare.add_argument(
+        "--worker-github-write-confirmed",
+        action="store_true",
+        help="Confirm the configured worker has the contract's write capability",
+    )
+    prepare.add_argument(
+        "--allow-public-artifact",
+        action="store_true",
+        help="Acknowledge that public Git content has durable public retention",
+    )
+    prepare.add_argument(
         "--native-controls-confirmed",
         action="store_true",
         help="Confirm this invocation passed the native host-capability preflight",
@@ -111,11 +143,13 @@ def build_parser() -> argparse.ArgumentParser:
         "arm", help="Durably prohibit resends immediately before native submission"
     )
     arm.add_argument("assignment_id")
+    arm.add_argument("--turn-id")
 
     submitted = subparsers.add_parser(
         "submitted", help="Verify the native read-back and record one submission"
     )
     submitted.add_argument("assignment_id")
+    submitted.add_argument("--turn-id")
     submitted.add_argument(
         "--sent-prompt-file",
         required=True,
@@ -123,16 +157,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     submitted.add_argument(
         "--native-user-message-id",
-        help="Stable native ID of the exact user message read back from the worker",
+        help=(
+            "Stable native ID of the exact user message read back from the worker; "
+            "without it a send is recorded collect-only and cannot be verified"
+        ),
     )
 
     pending = subparsers.add_parser("pending", help="Record that the worker is still running")
     pending.add_argument("assignment_id")
+    pending.add_argument("--turn-id")
 
     indeterminate = subparsers.add_parser(
         "indeterminate", help="Record that submission may have occurred; never resend"
     )
     indeterminate.add_argument("assignment_id")
+    indeterminate.add_argument("--turn-id")
     add_reason_source(indeterminate)
 
     unusual_activity = subparsers.add_parser(
@@ -140,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record native unusual-activity HTTP 403 and start a 30-minute cooldown",
     )
     unusual_activity.add_argument("assignment_id")
+    unusual_activity.add_argument("--turn-id")
     unusual_activity.add_argument(
         "--request-id", help="OpenAI request ID from the native HTTP 403 response"
     )
@@ -149,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
         "ambiguous", help="Record an unvalidated response; never resend"
     )
     ambiguous.add_argument("assignment_id")
+    ambiguous.add_argument("--turn-id")
     add_reason_source(ambiguous)
 
     complete = subparsers.add_parser(
@@ -164,6 +205,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--response-file",
         help="Optional exact body cross-check; body-only completion is never allowed",
     )
+
+    collect = subparsers.add_parser(
+        "collect", help="Collect one trusted native turn result without logging its body"
+    )
+    collect.add_argument("assignment_id")
+    collect.add_argument("--turn-id", required=True)
+    collect.add_argument("--native-evidence-file", required=True)
+    collect.add_argument(
+        "--result-file",
+        help="Exclusive private result file; required to materialize inline or final chunk content",
+    )
+
+    artifact = subparsers.add_parser("artifact", help="Verify an explicitly authorized Git artifact")
+    artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
+    artifact_verify = artifact_sub.add_parser("verify", help="Verify exact remote commit/tree/blob")
+    artifact_verify.add_argument("assignment_id")
+    artifact_verify.add_argument("--result-file", required=True)
+    artifact_verify.add_argument("--discover", action="store_true")
+
+    result = subparsers.add_parser("result", help="Materialize or clean up a completed result")
+    result_sub = result.add_subparsers(dest="result_command", required=True)
+    materialize = result_sub.add_parser("materialize", help="Create an exclusive private result copy")
+    materialize.add_argument("assignment_id")
+    materialize.add_argument("--result-file", required=True)
+    cleanup = result_sub.add_parser("cleanup", help="Remove verified chunk spool after parent restoration")
+    cleanup.add_argument("assignment_id")
+    parent_restored = result_sub.add_parser(
+        "parent-restored", help="Record host-observed parent restoration without reopening content"
+    )
+    parent_restored.add_argument("assignment_id")
+    parent_restored.add_argument("--native-controls-confirmed", action="store_true")
 
     recover = subparsers.add_parser(
         "recover", help="Show the saved worker and parent IDs without resending"
@@ -202,6 +274,24 @@ def worker_payload(worker: Any) -> dict[str, Any]:
     }
 
 
+def evidence_from_path(path: str) -> NativeCollectionEvidence:
+    return NativeCollectionEvidence.from_json_bytes(
+        Path(path).read_bytes() if path != "-" else sys.stdin.buffer.read()
+    )
+
+
+def turn_payload(prepared: Any) -> dict[str, Any]:
+    return {
+        "turn_id": prepared.turn_id,
+        "sequence": prepared.sequence,
+        "status": "prepared",
+        "wrapped_prompt": prepared.wrapped_prompt,
+        "wrapped_prompt_sha256": hashlib.sha256(
+            prepared.wrapped_prompt.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     paths = default_paths()
 
@@ -232,11 +322,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "host-capability preflight"
             )
         prompt = read_text_source(args.prompt_file)
+        contract = (
+            ArtifactContract.from_json_bytes(Path(args.artifact_contract_file).read_bytes())
+            if args.artifact_contract_file
+            else None
+        )
         prepared = prepare_assignment(
             prompt,
             parent_task_id=args.parent_task_id,
+            result_mode=args.result_mode,
             continuation_of=args.continuation_of,
             assignment_id=args.assignment_id,
+            artifact_contract=contract,
+            authorize_artifact_write=args.authorize_artifact_write,
+            worker_github_write_confirmed=args.worker_github_write_confirmed,
+            allow_public_artifact=args.allow_public_artifact,
             paths=paths,
         )
         return {
@@ -246,7 +346,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "worker_conversation_id": prepared.worker_conversation_id,
             "parent_task_id": prepared.parent_task_id,
             "continuation_of": prepared.continuation_of,
+            "result_mode": prepared.result_mode,
             "receipt_path": str(prepared.receipt_path),
+            "turn": turn_payload(prepared),
+            # Retained for one release for scripts that consumed the old prepare
+            # response. The receipt itself never stores this body.
             "wrapped_prompt": prepared.wrapped_prompt,
         }
 
@@ -256,21 +360,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.assignment_id,
             sent_prompt,
             paths,
+            turn_id=args.turn_id,
             native_user_message_id=args.native_user_message_id,
         )
         return {"ok": True, "assignment": value}
 
     if args.command == "arm":
-        value = arm_assignment(args.assignment_id, paths)
+        value = arm_assignment(args.assignment_id, paths, turn_id=args.turn_id)
         return {"ok": True, "assignment": value, "no_resend": True}
 
     if args.command == "pending":
-        value = mark_pending(args.assignment_id, paths)
+        value = mark_pending(args.assignment_id, paths, turn_id=args.turn_id)
         return {"ok": True, "assignment": value}
 
     if args.command == "indeterminate":
         value = mark_indeterminate(
-            args.assignment_id, reason=reason_from_args(args), paths=paths
+            args.assignment_id,
+            reason=reason_from_args(args),
+            paths=paths,
+            turn_id=args.turn_id,
         )
         return {"ok": True, "assignment": value, "collect_only": True}
 
@@ -280,6 +388,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             reason=reason_from_args(args),
             request_id=args.request_id,
             paths=paths,
+            turn_id=args.turn_id,
         )
         return {
             "ok": True,
@@ -291,16 +400,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     if args.command == "ambiguous":
         value = mark_ambiguous(
-            args.assignment_id, reason=reason_from_args(args), paths=paths
+            args.assignment_id,
+            reason=reason_from_args(args),
+            paths=paths,
+            turn_id=args.turn_id,
         )
         return {"ok": True, "assignment": value, "collect_only": True}
 
     if args.command == "complete":
-        evidence = NativeCollectionEvidence.from_json_bytes(
-            Path(args.native_evidence_file).read_bytes()
-            if args.native_evidence_file != "-"
-            else sys.stdin.buffer.read()
-        )
+        evidence = evidence_from_path(args.native_evidence_file)
         response = read_text_source(args.response_file) if args.response_file else None
         value, _payload = complete_assignment(
             args.assignment_id, response, paths, evidence=evidence
@@ -309,8 +417,85 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "ok": True,
             "assignment": value,
             "completion_basis": "native-inline",
-            "byte_length": value.get("response_byte_length"),
-            "sha256": value.get("response_sha256"),
+            "byte_length": value.get("result", {}).get("byte_length"),
+            "sha256": value.get("result", {}).get("payload_sha256"),
+        }
+
+    if args.command == "collect":
+        outcome = collect_turn(
+            args.assignment_id,
+            args.turn_id,
+            evidence_from_path(args.native_evidence_file),
+            Path(args.result_file) if args.result_file else None,
+            paths=paths,
+        )
+        payload: dict[str, Any] = {
+            "ok": True,
+            "status": outcome.status,
+            "assignment_id": outcome.assignment_id,
+            "turn_id": outcome.turn_id,
+            "completion_basis": outcome.completion_basis,
+            "byte_length": outcome.byte_length,
+            "sha256": outcome.sha256,
+        }
+        if outcome.result_path is not None:
+            payload["result_file"] = str(outcome.result_path)
+        if outcome.accepted_chunk is not None:
+            payload["accepted_chunk"] = dict(outcome.accepted_chunk)
+        if outcome.next_turn is not None:
+            payload["action"] = "send_next_turn"
+            payload["next_turn"] = turn_payload(outcome.next_turn)
+        return payload
+
+    if args.command == "artifact":
+        verification = verify_artifact(
+            args.assignment_id,
+            Path(args.result_file),
+            discover=args.discover,
+            paths=paths,
+        )
+        return {
+            "ok": True,
+            "status": "complete",
+            "assignment_id": args.assignment_id,
+            "completion_basis": "artifact-discovery" if args.discover else "artifact-manifest",
+            "result_file": args.result_file,
+            **verification.receipt_fields(),
+        }
+
+    if args.command == "result":
+        if args.result_command == "materialize":
+            descriptor = materialize_result(
+                args.assignment_id, Path(args.result_file), paths=paths
+            )
+            return {
+                "ok": True,
+                "assignment_id": descriptor.assignment_id,
+                "mode": descriptor.mode,
+                "result_file": str(descriptor.path),
+                "byte_length": descriptor.byte_length,
+                "sha256": descriptor.sha256,
+                "completion_basis": descriptor.completion_basis,
+            }
+        if args.result_command == "cleanup":
+            cleaned = cleanup_result(args.assignment_id, paths=paths)
+            return {
+                "ok": True,
+                "assignment_id": cleaned.assignment_id,
+                "removed_spool_files": cleaned.removed_spool_files,
+                "result_retained": cleaned.result_retained,
+            }
+        if not args.native_controls_confirmed:
+            raise DispatchError(
+                "Parent restoration must be confirmed by the current native host-capability preflight"
+            )
+        receipt = record_parent_restoration(
+            args.assignment_id, restored=True, paths=paths
+        )
+        return {
+            "ok": True,
+            "assignment_id": args.assignment_id,
+            "delivery": receipt.get("delivery"),
         }
 
     if args.command == "recover":

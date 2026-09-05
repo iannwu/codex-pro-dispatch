@@ -1,90 +1,119 @@
 ---
 name: codex-pro-dispatch
-description: Dispatch a bounded implementation, review, or research assignment from a Codex task to a dedicated ChatGPT Pro conversation in the official combined desktop app, recover the result without resending, and return to the parent Codex task. Use when the user asks Codex to delegate work to ChatGPT Pro; do not use for ordinary local coding.
+description: Dispatch one bounded assignment from a Codex task to a dedicated ChatGPT Pro conversation in the official combined desktop app, collect an evidence-gated result without resending, and restore the exact parent task. Use only when the user explicitly asks to delegate work to ChatGPT Pro.
 metadata:
   short-description: Dispatch work to official-app ChatGPT Pro
-  version: "1.1.1"
+  version: "1.2.0"
 ---
 
 # Codex Pro Dispatch
 
-Use the official combined ChatGPT/Codex desktop app as the transport:
+Use the official combined ChatGPT/Codex desktop app as a deliberately narrow
+transport:
 
 ```text
 Codex parent task
   -> dedicated ChatGPT Pro worker conversation
-  -> worker response or GitHub commit
+  -> inline result, read-only chunk sequence, or explicitly authorized Git artifact
   -> exact Codex parent task
 ```
 
-This skill relies on the host's native Chat and Codex conversation controls. It does not install another browser, app, daemon, model provider, MCP connector, or Accessibility bridge.
+This skill relies on native Chat and Codex conversation controls supplied by the
+host. It does not install a browser, app, daemon, model provider, MCP connector,
+or Accessibility bridge.
 
 ## Contract
 
-Goal: safely delegate one bounded assignment from the exact Codex parent task to a user-confirmed ChatGPT Pro worker, collect the existing result without duplicate submission, independently verify claimed repository work, and restore the exact parent task. Excellent behavior fails closed when native state is ambiguous.
+Safely delegate one bounded assignment from the exact Codex parent task to a
+user-confirmed ChatGPT Pro worker. Collect only an existing result, independently
+verify any repository artifact, and Restore the exact parent Codex task. Fail
+closed whenever native state, association, finality, truncation, or Git identity
+is uncertain.
 
-Evaluate the workflow on these skill-specific dimensions:
+- `AT_MOST_ONCE_SAFETY`: At most one native send attempt is permitted for every
+  durable turn. A recovery child is a distinct new turn, never a resend.
+- `THREAD_IDENTITY`: worker, parent task, submitted user message, and selected
+  assistant message use stable IDs, never titles or visual position.
+- `COLLECTION_INTEGRITY`: completion requires one trusted native evidence object
+  for the exact worker/message association, final generation, and both message and
+  outer-result integrity signals.
+- `RECOVERY_INTEGRITY`: an ambiguous send is collect-only. A proven rejected
+  response may create exactly one recovery successor under the receipt lock.
+- `VERIFICATION_BOUNDARY`: worker claims and chat manifests are untrusted until
+  exact parent-side verification completes.
 
-- `AT_MOST_ONCE_SAFETY`: At most one native send attempt is allowed; no timeout, restart, read-back mismatch, or transport error can cause an automatic resend.
-- `THREAD_IDENTITY`: the worker and parent task are resolved by stable identity, never titles or visual position.
-- `RECOVERY_INTEGRITY`: every ambiguous state preserves collect-only recovery and rejects stale or mismatched results.
-- `VERIFICATION_BOUNDARY`: worker claims remain untrusted until the parent independently verifies them.
-- `OPERATOR_CLARITY`: another Codex instance can follow the workflow without guessing about permissions or native state.
-
-Hard fail if any path permits an automatic resend after arming, accepts a result from the wrong worker, restores the wrong parent task, or treats a worker claim of repository mutation as verified evidence.
+Hard fail if a path resends an armed turn, accepts a result from the wrong worker,
+infers item finality from an enclosing turn, trusts a caller boolean, silently
+changes a read-only assignment into a Git write, or restores the wrong parent.
 
 ## Hard boundaries
 
 - Use only the official combined ChatGPT/Codex desktop app.
-- Do not use ChatGPT Web, Codex Web GPT, ChatGPT Classic, CDP, AppleScript, Accessibility automation, or the clipboard.
-- Never resend automatically after a timeout, app restart, retrieval error, or `thread not loaded` result.
-- Use one configured worker conversation and one unresolved assignment at a time.
-- The user must visibly select Pro in the worker once. Native controls may not expose the selected model, so do not claim machine verification.
-- Chat Pro may use its own GitHub connector when the assignment authorizes repository work. This plugin does not install or authenticate that connector. Before a write assignment, confirm that the worker exposes the required write action for the exact repository and that the starting commit is remotely visible. Read-only access, local-only branches, uncommitted changes, and the parent worktree are insufficient.
-- The parent Codex task must have an independent read path and verify every reported branch, commit, file change, and CI result.
-- Restore the exact parent Codex task after collection, including after failures.
+- Do not use ChatGPT Web, Codex Web GPT, ChatGPT Classic, CDP, AppleScript,
+  Accessibility automation, browser scraping, or the clipboard.
+- Do not use the clipboard for submission, collection, or recovery.
+- Never resend automatically after a timeout, restart, retrieval error, or
+  `thread not loaded` result.
+- Use one configured worker and one unresolved logical dispatch at a time.
+- The user visibly selects Pro. The host may not expose a trustworthy selected-model
+  field, so store that only as user-confirmed.
+- This plugin does not install or authenticate that connector. A repository-write
+  assignment needs a separately authorized, write-capable GitHub connector in the
+  worker, a remotely visible prepared base, and an independent parent read path.
+  Read-only access, local-only branches, uncommitted files, and the parent worktree
+  are insufficient.
+- Do not print prompt, response, artifact, or diagnostic bodies in helper JSON or
+  terminal logs. Receipts retain only identities, hashes, sizes, and state.
 
 ## Required host preflight
 
-Run this preflight at the start of every invocation, before configuring a worker or preparing an assignment. This repository supplies the safety protocol and local receipt helper; the host supplies the native transport.
-
-Confirm that the current Codex task exposes all of these semantic capabilities:
+Before configuring a worker or preparing any assignment, confirm that this exact
+Codex task can do all of the following semantically:
 
 1. Read the stable ID of the current parent Codex task.
-2. List or resolve Chat conversations by stable ID.
-3. Send one user message to an exact Chat conversation ID.
-4. Read back the exact submitted user-message bytes from that conversation.
-5. Read one stable assistant-message ID, exact text, final-generation provenance,
-   explicit message and selected-result outer truncation metadata, and the exact
-   submitted-user-message ID from one native collection operation.
-6. Open an exact Chat or Codex task by stable ID so the parent can be restored.
+2. Resolve one Chat conversation by stable ID.
+3. Send one user message to that exact Chat conversation ID.
+4. Read the exact bytes and stable native ID of the already submitted user message.
+5. From **one native collection operation**, read the requested and loaded worker
+   IDs, selected assistant-message ID, associated submitted-user-message ID, role,
+   message-level generation-finality provenance, exact text, raw message truncation,
+   and selected-result outer-integrity provenance plus raw outer truncation.
+6. Open the exact worker and the exact parent task by stable ID.
 
-Exact tool names may vary, but every capability must be available in the current task. Do not infer availability from macOS, app presence, an installed plugin, or a prior successful run. If any capability is missing, stop before writing worker configuration or assignment state and report the missing capability. Never substitute UI automation.
+The host must provide item-level finality with trusted provenance. Do not invent it
+from an enclosing turn. Missing truncation is unknown, not `false`, unless the
+helper's allowlisted, version-scoped `adapter_contract_id` explicitly authorizes
+that normalization. The shipped adapter requires both fields; examples, a host
+title, or a caller flag are never enough. If any capability is absent, stop before
+writing worker or assignment state. Artifact discovery is the sole exception: an
+already-prepared artifact assignment may use its pre-authorized remote branch/path
+without readable chat evidence, but only after exact Git verification.
 
-Resolve the bundled helper relative to this `SKILL.md`: use the absolute path to `scripts/pro-dispatch` inside the installed skill. A source-checkout install may also expose `pro-dispatch` on `PATH`. In every command below, use the absolute bundled path when `pro-dispatch` is not on `PATH`.
-
-After the worker exists, run:
+Run the helper health assertion only after this preflight:
 
 ```bash
 pro-dispatch doctor --native-controls-confirmed
 ```
 
-Proceed only when it exits zero and returns both `local_ok: true` and `native_controls_confirmed: true`. The flag is an assertion that this invocation completed the semantic capability check; it is not automatic tool discovery.
+Proceed only when it exits zero with `local_ok: true` and
+`native_controls_confirmed: true`. The flag records this invocation's semantic
+preflight; it is not automatic host discovery. Resolve the bundled helper relative
+to this file (`scripts/pro-dispatch`) if `pro-dispatch` is not on `PATH`.
 
 ## Private transient files
 
-Some host controls require prompt, read-back, response, or error text to pass through files. Before writing any such content, create one private temporary directory with mode `0700`, set a restrictive `umask` so files are mode `0600`, and retain its exact path. Keep every transient file inside it. Delete that directory in a `finally`-style cleanup after the parent task is restored, including on failure. Never place transient content in the repository, a shared directory, or a predictable filename.
+Create one private temporary directory (`0700`) before writing a prompt, native
+read-back, evidence, response, artifact manifest, or reason file. Use restrictive
+`umask` and `0600` files. Keep every transient body in that private temporary
+directory; do not use the repository, a shared directory, predictable names, or
+the clipboard. Delete it in final cleanup after parent restoration, including on
+failure. The receipt store itself never retains prompt or result bodies.
 
-The helper's receipt store never retains prompt or response bodies. Temporary files and host/terminal logs are outside that receipt-store guarantee, so minimize their lifetime and avoid printing their contents.
+## Set up the dedicated worker
 
-## Before the first dispatch
-
-If no worker is configured, read [references/native-protocol.md](references/native-protocol.md), then:
-
-1. Ask the user to create or select one dedicated Chat conversation.
-2. Ask the user to visibly select Pro in that conversation.
-3. Resolve that conversation's stable ID with native conversation controls.
-4. Save it:
+Read [references/native-protocol.md](references/native-protocol.md), ask the user
+to create/select one dedicated conversation and visibly select Pro, resolve its
+stable ID, then save it:
 
 ```bash
 pro-dispatch worker set \
@@ -94,141 +123,236 @@ pro-dispatch worker set \
   --native-controls-confirmed
 ```
 
-Do not infer Pro selection from the conversation title.
+Do not infer the model selection from a title.
 
-## Normal dispatch
+## Choose a result mode explicitly
 
-1. Record the exact current Codex parent task ID. For a repository-write assignment, first confirm the GitHub prerequisites in [references/github-verification.md](references/github-verification.md). If they fail, stop or change the assignment to prompt-only review with the user's agreement.
-2. Put the bounded assignment in the private temporary directory as a UTF-8 file.
-3. Prepare it:
+There is no `auto` mode in v1.2.0.
+
+- `inline` is the default for a short response. It can complete only with trusted,
+  untruncated native evidence.
+- `chunked` is a fully read-only, lossless multi-turn result transport. Each chunk
+  child has its own marker, durable arm, native send/read-back, and collection
+  evidence.
+- `artifact` is an explicit per-assignment Git write. It requires the strict
+  contract described in [references/long-results.md](references/long-results.md),
+  explicit worker-write confirmation, and an explicit public-retention
+  acknowledgement if the repository is public.
+
+Do not choose artifact automatically after an inline or chunked failure. An exact
+inline control response can require chunking; a proven truncation can create a
+read-only retransmission child. Neither event authorizes a Git write.
+
+## Prepare, arm, send once, and prove the outbound message
+
+Put the bounded prompt in the private directory. Prepare an inline or chunked
+dispatch explicitly:
 
 ```bash
 pro-dispatch prepare \
   --parent-task-id '<parent-task-id>' \
+  --result-mode inline \
   --native-controls-confirmed \
   --prompt-file '<prompt-file>'
 ```
 
-4. Read the JSON result and resolve `worker_conversation_id`. Immediately before the native send, durably arm the assignment:
+For artifact mode, first verify all prerequisites in
+[references/github-verification.md](references/github-verification.md), then pass
+the exact contract and all assignment-specific confirmations:
 
 ```bash
-pro-dispatch arm '<assignment-id>'
+pro-dispatch prepare \
+  --parent-task-id '<parent-task-id>' \
+  --result-mode artifact \
+  --artifact-contract-file '<contract.json>' \
+  --authorize-artifact-write \
+  --worker-github-write-confirmed \
+  --allow-public-artifact \
+  --native-controls-confirmed \
+  --prompt-file '<prompt-file>'
 ```
 
-Do not call the native send unless arming succeeds. Once arming succeeds, `no_resend` is permanent for that assignment, including across an app crash.
-5. Make at most one native send attempt for `wrapped_prompt` to `worker_conversation_id`. Arming does not guarantee delivery: an interruption can leave the assignment with zero sends and permanently collect-only.
-6. After native submission is confirmed, read back the exact submitted user message from that worker conversation using native controls and save those bytes to the private temporary directory as UTF-8. Do not reconstruct it from the prepared JSON.
-7. Verify the read-back before recording submission:
+Omit `--allow-public-artifact` for a private contract. It is mandatory for a
+public one and never permits secret, personal, or regulated content.
+
+Read `assignment_id`, `worker_conversation_id`, and the returned `turn` object.
+Immediately before the one native send for that turn, arm it:
+
+```bash
+pro-dispatch arm '<assignment-id>' --turn-id '<turn-id>'
+```
+
+Do not call the native send unless arming succeeds. Arming permanently records
+no-resend authority before transport. Make at most one native send attempt for
+the returned `wrapped_prompt` to the exact worker. A crash after arm can leave
+zero known sends and is still collect-only.
+
+Read back the exact existing user message and its native ID; do not reconstruct it
+from JSON. Verify it without sending again:
 
 ```bash
 pro-dispatch submitted '<assignment-id>' \
+  --turn-id '<turn-id>' \
+  --native-user-message-id '<native-user-message-id>' \
   --sent-prompt-file '<native-read-back-file>'
 ```
 
-The helper compares the read-back bytes with the prepared `wrapped_prompt` hash. If they differ by any byte, including whitespace or a newline, it records one observed send as `indeterminate`, sets `no_resend`, and returns an error. Never repair the text by resending it.
+A byte mismatch records an indeterminate observed send and permits no resend. The
+only bounded correction is a receipt-explicit, exactly-one-trailing-LF extraction
+artifact; reread the same existing native user message and verify it once. Do not
+strip, normalize, or retry any other mismatch.
 
-If the error reports `readback_correction_allowed: true`, the temporary read-back file was proven to equal the expected prompt plus exactly one trailing newline. Re-extract the same existing native user message without adding that file artifact, then run `pro-dispatch submitted` once more against the corrected file. This is read-back verification, not a second submission; `submission_count` remains one. Do not strip, normalize, or retry any other mismatch.
-
-If the send may have occurred but confirmation failed, do not retry. Run:
+If send certainty is lost, record the native reason from a private file:
 
 ```bash
-pro-dispatch indeterminate '<assignment-id>' --reason-file '<reason-file>'
+pro-dispatch indeterminate '<assignment-id>' --turn-id '<turn-id>' --reason-file '<reason-file>'
 ```
 
-Write the exact error to the temporary UTF-8 reason file without interpolating it into a shell command. Use `--reason-file` for native errors and other untrusted text.
-
-If the native send reports `systemError`, inspect the error payload exposed by the native control. If that payload is unavailable, inspect the official app's local log only around that single send, read-only, for the HTTP status, response detail, and request ID; do not dump broad logs. If diagnostics identify an HTTP 403 whose response reports unusual activity, preserve the exact response in the reason file and record it with the dedicated command:
+Write untrusted diagnostic text to the reason file without interpolating it into a shell command.
+For native unusual activity, retain the category and optional request ID without
+retaining the body:
 
 ```bash
 pro-dispatch unusual-activity '<assignment-id>' \
+  --turn-id '<turn-id>' \
   --request-id '<OpenAI-request-id>' \
   --reason-file '<reason-file>'
 ```
 
-Report the blocker as an unusual-activity HTTP 403 and include the request ID when available. Do not reduce this to a generic `systemError`. The command keeps the assignment collect-only and starts a fixed 30-minute cooldown. During that cooldown, continue only read-only recovery of the existing assignment; never resend it. Even if the user authorizes abandoning the failed assignment and creating a fresh one, `pro-dispatch prepare` must remain blocked until the cooldown expires. Do not bypass or shorten the cooldown by changing workers.
+Report an unusual-activity HTTP 403 as such, including the OpenAI request ID when
+available. Do not reduce this to a generic `systemError`. It starts a fixed
+30-minute cooldown. During it, only read-only recovery is allowed; even a
+user-authorized abandon cannot enable a fresh prepare until the cooldown expires.
 
-If the app stops after `arm`—whether before, during, or after the native send—recover collect-only. Never send that assignment again. Only the user may authorize abandoning it and preparing a fresh assignment after bounded inspection of the exact worker.
+## Collect trusted results
 
-8. Wait using the worker conversation's native metadata or timestamp. Do not repeatedly reopen the worker while it is generating.
-9. When the worker has updated, open the worker by its exact conversation ID and wait until that exact thread is loaded.
-10. Read only the newest completed assistant response associated with the assignment. Save one strict native collection-evidence JSON object in the private temporary directory. It must contain the helper-allowlisted `adapter_contract_id`, both exact worker IDs, the stable assistant-message ID, exact submitted-user-message ID, `generation_status: "completed"`, trusted finality provenance, exact text, and message plus selected-result outer truncation fields. Never invent a `false` truncation value: an omitted field is unknown unless the installed helper's version-scoped adapter contract explicitly says otherwise.
-11. Validate and complete from that evidence, never from response text alone:
+Open the exact worker only after the native operation can return the complete
+evidence envelope. Save the strict UTF-8 JSON object in the private directory.
+It must include the helper-allowlisted `adapter_contract_id`, both worker IDs,
+assistant and submitted-user-message IDs, `role: "assistant"`,
+`generation_status: "completed"`, trusted finality provenance, raw message
+`truncated`, raw `selected_result_outer_integrity.truncated`, its provenance,
+exact text, and `observed_at`.
+
+Use `collect`, not a body-only response path:
 
 ```bash
-pro-dispatch complete '<assignment-id>' --native-evidence-file '<native-evidence.json>'
+pro-dispatch collect '<assignment-id>' \
+  --turn-id '<turn-id>' \
+  --native-evidence-file '<native-evidence.json>' \
+  --result-file '<private-result-file>'
 ```
 
-12. Use the private result file only after successful evidence-gated completion; do not print a response body into terminal JSON.
-13. Restore the exact saved parent Codex task.
-14. If the worker reported GitHub mutations, follow [references/github-verification.md](references/github-verification.md).
-15. Delete the private temporary directory in the cleanup path.
+The helper records raw truncation as `true`, `false`, or `omitted` and normalized
+values as `true`, `false`, or `null`; it also records finality and outer-integrity
+provenance. A new `observed_at` alone is an idempotent reread because immutable
+content identity excludes observation time. Once accepted, a changed source
+identity or changed content is an immutable conflict. A truncated prefix may be
+upgraded by a complete reread only if the specific allowlisted adapter contract
+supports that capability. Never supply a standalone `--truncated` or caller
+boolean.
 
-## Recovery without resending
+For inline, success materializes only the verified result file. The legacy
+`complete` command remains a deprecated evidence-gated inline alias; it never
+allows response-only completion.
 
-On timeout, `thread not loaded`, app restart, stale UI, or response ambiguity:
+### Exact chunk control and chunked collection
 
-1. Run:
+The only control response that changes an inline dispatch to chunked is exactly:
+
+```text
+[CODEX_PRO_DISPATCH_RESULT assignment_id=<turn-id>]
+[CODEX_PRO_DISPATCH_CHUNKED_REQUIRED_V1]
+```
+
+The marker, one LF, and control line must be the whole normalized response. The
+helper atomically marks the submitted predecessor `response_rejected` and creates
+exactly one prepared successor under the receipt lock only after verified outbound
+submission and proven generation completion. It never sends that child itself.
+Uncertain sends cannot transition.
+
+Every chunk response is exactly four LF-separated lines: its result marker, a
+strict chunk header, one canonical JSON object containing only `{"payload":"..."}`,
+and a matching footer. Marker-looking Markdown belongs in the JSON string as data.
+The complete serialized assistant message, including JSON escapes, must meet the
+byte limit. The helper hashes decoded canonical-LF UTF-8 payload bytes and
+concatenates payloads with no inserted separator. It requires integrity evidence
+for every chunk, private crash-safe spool records, contiguous index and chain, and
+an exact final count. Read [references/long-results.md](references/long-results.md)
+before sending a chunk child.
+
+When `collect` returns `next_turn`, arm, send, read back, and collect that exact
+new turn as above. Each child is separately armed and sent at most once. A
+truncated chunk is rejected and may prepare one retransmission successor from the
+last accepted boundary; it never accepts the visible prefix.
+
+### Artifact collection and verification
+
+Artifact mode remains artifact mode. A readable chat manifest is not completion:
+collect its evidence first, then verify exact remote objects into a private result
+file:
+
+```bash
+pro-dispatch artifact verify '<assignment-id>' --result-file '<private-result-file>'
+```
+
+`--discover` is allowed only for a pre-authorized artifact assignment when chat
+evidence is unavailable. It checks the exact contract's remote repository, one
+parent at the prepared base, one added `100644` UTF-8 Markdown blob at the exact
+path, exact commit message/path/hash/size, protected refs, branch movement, and
+moving-base rules from a private bare repository. It performs no remote write,
+does not accept a checkout or worker claim, and never creates a PR, merge, tag,
+release, deployment, or cleanup write.
+
+## Recovery, delivery, and parent restoration
+
+On timeout, restart, stale UI, or `thread not loaded`, run:
 
 ```bash
 pro-dispatch recover '<assignment-id>'
 ```
 
-2. Open the saved worker conversation ID directly.
-3. Wait for that exact thread to load.
-4. Inspect the recovery fields, including `outbound_prompt_verified`, `wrapped_prompt_sha256`, `sent_prompt_sha256`, and `readback_correction_allowed`. If `outbound_prompt_verified` is not true, locate the existing submitted user message by its exact assignment marker. Save that native read-back to a temporary UTF-8 file and run:
+Open only the saved worker ID. Inspect the returned active turn and its exact
+read-back hashes. If needed, use `submitted` only to verify an already-existing
+native message; never call the native send control during recovery. Recollect the
+same selected assistant message with a new evidence object. `response_rejected`
+is terminal for that turn's send authority; it is not logical-dispatch completion.
+
+Immutable result completion is separate from delivery and parent restoration.
+After materializing or consuming a verified result, restore the saved parent task
+with native controls, then record that observation:
 
 ```bash
-pro-dispatch submitted '<assignment-id>' \
-  --sent-prompt-file '<native-read-back-file>'
+pro-dispatch result parent-restored '<assignment-id>' --native-controls-confirmed
 ```
 
-This recovery command verifies the already-existing message; it does not send anything. It is allowed from `indeterminate` or `ambiguous` while `submission_count` is zero. It is also allowed with `submission_count` one only when the receipt explicitly has `readback_correction_allowed: true`, or an older receipt's stored mismatch hash proves the same single-trailing-newline artifact, and the corrected read-back exactly matches the prepared hash. Never call the native send control during this recovery step.
-
-5. Re-read the exact selected assistant message into a strict native evidence JSON object. A changed observation timestamp alone is an idempotent reread; changed source identity or content after acceptance is a conflict.
-6. Validate it with `pro-dispatch complete --native-evidence-file`.
-7. Restore the saved parent task ID.
-
-Never send the original assignment again. If the response cannot be matched to the exact result marker, record the issue and stop:
+Navigation retry cannot reopen content or permit a send. For a chunked completed
+result, cleanup is allowed only after parent restoration:
 
 ```bash
-pro-dispatch ambiguous '<assignment-id>' --reason-file '<reason-file>'
+pro-dispatch result cleanup '<assignment-id>'
 ```
 
-## Same-worker continuation
+It removes only verified private spool files. Artifact retention/branch cleanup
+is outside this transport and always requires separately explicit authority.
 
-For a repair or review follow-up, keep the same Chat conversation but create a new assignment ID:
+## Legacy receipts and safety maintenance
 
-```bash
-pro-dispatch prepare \
-  --parent-task-id '<parent-task-id>' \
-  --continuation-of '<completed-assignment-id>' \
-  --native-controls-confirmed \
-  --prompt-file '<follow-up-file>'
-```
+Schema-v1 unresolved receipts migrate under the receipt lock before a mutable
+operation; response-only fields remain audit metadata and cannot complete v2.
+Completed v1 receipts are immutable historical `marker-only` / `unverifiable`
+projections. Their cooldown remains effective. `doctor` redacts legacy raw
+diagnostic bodies but does not turn historical completion into evidence.
 
-The follow-up still receives its own at-most-one native send attempt and must be validated through its own result marker.
-Run `pro-dispatch arm '<new-assignment-id>'` immediately before its native send.
+If native conversation controls or the version-scoped adapter acceptance contract
+are unavailable, stop with the exact blocker. There is no web, UI-automation, or
+caller-boolean fallback.
 
-## Foreground behavior
+## Local state and development
 
-Submission and waiting may occur in the background. Current result collection can briefly foreground ChatGPT and move the pointer.
-
-- If another application is frontmost, defer collection when native focus state is available.
-- Collect when the user returns to ChatGPT/Codex, unless the user explicitly permits interruption.
-- Do not use the clipboard.
-- Always return to the exact parent task.
-
-## Local state
-
-`pro-dispatch` stores only private configuration and receipts:
-
-- worker conversation ID and user-confirmed Pro status
-- assignment ID
-- parent Codex task ID
-- state transitions and timestamps
-- prompt and response hashes
-
-It does not store ChatGPT cookies, account credentials, repository source, or full transcripts.
+Receipts contain worker/parent/turn identities, timestamps, state transitions,
+markers, hashes, byte lengths, and allowed artifact metadata. They never retain
+prompts, responses, result bodies, credentials, cookies, or raw diagnostics.
 
 Useful commands:
 
@@ -236,12 +360,16 @@ Useful commands:
 pro-dispatch worker show
 pro-dispatch status
 pro-dispatch recover '<assignment-id>'
-pro-dispatch unusual-activity '<assignment-id>' --request-id '<id>' --reason-file '<reason-file>'
+pro-dispatch unusual-activity '<assignment-id>' --reason-file '<reason-file>'
 pro-dispatch abandon '<assignment-id>' --reason-file '<reason-file>'
-pro-dispatch worker reset
 pro-dispatch doctor --native-controls-confirmed
 ```
 
-If native conversation controls are unavailable, stop with the exact blocker. Do not silently substitute another transport.
+`worker reset --force` and `purge --yes --force` are break-glass operations. They
+can erase unresolved recovery evidence; require explicit user authorization and
+explain that no-resend recovery guarantees are lost.
 
-`worker reset --force` and `purge --yes --force` are break-glass operations. They can erase recovery identity or receipts for unresolved work, destroying the workflow's no-resend evidence. Never use them during normal operation; require explicit user authorization and explain that recovery guarantees will be lost.
+The runtime has no third-party Python dependency. Run the unit suite, syntax
+checks, installer checks, and the skill validator described in the repository
+README before proposing a release. Native acceptance is a separate host gate in
+[docs/acceptance.md](../../docs/acceptance.md).

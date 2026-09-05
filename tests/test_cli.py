@@ -82,7 +82,10 @@ class CliTests(unittest.TestCase):
                 "provenance": "native-result-envelope",
             },
             "text": response,
-            "observed_at": "2026-09-02T00:00:00.000Z",
+            # A deterministic future observation keeps this test independent
+            # of the actual machine clock while preserving the v2 ordering
+            # requirement that evidence not predate the verified send.
+            "observed_at": "2030-09-02T00:00:00.000Z",
         }
         path = Path(self.temporary.name) / f"{assignment_id}-evidence.json"
         path.write_text(json.dumps(evidence), encoding="utf-8")
@@ -201,10 +204,12 @@ class CliTests(unittest.TestCase):
         status = self.run_cli("status", "dispatch-leading-drift-7319")
         self.assertEqual(status.returncode, 0, status.stderr)
         receipt = json.loads(status.stdout)["assignment"]
-        self.assertEqual(receipt["status"], "indeterminate")
-        self.assertEqual(receipt["submission_count"], 1)
-        self.assertTrue(receipt["no_resend"])
-        self.assertFalse(receipt["outbound_prompt_verified"])
+        self.assertEqual(receipt["status"], "recoverable")
+        turn = receipt["turns"][0]
+        self.assertEqual(turn["status"], "indeterminate")
+        self.assertEqual(turn["submission_count"], 1)
+        self.assertTrue(turn["no_resend"])
+        self.assertFalse(turn["outbound_prompt_verified"])
 
         second = self.run_cli(
             "submitted",
@@ -214,6 +219,27 @@ class CliTests(unittest.TestCase):
             input_text=str(prepared["wrapped_prompt"]),
         )
         self.assertEqual(second.returncode, 4)
+
+    def test_submitted_without_native_message_id_is_collect_only_not_verified(self) -> None:
+        assignment_id = "dispatch-missing-native-id-7319"
+        prepared = self.configure_and_prepare(assignment_id)
+        submitted = self.run_cli(
+            "submitted",
+            assignment_id,
+            "--sent-prompt-file",
+            "-",
+            input_text=str(prepared["wrapped_prompt"]),
+        )
+        self.assertEqual(submitted.returncode, 4)
+        error = json.loads(submitted.stderr)
+        self.assertEqual(error["error_code"], "native_user_message_id_required")
+        receipt = json.loads(self.run_cli("status", assignment_id).stdout)["assignment"]
+        turn = receipt["turns"][0]
+        self.assertEqual(receipt["status"], "recoverable")
+        self.assertEqual(turn["status"], "indeterminate")
+        self.assertTrue(turn["no_resend"])
+        self.assertFalse(turn["outbound_prompt_verified"])
+        self.assertNotIn("native_user_message_id", turn)
 
     def test_submitted_allows_correcting_newline_readback_artifact(self) -> None:
         prepared = self.configure_and_prepare("dispatch-newline-drift-7319")
@@ -229,24 +255,30 @@ class CliTests(unittest.TestCase):
         receipt = json.loads(
             self.run_cli("status", "dispatch-newline-drift-7319").stdout
         )["assignment"]
-        self.assertEqual(receipt["status"], "indeterminate")
-        self.assertTrue(receipt["no_resend"])
-        self.assertEqual(receipt["submission_count"], 1)
-        self.assertTrue(receipt["readback_correction_allowed"])
+        self.assertEqual(receipt["status"], "recoverable")
+        turn = receipt["turns"][0]
+        self.assertEqual(turn["status"], "indeterminate")
+        self.assertTrue(turn["no_resend"])
+        self.assertEqual(turn["submission_count"], 1)
+        self.assertTrue(turn["readback_correction_allowed"])
 
         corrected = self.run_cli(
             "submitted",
             "dispatch-newline-drift-7319",
             "--sent-prompt-file",
             "-",
+            "--native-user-message-id",
+            "native-user-dispatch-newline-drift-7319",
             input_text=str(prepared["wrapped_prompt"]),
         )
         self.assertEqual(corrected.returncode, 0, corrected.stderr)
         corrected_receipt = json.loads(corrected.stdout)["assignment"]
-        self.assertEqual(corrected_receipt["status"], "submitted")
-        self.assertEqual(corrected_receipt["submission_count"], 1)
-        self.assertTrue(corrected_receipt["outbound_prompt_verified"])
-        self.assertTrue(corrected_receipt["no_resend"])
+        self.assertEqual(corrected_receipt["status"], "active")
+        turn = corrected_receipt["turns"][0]
+        self.assertEqual(turn["status"], "submitted")
+        self.assertEqual(turn["submission_count"], 1)
+        self.assertTrue(turn["outbound_prompt_verified"])
+        self.assertTrue(turn["no_resend"])
 
     def test_late_readback_verification_completes_existing_response(self) -> None:
         assignment_id = "dispatch-late-readback-7319"
@@ -277,10 +309,12 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(submitted.returncode, 0, submitted.stderr)
         receipt = json.loads(submitted.stdout)["assignment"]
-        self.assertEqual(receipt["status"], "submitted")
-        self.assertEqual(receipt["submission_count"], 1)
-        self.assertTrue(receipt["outbound_prompt_verified"])
-        self.assertEqual(receipt["submission_recovered_from"], "ambiguous")
+        self.assertEqual(receipt["status"], "active")
+        turn = receipt["turns"][0]
+        self.assertEqual(turn["status"], "submitted")
+        self.assertEqual(turn["submission_count"], 1)
+        self.assertTrue(turn["outbound_prompt_verified"])
+        self.assertEqual(turn["submission_recovered_from"], "ambiguous")
 
         response = (
             f"[CODEX_PRO_DISPATCH_RESULT assignment_id={assignment_id}]\n"
@@ -310,7 +344,10 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(indeterminate.returncode, 0, indeterminate.stderr)
         indeterminate_receipt = json.loads(indeterminate.stdout)["assignment"]
-        self.assertEqual(indeterminate_receipt["last_error_kind"], "native-send-indeterminate")
+        self.assertEqual(
+            indeterminate_receipt["turns"][0]["last_error_kind"],
+            "native-send-indeterminate",
+        )
         self.assertNotIn("last_error", indeterminate_receipt)
 
         ambiguous = self.run_cli(
@@ -321,7 +358,10 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(ambiguous.returncode, 0, ambiguous.stderr)
         ambiguous_receipt = json.loads(ambiguous.stdout)["assignment"]
-        self.assertEqual(ambiguous_receipt["last_error_kind"], "response-ambiguous")
+        self.assertEqual(
+            ambiguous_receipt["turns"][0]["last_error_kind"],
+            "response-ambiguous",
+        )
         self.assertNotIn("last_error", ambiguous_receipt)
 
         abandoned = self.run_cli(
@@ -404,6 +444,8 @@ class CliTests(unittest.TestCase):
             assignment_id,
             "--sent-prompt-file",
             "-",
+            "--native-user-message-id",
+            f"native-user-{assignment_id}",
             input_text=str(prepared["wrapped_prompt"]),
         )
         self.assertEqual(submitted.returncode, 0, submitted.stderr)

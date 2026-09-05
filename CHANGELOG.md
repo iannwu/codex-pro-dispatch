@@ -2,6 +2,42 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## [1.2.0] - Unreleased
+
+### Added
+
+- Schema-v2 logical dispatch receipts with ordered turns, explicit `inline`,
+  `chunked`, and `artifact` modes, separate immutable result/delivery/restoration
+  state, and a terminal per-turn `response_rejected` state.
+- Lossless read-only chunk transport: strict JSON payload framing, full serialized
+  message limit, decoded canonical-LF byte hashing, chain validation, durable
+  private spool/journal, materialization, and restoration-gated cleanup.
+- Explicit artifact contracts and manifests plus private bare-Git verification of
+  exact commit/tree/blob identity, protected refs, moving-base behavior, and
+  public-retention acknowledgement.
+- Schema-v1 migration/projection behavior, strict collection adapter contracts,
+  v1.2 host acceptance matrix, security analysis, and adversarial migration,
+  collection, chunk, artifact, and state-machine tests.
+
+### Changed
+
+- Replace response-only unresolved completion with mandatory native evidence.
+  Evidence now retains raw/normalized message and outer truncation, exact worker/
+  message association, and item-level finality provenance.
+- Make observation identity independent of `observed_at`; an identical reread is
+  idempotent, while changed accepted content/source is immutable conflict.
+- Keep artifact selection explicit per assignment. `auto` is intentionally absent;
+  only exact chunk control or proven truncation can prepare a read-only child.
+
+### Security
+
+- Fail closed on omitted truncation unless a helper-allowlisted, version-scoped
+  adapter contract proves omission behavior; no caller boolean can override it.
+- Preserve original-assignment no-resend across recovery children, legacy state,
+  cooldowns, and parent-restoration retries.
+- Keep result/prompt bodies out of JSON receipts and validate stored artifact
+  manifests before any Git object operation.
+
 ## [1.1.1] - 2026-09-02
 
 ### Fixed
@@ -69,5 +105,6 @@ All notable changes to Codex Pro Dispatch are documented here.
 - The v1 safety patch was prompted by a native send failure whose visible `systemError` masked an unusual-activity HTTP 403. PR #2 made the failure explicit, kept the assignment collect-only, and added a cooldown that cannot be bypassed by abandoning the receipt or changing workers.
 
 [1.1.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.0.0...v1.1.0
+[1.2.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.1.0...v1.1.1
 [1.0.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v0.1.0...v1.0.0

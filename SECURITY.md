@@ -1,79 +1,126 @@
 # Security
 
-Codex Pro Dispatch is a source-visible Codex skill, plugin package, and small local state helper. It does not include a browser, desktop automation engine, persistent service, model proxy, MCP server, or account credential store.
+Codex Pro Dispatch is a source-visible Codex skill, plugin package, and local
+state helper. It does not include a browser, desktop automation engine, persistent
+service, model proxy, MCP server, or account credential store.
 
 ## Supported versions
 
 | Version | Security support |
 | --- | --- |
-| 1.1.x | Supported after stable release |
-| 1.0.x and earlier | Upgrade required; public-contract corrections are not backported |
+| 1.2.x | Current unreleased candidate; host compatibility is not asserted until native acceptance completes |
+| 1.1.x | Focused fail-closed collection patch; historical release support per published release policy |
+| 1.0.x and earlier | Upgrade required; collection-contract corrections are not backported |
 
 ## Trust boundary
 
-The user trusts:
+The user trusts the official combined ChatGPT/Codex desktop app, current Codex
+task/native controls, dedicated Pro worker, any separately enabled connector, and
+local OS account. Worker responses, chat manifests, native evidence input, stored
+receipts, repository contents, and remote ref observations are all validated at
+their respective boundaries. A worker claim is never verification.
 
-- the official combined ChatGPT/Codex desktop app
-- the current Codex task and its native conversation controls
-- the dedicated ChatGPT Pro worker conversation
-- any connector the user has enabled inside that Chat conversation
-- the local machine and OS account
+## Collection integrity
 
-Repository contents and worker responses remain untrusted input until independently verified.
+Completion requires a strict native evidence envelope for one exact selected
+assistant message and exact submitted native user message in the configured
+worker. It records requested/loaded worker identities, item role, item-level
+generation finality and trusted provenance, raw and normalized message truncation,
+raw and normalized selected-result outer truncation, observation timestamp, and
+body-free hashes/sizes.
 
-## Stored data
+The helper does not infer item finality from an enclosing turn, expose a standalone
+caller truncation boolean, or normalize missing truncation based on an example.
+Only a reviewed helper-owned version-scoped adapter contract can authorize an
+omission as false. The shipped adapter deliberately requires explicit flags.
+`observed_at` is excluded from immutable content identity; a same-content reread
+is idempotent, while changed accepted source/content is a conflict. A truncated
+prefix cannot complete.
 
-The helper stores only:
+## At-most-once turns and recovery
 
-- worker conversation ID and label
-- user-confirmed Pro status
-- assignment ID
-- parent Codex task ID
-- timestamps and state transitions
-- prompt and response hashes
-- exact marker strings
-- OpenAI request ID when available for unusual-activity HTTP 403 recovery
+Immediately before native transport, each turn moves durably to `armed` and gains
+no-resend authority. Every turn permits at most one native send attempt. A crash
+may leave zero known sends; timeout, app restart, response ambiguity, or a failed
+read-back remain collect-only.
 
-It does not store:
+After a verified send and proven completed generation, an exact chunk-control or
+rejected/truncated result can atomically close that turn as `response_rejected`
+and prepare one recovery successor. The successor is a distinct turn and must be
+armed/sent by the host. An uncertain send never transitions. Immutable result
+completion is separate from delivery and parent restoration, so navigation retry
+cannot reopen content or send authority. Unusual-activity HTTP 403 keeps all work
+collect-only and preserves the fixed cooldown.
 
-- ChatGPT cookies or sessions
-- GitHub tokens
-- API keys
-- browser profiles
-- private source code
-- assignment prompt text
-- complete response transcripts
+## Chunked result bodies and spool
 
-Config and state directories use mode `0700`. JSON and lock files use mode `0600`.
+Chunked mode validates a four-line protocol whose only body field is a strict
+canonical JSON `payload` string. It hashes decoded LF-normalized UTF-8 bytes and
+reassembles payloads with no inserted separator. Protocol-looking Markdown is
+data, not framing. Every accepted chunk has independent native evidence, a chain,
+and an exclusive private spool file.
 
-Diagnostic commands store a category and SHA-256 hash, not the raw reason body. The v1.1 `doctor` check durably redacts raw diagnostic fields left by earlier releases before reporting health.
+Chunk payload bodies are intentionally retained in a private `0700` state spool
+with `0600` files only until verified materialization and recorded parent
+restoration permit cleanup. They never enter JSON receipts or helper JSON output.
+The receipt journal/hash reconciliation makes a crash after private rename
+detectable; missing, altered, or orphaned spool files fail closed.
 
-Prompt, native read-back, response, and error bodies may pass through short-lived files during a dispatch. The skill requires one private mode-`0700` temporary directory, mode-`0600` files, minimal output, and cleanup after parent restoration on success or failure. Those transient files and host/terminal logs are outside the receipt-store guarantee.
+## Artifact mode and Git retention
 
-## At-most-once behavior
+Artifact mode is never automatic. It requires explicit assignment-scoped write
+authorization, a strict canonical GitHub contract, confirmed worker capability,
+and public-retention acknowledgement for public visibility. It rejects sensitive
+public categories and does not create implicit writes.
 
-Immediately before a native send attempt, an assignment moves durably from `prepared` to `armed`. The `armed` receipt sets `no_resend` before transport. The workflow then permits at most one native send attempt. A crash before transport may therefore leave an assignment with zero sends and no resend path. A timeout, app restart, retrieval failure, or ambiguous native result remains collection-only.
+Parent verification uses a private `0700` bare Git repository and exact remote
+objects. It requires exactly one commit parent at prepared base, one added regular
+`100644` UTF-8 Markdown path, exact commit/path/hash/size, protected-ref checks,
+branch stability, and moving-base rules. It rejects a checkout as evidence,
+rewrites, artifact merges, extra changes, unsafe object types/content, and branch
+movement. Artifact discovery is the only pre-authorized exception to readable chat
+evidence, and only for an already-prepared artifact contract. The helper never
+creates a PR, merge, tag, release, deployment, or branch cleanup write.
 
-Completion requires one recorded submission, an exact verified outbound-prompt hash, and a strict native collection-evidence envelope associated with that exact native user message. A valid-looking result marker, response file, or caller-supplied boolean alone cannot complete an unresolved assignment. The envelope records raw and normalized message/outer truncation, stable assistant-message identity, and generation-finality provenance. Missing truncation is unknown and fails closed unless a helper-owned, version-scoped adapter contract explicitly proves the host's omission semantics. Completed receipts are immutable; rereading identical source/content at a newer observation time is idempotent.
+Git content is durable. Do not use artifact mode for credentials, keys, tokens,
+medical records, personal data, regulated data, or anything that cannot safely
+remain in the contract's repository. Branch deletion/retention is outside this
+helper and needs separate explicit authority.
 
-## Break-glass deletion
+## Stored data and diagnostics
 
-`worker reset --force` and `purge --yes --force` can bypass unresolved-assignment guards. They may destroy the stable worker identity or receipts needed for collect-only recovery. Use them only with explicit user authorization to repair corrupt local state, after explaining that the no-resend evidence and recovery guarantee will be lost.
+Receipts store only worker/parent/assignment/turn identities, timestamps, state,
+markers, hashes, byte lengths, Git object identity, and optional OpenAI request ID
+for unusual activity. They do not store prompts, inline responses, chunk payloads,
+artifact contents, raw diagnostics, ChatGPT cookies/sessions, GitHub tokens, API
+keys, browser profiles, or repository source.
 
-## External mutations
+Config/state directories use `0700`; JSON and lock files use `0600`. Diagnostic
+commands retain only a category and SHA-256 hash. `doctor` durably removes raw
+diagnostic bodies left by older releases without rewriting immutable historical
+v1 completion. Prompt, read-back, evidence, response, artifact-manifest, and
+reason files must use a caller-owned private temporary directory and be removed
+after parent restoration. Host/terminal logs are outside the receipt guarantee.
 
-The Chat Pro worker may perform GitHub actions only when the assignment authorizes them. The parent Codex task must independently verify the remote branch, commit, changed files, protected refs, and CI results.
+## Break-glass operations
 
-The parent must not silently substitute its own write and attribute it to Pro.
+`worker reset --force` and `purge --yes --force` can destroy recovery identity or
+unresolved receipts. Use only with explicit user authorization after explaining
+that at-most-once recovery evidence will be lost. They are not ordinary cleanup.
 
-## Native control limitations
+## Native control limitation
 
-The host product, not this repository, supplies the exact native Chat/Codex control API. The skill checks the required semantic capabilities on every invocation. If any is missing or changed, it fails closed before dispatch. It must not substitute ChatGPT Web, Classic, CDP, Accessibility, AppleScript, or clipboard automation.
-
-Current collection can briefly foreground ChatGPT and move the pointer. No clipboard use is permitted.
+The host, not this repository, supplies the native Chat/Codex API. If any required
+capability or adapter acceptance contract is absent/changed, fail closed before
+dispatch. Never substitute ChatGPT Web, Classic, CDP, browser scraping,
+Accessibility, AppleScript, or clipboard automation. Current collection can
+briefly foreground ChatGPT; clipboard use is prohibited.
 
 ## Reporting a vulnerability
 
-Do not open a public issue containing account data, conversation IDs, private repository names, prompts, responses, or assignment receipts.
-
-Use GitHub's **Report a vulnerability** form in this repository's Security tab. Include the affected version, impact, minimal reproduction, and suggested mitigation when available. Redact secrets and private content. The maintainer aims to acknowledge reports within seven days and will coordinate disclosure after a fix or mitigation is available.
+Do not open a public issue containing account data, conversation IDs, private
+repository names, prompts, responses, artifact content, spool paths, or receipts.
+Use the repository's GitHub **Report a vulnerability** form. Include affected
+version, impact, minimal reproduction, and suggested mitigation when possible,
+while redacting secrets/private content. The maintainer aims to acknowledge reports
+within seven days and coordinate disclosure after a fix or mitigation is available.
