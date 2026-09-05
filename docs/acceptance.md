@@ -113,6 +113,9 @@ Expected:
 
 - stale response is rejected
 - a mismatched assignment marker is rejected
+- a native user-message read-back for another assignment is rejected as
+  `stale-readback` before mutating the current receipt; the matching message
+  can later verify without a resend
 - only the expected marker completes the assignment
 
 ## G. GitHub worker proof

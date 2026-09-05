@@ -1,6 +1,6 @@
 {
   "name": "codex-pro-dispatch",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A fail-closed macOS desktop Codex workflow for dispatching one bounded assignment to a dedicated ChatGPT Pro conversation.",
   "author": {
     "name": "Iann Wu",
