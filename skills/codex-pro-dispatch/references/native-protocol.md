@@ -26,7 +26,7 @@ A worker title is a label only. Conversation identity comes from the stable ID.
 3. Resolve the configured worker by ID.
 4. Immediately before sending, run `pro-dispatch arm '<assignment-id>'`. Do not send unless it succeeds.
 5. Make at most one native send attempt for `wrapped_prompt`. After `arm`, the assignment is permanently collect-only if the app crashes or the send outcome is uncertain. An interruption before transport can therefore result in zero sends; this is deliberate fail-closed behavior.
-6. After confirmation, use native controls to read back the exact submitted user message from the worker and save it as UTF-8 without reconstructing or editing it.
+6. After confirmation, select the native user message whose first line contains the exact current assignment marker, then save its bytes as UTF-8 without reconstructing or editing them. An older completed turn returned while the new turn is active is not the current read-back. Wait for the matching message or use collect-only recovery.
 7. Run `pro-dispatch submitted '<assignment-id>' --sent-prompt-file '<native-read-back-file>'` so the helper compares the read-back bytes with the prepared `wrapped_prompt` hash.
 8. If the hash differs, keep the helper's `indeterminate` collect-only state and never resend. If confirmation itself is indeterminate, record `indeterminate` and switch to collection-only recovery.
 
@@ -73,6 +73,7 @@ The clipboard must remain unchanged.
 | Crash or interruption after `arm` | Recover the exact worker collect-only; never send that assignment again |
 | Send confirmed and exact read-back available | `pro-dispatch submitted --sent-prompt-file '<native-read-back-file>'` |
 | Send acknowledged but read-back temporarily absent | `pro-dispatch indeterminate`; wait and late-verify the existing message without resend |
+| Read-back begins with another assignment's marker (`stale-readback`) | Receipt stays unchanged; wait for the current native message and verify it, never resend |
 | Read-back file equals expected prompt plus one trailing newline | Re-extract the same native message without the file artifact and verify again; never resend |
 | Read-back differs by any other byte | Keep the helper's `indeterminate` state; do not retry verification or resend |
 | Send may have happened | `pro-dispatch indeterminate`; never resend |

@@ -150,6 +150,23 @@ class CoreTests(unittest.TestCase):
                 prepared.assignment_id, prepared.wrapped_prompt, self.paths
             )
 
+    def test_stale_readback_preserves_receipt_then_current_message_verifies(self) -> None:
+        prepared = self.prepare()
+        self.arm(prepared)
+        before = cpd.load_assignment(prepared.assignment_id, self.paths)
+        stale = prepared.wrapped_prompt.replace(prepared.assignment_id, "dispatch-older")
+        for _ in range(2):
+            with self.assertRaises(cpd.StateError) as caught:
+                cpd.mark_submitted(prepared.assignment_id, stale, self.paths)
+            self.assertIn("another assignment", str(caught.exception))
+            self.assertEqual(cpd.load_assignment(prepared.assignment_id, self.paths), before)
+        with self.assertRaises(cpd.StateError):
+            self.arm(prepared)
+        verified = cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
+        self.assertTrue(verified["outbound_prompt_verified"])
+        self.assertTrue(verified["no_resend"])
+        self.assertEqual(verified["submission_count"], 1)
+
     def test_submission_mismatch_is_collect_only_and_cannot_be_retried(self) -> None:
         prepared = self.prepare()
         self.arm(prepared)
