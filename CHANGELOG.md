@@ -2,6 +2,16 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## Unreleased recovery candidate
+
+- Restore the existing lean footer/continuation workflow on desktop build 7982.
+- Validate full native history JSON with `complete --native-read-file`, including
+  worker identity, paired message IDs, exact returned prompt, truncation, and the
+  20K reader boundary. Report bounded-summary verification explicitly.
+- Reject oversized wrapped prompts before preparation, recheck cooldown at arm,
+  retain terminal cooldowns during normal purge, and fsync receipt directories.
+- Preserve collect-only recovery when cached history lags an acknowledged send.
+
 ## [1.2.1] - 2026-09-04
 
 ### Fixed

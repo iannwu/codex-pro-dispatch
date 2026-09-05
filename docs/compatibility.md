@@ -11,13 +11,15 @@ The workflow is desktop-only. ChatGPT on the web, Codex CLI alone, IDE extension
 | Parent identity | Read the stable ID of the current Codex parent task |
 | Worker identity | List or resolve Chat conversations and address the configured worker by stable ID, never title or position |
 | Native submission | Make one user-message send attempt to that exact worker |
-| Outbound verification | Read the exact existing submitted user message for byte-level verification |
-| Completion read | Read the latest completed assistant response and completion metadata |
+| Outbound verification | Compare returned user-summary text exactly with the prepared wrapped prompt |
+| Result read | Read the paired native summary, idle status, intact footer, and visible truncation metadata |
 | Navigation | Open the exact worker and restore the exact parent task by stable ID |
 
 Tool names are host implementation details. For example, a build may expose operations resembling `list_threads`, `send_message_to_thread`, `read_thread`, and exact-ID navigation. Similar names are not proof of compatibility: the semantic inputs, outputs, stable identities, and read-back behavior must all be present.
 
 The skill repeats this preflight on every invocation. `pro-dispatch doctor --native-controls-confirmed` accepts the result as an assertion for that invocation; the standalone Python process cannot inspect the host's tool inventory itself.
+
+The recovered workflow verifies bounded protocol envelopes in the returned history summary. It does not claim original source-byte integrity or authoritative generation finality. See the skill verification scope.
 
 ## Supported environment
 

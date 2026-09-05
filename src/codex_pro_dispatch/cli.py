@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -10,7 +12,9 @@ from typing import Any, Sequence
 from . import __version__
 from .core import (
     DispatchError,
+    ConfigurationError,
     _parse_result,
+    _native_response,
     abandon_assignment,
     active_cooldown,
     active_assignment,
@@ -54,6 +58,22 @@ def read_exact_bytes_source(path: str) -> bytes:
     if path == "-":
         return sys.stdin.buffer.read()
     return Path(path).read_bytes()
+
+
+def read_native_source(path: str) -> bytes:
+    """Bound a private, unedited tool response before decoding it."""
+    parent = Path(path).parent.lstat()
+    if path == "-" or not stat.S_ISDIR(parent.st_mode) or parent.st_mode & 0o077:
+        raise ConfigurationError("Native read requires a private directory")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+            raise ConfigurationError("Native read requires a private regular file")
+        raw = source.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024:
+        raise ConfigurationError("Native read exceeds 4 MiB")
+    return raw
 
 
 def add_reason_source(parser: argparse.ArgumentParser) -> None:
@@ -157,7 +177,9 @@ def build_parser() -> argparse.ArgumentParser:
         "complete", help="Validate a bounded result envelope and complete an assignment"
     )
     complete.add_argument("assignment_id")
-    complete.add_argument("--response-file", default="-", help="UTF-8 response file, or - for stdin")
+    complete_source = complete.add_mutually_exclusive_group()
+    complete_source.add_argument("--response-file", default="-", help="UTF-8 response file, or - for stdin")
+    complete_source.add_argument("--native-read-file", help="Private unedited desktop read_thread JSON; validates worker and paired messages")
     complete.add_argument(
         "--expected-root-assignment-id",
         help="Require a chunk for this logical root; must be paired with --expected-chunk-index",
@@ -298,7 +320,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"ok": True, "assignment": value, "collect_only": True}
 
     if args.command == "complete":
-        response = read_exact_bytes_source(args.response_file)
+        native_read = read_native_source(args.native_read_file) if args.native_read_file else None
+        response = b"" if native_read is not None else read_exact_bytes_source(args.response_file)
         value, payload = complete_assignment(
             args.assignment_id,
             response,
@@ -306,9 +329,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             expected_root_assignment_id=args.expected_root_assignment_id,
             expected_chunk_index=args.expected_chunk_index,
             truncated=True if args.truncated else None,
+            native_read=native_read,
         )
         parsed = _parse_result(
-            response,
+            _native_response(native_read, value)[0] if native_read is not None else response,
             args.assignment_id,
             expected_root_assignment_id=args.expected_root_assignment_id,
             expected_chunk_index=args.expected_chunk_index,
@@ -319,8 +343,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "assignment": value,
             "payload": payload,
             "result_kind": parsed.result_kind,
+            "verification_level": value.get("verification_level", "framed_response"),
+            "generation_finality_verified": False,
+            "source_bytes_verified": False,
         }
-        if parsed.result_kind == "chunk":
+        if result["result_kind"] == "chunk":
             result["chunk_index"] = parsed.chunk_index
             result["final"] = parsed.final
         return result

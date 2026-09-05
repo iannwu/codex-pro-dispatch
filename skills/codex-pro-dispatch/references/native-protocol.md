@@ -1,3 +1,13 @@
+# Native summary verification scope
+
+The recovered bounded-footer workflow validates returned summary text and message
+association. It does not verify source bytes, native generation finality, or outer
+integrity. An enclosing turn's `completed` status is synthetic. Require an idle
+worker, exact same-turn identities, the expected prompt hash, no visible selected
+truncation, and intact protocol framing. The helper checks the complete native
+JSON through `complete --native-read-file`; do not manually convert omissions to
+false or substitute a selected-body file after native validation fails.
+
 # Official-app native conversation protocol
 
 Read this reference for first-time setup, collection, or recovery.
@@ -5,7 +15,7 @@ Read this reference for first-time setup, collection, or recovery.
 ## Assumptions
 
 - Chat and Codex are separate task surfaces inside the official combined desktop app.
-- The host exposes native controls that can resolve conversation IDs, submit a message, observe conversation metadata, open a conversation by ID, read the latest completed assistant response, and return to a Codex task by ID.
+- The host exposes native controls that can resolve conversation IDs, submit a message, observe conversation metadata, open a conversation by ID, read the paired assistant summary with its protocol footer, and return to a Codex task by ID.
 - Exact tool names may vary by Codex build. Use the available native controls semantically. Do not replace them with shell UI automation.
 
 Do not treat these assumptions as satisfied automatically. Complete the six-capability host preflight in `SKILL.md` on every invocation. If any capability is missing, stop before configuration or assignment preparation.
@@ -47,7 +57,7 @@ If the native send reports `systemError`, first inspect any error payload expose
 1. Open the worker by exact conversation ID.
 2. Wait until the loaded conversation ID equals the configured worker ID.
 3. If outbound verification is incomplete, locate the existing user message by assignment marker and run `pro-dispatch submitted --sent-prompt-file` on its exact native read-back. This is verification, not a new send. If the first temporary file added exactly one trailing newline and the receipt reports `readback_correction_allowed: true`, re-extract the same native message without that artifact and verify it once more. Never normalize or retry other mismatches.
-4. Read the newest completed assistant response.
+4. Save the complete unedited inner native history JSON at `maxOutputCharsPerItem: 20000`, and use `complete --native-read-file`. Require `thread.status.type == "idle"`; preserve omitted truncation as unknown.
 5. Validate the current bounded envelope: the result marker begins at byte zero, the exact end marker is the final byte sequence, and explicit truncation is rejected. Apply the v1.2 control and chunk rules below.
 6. Reject stale or mismatched markers.
 7. Restore the exact parent Codex task ID in a `finally`-style cleanup path.
@@ -88,10 +98,10 @@ The clipboard must remain unchanged.
 
 The v1.1 setup, submission, waiting, collection, recovery, visible fallback,
 and failure mapping above remain in force. For each newly prepared v1.2
-response, the native read additionally preserves exact response bytes and
-explicit native truncation metadata when supplied, selects a stable assistant
-item associated with the verified user message, and confirms its enclosing turn
-is completed. An explicit `truncated: true` is rejection evidence; omitted
+response, retain exact response bytes from the returned summary and explicit native truncation
+metadata when supplied, select a stable assistant item paired with the verified
+user message, and require the worker status to be idle. The enclosing turn status
+is not generation-finality evidence. An explicit `truncated: true` is rejection evidence; omitted
 metadata is not silently treated as false.
 
 When the native reader explicitly reports truncation, preserve the exact bytes

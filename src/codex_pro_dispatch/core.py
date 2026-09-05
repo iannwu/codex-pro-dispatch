@@ -195,6 +195,11 @@ def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary_path, path)
         path.chmod(0o600)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         with contextlib.suppress(FileNotFoundError):
             temporary_path.unlink()
@@ -672,6 +677,8 @@ def list_assignments(paths: RuntimePaths | None = None) -> list[dict[str, Any]]:
             value = read_json(path)
             assignment_id = str(value.get("assignment_id", ""))
             validate_identifier(assignment_id, field="assignment_id")
+            if value.get("schema_version") != SCHEMA_VERSION or path != assignment_path(assignment_id, runtime):
+                raise StateError("Unsupported or misplaced assignment receipt")
             validate_status(str(value.get("status", "")))
             redacted, _ = _redact_diagnostic_fields(value)
             values.append(redacted)
@@ -843,6 +850,8 @@ def prepare_assignment(
                 )
 
         wrapped = wrap_prompt(prompt, resolved_id)
+        if len(wrapped.encode("utf-16-le")) // 2 >= 20000:
+            raise ConfigurationError("Wrapped prompt reaches the native read limit; use a smaller prompt or a pinned repository reference")
         receipt: dict[str, Any] = {
             "status": "prepared",
             "created_at": utc_now(),
@@ -890,6 +899,10 @@ def _transition(
                 f"Cannot move assignment from {current} to {target}",
                 details={"assignment_id": assignment_id, "status": current},
             )
+        if target == "armed":
+            active_assignment(runtime)  # Reject multiple unresolved assignments.
+            if active_cooldown(runtime):
+                raise CooldownError("Native unusual-activity cooldown blocks arming")
         value["status"] = target
         if updates:
             value.update(dict(updates))
@@ -1172,6 +1185,108 @@ def abandon_assignment(
     )
 
 
+def _native_response(raw: bytes, receipt: Mapping[str, Any]) -> tuple[bytes, dict[str, Any]]:
+    """Select a framed exchange from the desktop's lossy history summary.
+
+    This establishes summary association, not source-byte integrity or native
+    generation finality. Do not manufacture production evidence from it.
+    """
+    def invalid() -> None:
+        raise MarkerError("native-read-invalid: unsupported or ambiguous native summary")
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                invalid()
+            result[key] = value
+        return result
+
+    def native_id(value: Any) -> str:
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 1024:
+            invalid()
+        return value
+
+    try:
+        if not raw or len(raw) > 4 * 1024 * 1024 or raw.startswith(b"\xef\xbb\xbf"):
+            invalid()
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs,
+                          parse_constant=lambda _: invalid())
+        # Catch escaped lone surrogates and numeric overflow without printing input.
+        json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if not isinstance(data, dict) or type(data.get("schemaVersion")) is not int or data["schemaVersion"] != 1:
+            invalid()
+        thread = data.get("thread")
+        if not isinstance(thread, dict) or thread.get("kind") != "chatgpt" or thread.get("id") != receipt["worker_conversation_id"]:
+            invalid()
+        status = thread.get("status")
+        if not isinstance(status, dict) or not isinstance(status.get("type"), str):
+            invalid()
+        if status["type"] != "idle":
+            raise StateError("native-worker-not-idle: wait and read again; never resend")
+        turns = data.get("turns")
+        if not isinstance(turns, list):
+            invalid()
+        turn_ids: set[str] = set()
+        item_ids: set[str] = set()
+        candidates = []
+        marker = f'[CODEX_PRO_DISPATCH assignment_id={receipt["assignment_id"]}]\n'
+        for turn in turns:
+            if not isinstance(turn, dict) or not isinstance(turn.get("items"), list):
+                invalid()
+            tid = native_id(turn.get("id"))
+            if tid in turn_ids:
+                invalid()
+            turn_ids.add(tid)
+            for item in turn["items"]:
+                if not isinstance(item, dict):
+                    invalid()
+                iid = native_id(item.get("id"))
+                if iid in item_ids:
+                    invalid()
+                item_ids.add(iid)
+                if item.get("type") == "userMessage":
+                    content = item.get("content")
+                    if isinstance(content, list) and any(isinstance(c, dict) and isinstance(c.get("text"), str) and c["text"].startswith(marker) for c in content):
+                        candidates.append((turn, item))
+        if not candidates:
+            raise StateError("native-reply-not-observed: read existing history; never resend")
+        if len(candidates) != 1:
+            invalid()
+        turn, user = candidates[0]
+        content = user.get("content")
+        if len(content) != 1 or content[0].get("type") != "text" or user["id"] != turn["id"] or turn["items"][0] is not user:
+            invalid()
+        if sha256_text(content[0]["text"]) != receipt["wrapped_prompt_sha256"]:
+            raise StateError("native-readback-mismatch: returned prompt differs; never resend")
+        if len(turn["items"]) == 1:
+            raise StateError("native-reply-not-observed: assistant absent; never resend")
+        if len(turn["items"]) != 2:
+            invalid()
+        assistant = turn["items"][1]
+        if assistant.get("type") != "agentMessage" or not isinstance(assistant.get("text"), str):
+            invalid()
+        flags = {}
+        for name, scope in (("envelope", data), ("thread", thread), ("turn", turn), ("user", user), ("user_text", content[0]), ("assistant", assistant)):
+            for key in ("truncated", "textTruncated"):
+                value = scope.get(key)
+                if key in scope and type(value) is not bool:
+                    invalid()
+                if value is True:
+                    raise MarkerError("truncated-response: native summary reports shortening")
+                flags[f"{name}.{key}"] = value  # null means omitted, never false.
+        text = assistant["text"]
+        if len(text.encode("utf-16-le")) // 2 >= 20000:
+            raise MarkerError("native-read-limit: reject a response at the reader's boundary")
+        return text.encode("utf-8"), {
+            "worker_id": thread["id"], "turn_id": turn["id"],
+            "user_message_id": user["id"], "assistant_message_id": assistant["id"],
+            "read_sha256": hashlib.sha256(raw).hexdigest(), "raw_truncation": flags,
+        }
+    except (ValueError, UnicodeError, RecursionError, TypeError, KeyError, IndexError):
+        invalid()
+
+
 def complete_assignment(
     assignment_id: str,
     response: str | bytes,
@@ -1180,6 +1295,7 @@ def complete_assignment(
     expected_root_assignment_id: str | None = None,
     expected_chunk_index: int | str | None = None,
     truncated: bool | None = None,
+    native_read: bytes | None = None,
 ) -> tuple[dict[str, Any], str]:
     runtime = paths or default_paths()
     raw = _response_bytes(response)
@@ -1188,6 +1304,11 @@ def complete_assignment(
         value = load_assignment(assignment_id, runtime)
         current = str(value["status"])
         _reject_legacy_active_assignment(value, operation="complete")
+        native_collection = None
+        if native_read is not None:
+            if raw:
+                raise ConfigurationError("Supply a native read or response, not both")
+            raw, native_collection = _native_response(native_read, value)
         parsed = _parse_result(
             raw,
             assignment_id,
@@ -1203,6 +1324,9 @@ def complete_assignment(
                     "Completed assignment is immutable and the new response differs",
                     details={"assignment_id": assignment_id},
                 )
+            previous = value.get("native_collection")
+            if previous and native_collection and any(previous[k] != native_collection[k] for k in ("worker_id", "turn_id", "user_message_id", "assistant_message_id")):
+                raise StateError("Completed native message identity changed")
             return value, parsed.payload
         if current in {"abandoned", "failed"}:
             raise StateError(
@@ -1229,9 +1353,14 @@ def complete_assignment(
         value["response_sha256"] = response_hash
         value["payload_sha256"] = payload_hash
         value["result_marker_validated"] = True
+        value["verification_level"] = "bounded_native_summary" if native_collection else "framed_response"
+        value["generation_finality_verified"] = False
+        value["source_bytes_verified"] = False
+        if native_collection:
+            value["native_collection"] = native_collection
         value["no_resend"] = True
         _save_assignment(assignment_id, value, runtime)
-        return value, parsed.payload
+        return load_assignment(assignment_id, runtime), parsed.payload
 
 
 def recovery_info(
@@ -1313,6 +1442,8 @@ def purge_local_state(
                         "status": current.get("status"),
                     },
                 )
+            if active_cooldown(runtime):
+                raise CooldownError("Cannot purge receipts while a native cooldown is active")
         worker_removed = False
         assignments_removed = False
         with contextlib.suppress(FileNotFoundError):

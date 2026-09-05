@@ -9,7 +9,7 @@ An independent macOS safety wrapper for a supported Codex desktop workflow. It h
 
 **Desktop-only:** the dispatch workflow runs only inside the official ChatGPT desktop app for macOS with Codex. It does not run from ChatGPT on the web, Codex CLI alone, an IDE extension, Windows, or Linux. The Codex CLI is used only to install and manage the plugin.
 
-**Version: v1.2.1 stable.** Long results continue in bounded chunks and are
+**Version: v1.2.1 recovery candidate.** Long results continue in bounded chunks and are
 reassembled exactly without weakening the existing no-resend contract. The
 v1.2.1 patch rejects a stale native user-message read-back from another
 assignment without changing the current receipt, so the matching message can
@@ -253,3 +253,13 @@ The live release gate is [docs/acceptance.md](docs/acceptance.md). Contributions
 ## License
 
 [MIT](LICENSE)
+
+## Current-host recovery
+
+The recovery candidate retains the lean footer/chunk protocol and adds
+`complete --native-read-file` to validate the complete native history response.
+It reports `bounded_native_summary` verification, not original source-byte or
+generation-finality verification. The 20K reader boundary, visible truncation,
+wrong worker/message association, and missing footer all reject collection.
+A successful hello is not evidence that arbitrary long results or Git writes work;
+see the current recovery acceptance receipt when available.
