@@ -82,4 +82,4 @@ __all__ = [
     "wrap_prompt",
 ]
 
-__version__ = "1.2.2-rc.1"
+__version__ = "1.2.2"
