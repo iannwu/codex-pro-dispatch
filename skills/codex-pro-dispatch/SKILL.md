@@ -3,7 +3,7 @@ name: codex-pro-dispatch
 description: Dispatch a bounded implementation, review, or research assignment from a Codex task to a dedicated ChatGPT Pro conversation in the official combined desktop app, recover the result without resending, and return to the parent Codex task. Use when the user asks Codex to delegate work to ChatGPT Pro; do not use for ordinary local coding.
 metadata:
   short-description: Dispatch work to official-app ChatGPT Pro
-  version: "1.2.1"
+  version: "1.2.2-rc.1"
 ---
 
 # Codex Pro Dispatch
@@ -44,6 +44,38 @@ Hard fail if any path permits an automatic resend after arming, accepts a result
 - The parent Codex task must have an independent read path and verify every reported branch, commit, file change, and CI result.
 - Restore the exact parent Codex task after collection, including after failures.
 
+## Verification scope on the current desktop host
+
+This recovery uses the existing bounded-footer protocol, not the experimental
+schema-v2 evidence adapter. `complete` means a valid protocol envelope was
+observed. The native history reader can trim source text, cache history, and omit
+finality/integrity metadata. Therefore results explicitly report
+`verification_level: bounded_native_summary`, `generation_finality_verified: false`,
+and `source_bytes_verified: false`. `outbound_prompt_verified` records equality
+of returned summary text with the prepared prompt, not hidden source-byte proof.
+Never describe an idle worker, a completed enclosing turn, or an end marker as
+native generation-finality evidence. Full source-integrity verification remains
+unavailable on this reader. Review answer correctness and Git claims independently.
+
+Use `complete --native-read-file` for live collection. It checks worker identity,
+the same-turn user/assistant relationship, the returned prompt hash, every
+selected-scope `truncated`/`textTruncated` flag, both framing markers, and a response
+strictly below the reader's 20,000 UTF-16-unit boundary. Preparation also rejects
+a wrapped prompt at that boundary before creating a receipt; use a shorter prompt
+or a pinned repository reference for large inputs. Omitted flags remain null,
+not false. `--response-file` remains a lower-level compatibility/testing input;
+it does not validate a native source. Never use it to bypass a rejected native read.
+
+Poll with roughly ten seconds between completed reads and a bounded observation
+budget. On timeout, report the assignment ID and its retained reservation; use
+read-only recovery, never resend. For ordinary work use a ten-minute budget and
+provide progress about once per minute; simple smoke tests use two minutes.
+A native task-list update can precede visible history because the reader caches
+conversation queries. Continue reading the same assignment; never send a dummy
+message to refresh history or use a stale user message as read-back.
+Only schedule another continuation after the previous exchange has passed native
+validation, its payload was safely appended, and a fresh pre-send read reports idle.
+
 ## Required host preflight
 
 Run this preflight at the start of every invocation, before configuring a worker or preparing an assignment. This repository supplies the safety protocol and local receipt helper; the host supplies the native transport.
@@ -53,8 +85,8 @@ Confirm that the current Codex task exposes all of these semantic capabilities:
 1. Read the stable ID of the current parent Codex task.
 2. List or resolve Chat conversations by stable ID.
 3. Send one user message to an exact Chat conversation ID.
-4. Read back the exact submitted user-message bytes from that conversation.
-5. Read the latest completed assistant response and completion metadata.
+4. Read the submitted user message in the native history summary and compare its returned text exactly with the wrapped prompt.
+5. Read a complete inner native history JSON containing the exact worker, paired user/assistant IDs, returned text, visible truncation flags, and `thread.status.type`. Require `idle` before sending and accepting a result.
 6. Open an exact Chat or Codex task by stable ID so the parent can be restored.
 
 Exact tool names may vary, but every capability must be available in the current task. Do not infer availability from macOS, app presence, an installed plugin, or a prior successful run. If any capability is missing, stop before writing worker configuration or assignment state and report the missing capability. Never substitute UI automation.
@@ -149,11 +181,11 @@ If the app stops after `arm`â€”whether before, during, or after the native sendâ
 
 8. Wait using the worker conversation's native metadata or timestamp. Do not repeatedly reopen the worker while it is generating.
 9. When the worker has updated, open the worker by its exact conversation ID and wait until that exact thread is loaded.
-10. Read only the newest completed assistant response associated with the assignment. Save it in the private temporary directory as UTF-8.
+10. Read the worker with `turnLimit: 2` and `maxOutputCharsPerItem: 20000`. Save the complete unedited inner JSON to a private mode-0600 file. Do not select or reconstruct an assistant-only response.
 11. Validate and complete:
 
 ```bash
-pro-dispatch complete '<assignment-id>' --response-file '<response-file>'
+pro-dispatch complete '<assignment-id>' --native-read-file '<native-read-file>'
 ```
 
 12. Use the returned `payload` as the worker result.
@@ -182,7 +214,7 @@ pro-dispatch submitted '<assignment-id>' \
 
 This recovery command verifies the already-existing message; it does not send anything. It is allowed from `indeterminate` or `ambiguous` while `submission_count` is zero. It is also allowed with `submission_count` one only when the receipt explicitly has `readback_correction_allowed: true`, or an older receipt's stored mismatch hash proves the same single-trailing-newline artifact, and the corrected read-back exactly matches the prepared hash. Never call the native send control during this recovery step.
 
-5. Read the newest completed assistant response.
+5. Read the complete native history JSON for the saved worker and matching exchange, using the same 20,000-character limit.
 6. Validate it with `pro-dispatch complete`.
 7. Restore the saved parent task ID.
 
@@ -255,8 +287,9 @@ break-glass rule above remains mandatory.
 
 One native collection read must establish the configured and loaded worker IDs,
 a stable assistant item ID associated with the verified submitted user message,
-a completed enclosing turn, exact response bytes, and explicit native truncation
-metadata when supplied. Do not silently interpret an omitted `truncated` field
+exact returned response text, paired user/assistant IDs, an idle worker, and
+explicit native truncation metadata when supplied. A completed enclosing turn
+is synthetic on this host and never proves generation finality. Do not silently interpret an omitted `truncated` field
 as false. An explicit `truncated: true` is always rejected.
 
 If the native reader reports it, preserve the exact response bytes and invoke
@@ -308,7 +341,7 @@ For a chunk, supply both arguments; supplying exactly one is an error:
 
 ```bash
 pro-dispatch complete '<current-assignment-id>' \
-  --response-file '<response-file>' \
+  --native-read-file '<native-read-file>' \
   --expected-root-assignment-id '<root-assignment-id>' \
   --expected-chunk-index '<next-index>'
 ```

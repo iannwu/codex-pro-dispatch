@@ -2,6 +2,18 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## [1.2.2-rc.1] - 2026-09-05
+
+Recovery prerelease; the complete A–L stable-release matrix has not been rerun.
+
+- Restore the existing lean footer/continuation workflow on desktop build 7982.
+- Validate full native history JSON with `complete --native-read-file`, including
+  worker identity, paired message IDs, exact returned prompt, truncation, and the
+  20K reader boundary. Report bounded-summary verification explicitly.
+- Reject oversized wrapped prompts before preparation, recheck cooldown at arm,
+  retain terminal cooldowns during normal purge, and fsync receipt directories.
+- Preserve collect-only recovery when cached history lags an acknowledged send.
+
 ## [1.2.1] - 2026-09-04
 
 ### Fixed
@@ -73,6 +85,7 @@ All notable changes to Codex Pro Dispatch are documented here.
 
 - The v1 safety patch was prompted by a native send failure whose visible `systemError` masked an unusual-activity HTTP 403. PR #2 made the failure explicit, kept the assignment collect-only, and added a cooldown that cannot be bypassed by abandoning the receipt or changing workers.
 
+[1.2.2-rc.1]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.2.1...v1.2.2-rc.1
 [1.2.1]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.0.0...v1.1.0
