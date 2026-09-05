@@ -9,13 +9,11 @@ An independent macOS safety wrapper for a supported Codex desktop workflow. It h
 
 **Desktop-only:** the dispatch workflow runs only inside the official ChatGPT desktop app for macOS with Codex. It does not run from ChatGPT on the web, Codex CLI alone, an IDE extension, Windows, or Linux. The Codex CLI is used only to install and manage the plugin.
 
-**Version: v1.2.2-rc.1 recovery prerelease.** Long results continue in bounded chunks and are
-reassembled exactly without weakening the existing no-resend contract. The
-v1.2.1 patch rejects a stale native user-message read-back from another
-assignment without changing the current receipt, so the matching message can
-verify later without a resend. See the [v1.2.1 release notes](CHANGELOG.md#121---2026-09-04),
-[v1.2.0 long-result receipt](docs/releases/v1.2.0-long-result-acceptance.md), and
-prior [v1.1.0 full-matrix receipt](docs/releases/v1.1.0-acceptance.md).
+**Version: v1.2.2.** Restores native Pro dispatch on desktop build `7982`,
+including collect-only restart recovery and exact assembly of long responses.
+The [release receipt](docs/releases/v1.2.2-acceptance.md) records the live checks
+and the disclosed clipboard-verification exception. Results verify bounded
+native summaries; original source bytes and generation finality remain unverified.
 
 This project is independent and unofficial. It is not affiliated with, endorsed by, or maintained by OpenAI.
 
@@ -87,8 +85,8 @@ git --version
 | Local state machine | Tested on macOS and Linux in CI |
 | Plugin manifest | Validated against the current Codex plugin schema |
 | Manual skill discovery | `$HOME/.agents/skills` |
-| Native end-to-end workflow | v1.1.0 full matrix, v1.2.0 long-result, and v1.2.1 stale-readback gates passed; compatibility remains build-sensitive |
-| Current maintainer app build | `26.901.41600` (`7982`); bounded native recovery passed short, long-result, GitHub-read, and GitHub-write tests; see the [recovery receipt](docs/releases/v1.2.2-rc.1-recovery.md) |
+| Native end-to-end workflow | v1.2.2 recovery checks passed with a disclosed clipboard-verification exception; compatibility remains build-sensitive |
+| Current maintainer app build | `26.901.41600` (`7982`); bounded native recovery passed short, long-result, GitHub-read, and GitHub-write tests; see the [release receipt](docs/releases/v1.2.2-acceptance.md) |
 
 See [docs/compatibility.md](docs/compatibility.md) for the exact capability contract and tested-build policy.
 
@@ -96,25 +94,17 @@ See [docs/compatibility.md](docs/compatibility.md) for the exact capability cont
 
 OpenAI's current guidance packages reusable skills as plugins. This repository includes the plugin manifest and marketplace catalog needed for a normal Codex install. See the official [skills](https://developers.openai.com/codex/skills) and [plugin packaging](https://developers.openai.com/plugins/build/plugins) documentation.
 
-To install the recovery prerelease tested on build `7982`:
+To install v1.2.2, tested on build `7982`:
 
 ```bash
-codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.2.2-rc.1
+codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.2.2
 codex plugin add codex-pro-dispatch@codex-pro-dispatch
 ```
 
-This prerelease validates bounded native summaries. It does not establish original
-source-byte integrity or generation finality, and the full A–L stable matrix has
-not been rerun. The [recovery receipt](docs/releases/v1.2.2-rc.1-recovery.md)
-lists the exercised cases and remaining release gates.
-
-The previous stable release is available from the immutable `v1.2.1` tag and
-does not contain the September 5 recovery changes:
-
-```bash
-codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.2.1
-codex plugin add codex-pro-dispatch@codex-pro-dispatch
-```
+This release validates bounded native summaries. It does not establish original
+source-byte integrity or generation finality. See the
+[release receipt](docs/releases/v1.2.2-acceptance.md) for the acceptance evidence
+and clipboard-verification exception.
 
 Restart Codex if the plugin does not appear, then invoke `$codex-pro-dispatch` explicitly.
 
@@ -125,13 +115,13 @@ codex plugin remove codex-pro-dispatch@codex-pro-dispatch
 codex plugin marketplace remove codex-pro-dispatch
 ```
 
-For source development or audit-first installation of the recovery prerelease,
+For source development or audit-first installation,
 clone and pin its immutable tag, then use the transparent symlink installer:
 
 ```bash
 git clone https://github.com/iannwu/codex-pro-dispatch.git
 cd codex-pro-dispatch
-git checkout v1.2.2-rc.1
+git checkout v1.2.2
 ./install.sh
 ```
 
@@ -270,11 +260,11 @@ The live release gate is [docs/acceptance.md](docs/acceptance.md). Contributions
 
 ## Current-host recovery
 
-The recovery candidate retains the lean footer/chunk protocol and adds
+The recovery release retains the lean footer/chunk protocol and adds
 `complete --native-read-file` to validate the complete native history response.
 It reports `bounded_native_summary` verification, not original source-byte or
 generation-finality verification. The 20K reader boundary, visible truncation,
 wrong worker/message association, and missing footer all reject collection.
-The [recovery receipt](docs/releases/v1.2.2-rc.1-recovery.md) records passing
-short dispatch, a 26,236-byte four-chunk result, a real GitHub review, an
-independently verified GitHub write, and a fresh-task/fresh-worker smoke test.
+The [release receipt](docs/releases/v1.2.2-acceptance.md) records exact short
+dispatches, a 36,485-byte five-chunk result, independently verified GitHub writes,
+real app-restart recovery, and uninterrupted background submission.

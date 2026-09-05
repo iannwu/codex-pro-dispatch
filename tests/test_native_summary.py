@@ -46,7 +46,10 @@ class NativeSummaryTests(unittest.TestCase):
         self.assertFalse(receipt["generation_finality_verified"])
         self.assertFalse(receipt["source_bytes_verified"])
         self.assertIsNone(receipt["native_collection"]["raw_truncation"]["assistant.textTruncated"])
-        self.assertNotIn("391", json.dumps(receipt))
+        # Short digits can occur in timestamps, random IDs, and SHA-256 hashes.
+        # Check distinctive response text so the privacy assertion is stable.
+        self.assertNotIn("中文 🙂", json.dumps(receipt, ensure_ascii=False))
+        self.assertNotIn(json.dumps(payload), json.dumps(receipt))
         self.assertIsNone(core.active_assignment(self.paths))
 
     def test_wrong_worker_and_synthetic_completed_active_turn_cannot_pass(self):

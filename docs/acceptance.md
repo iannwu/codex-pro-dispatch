@@ -7,6 +7,11 @@ Run this matrix against the exact release-candidate commit before marking a rele
 The [v1.2.2-rc.1 recovery receipt](releases/v1.2.2-rc.1-recovery.md) records
 the exercised recovery subset. It does not waive any A–L stable-release gate.
 
+The [v1.2.2 release receipt](releases/v1.2.2-acceptance.md) records the expanded
+run and the maintainer's release-specific acceptance of unverified clipboard
+preservation. That exception is not an unconditional A–L pass and does not
+change this checklist for subsequent releases.
+
 The 2026-08-24 development run is historical evidence only. It was not performed against the current release candidate and must not be represented as the current release result.
 
 ## A. Setup

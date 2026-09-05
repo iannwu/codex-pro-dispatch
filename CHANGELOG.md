@@ -2,6 +2,19 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## [1.2.2] - 2026-09-05
+
+- Promote the build-7982 recovery runtime without further protocol changes.
+- Fix a flaky privacy test that mistook matching timestamp digits for stored
+  response content.
+- Record same-worker memory, stale-message rejection, real app-restart recovery,
+  uninterrupted background sending, and a new independently verified GitHub write.
+- Verify a 36,485-byte result assembled from five chunks, including a complete
+  response above the 10,000-byte generation guideline and partial-write rejection.
+- Publish the acceptance matrix with a release-specific exception: clipboard
+  preservation was not measured. Bounded native-summary verification remains
+  explicit; original source bytes and generation finality remain unverified.
+
 ## [1.2.2-rc.1] - 2026-09-05
 
 Recovery prerelease; the complete A–L stable-release matrix has not been rerun.
@@ -85,6 +98,7 @@ Recovery prerelease; the complete A–L stable-release matrix has not been rerun
 
 - The v1 safety patch was prompted by a native send failure whose visible `systemError` masked an unusual-activity HTTP 403. PR #2 made the failure explicit, kept the assignment collect-only, and added a cooldown that cannot be bypassed by abandoning the receipt or changing workers.
 
+[1.2.2]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.2.2-rc.1...v1.2.2
 [1.2.2-rc.1]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.2.1...v1.2.2-rc.1
 [1.2.1]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/iannwu/codex-pro-dispatch/compare/v1.1.0...v1.2.0
