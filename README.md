@@ -6,11 +6,15 @@ Get help with code reviews, research, and implementation, then bring the results
 
 This unofficial plugin is not affiliated with, endorsed by, or maintained by OpenAI. The current supported workflow requires a dedicated ChatGPT conversation with Pro selected.
 
+**Desktop-only:** It does not run from ChatGPT on the web, Codex CLI alone, IDE extensions, Windows, or Linux.
+
 [![CI](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/iannwu/codex-pro-dispatch)](https://github.com/iannwu/codex-pro-dispatch/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Install
+
+**Version: v1.2.2.**
 
 Run these commands in your terminal:
 
@@ -41,7 +45,7 @@ Once setup is complete, try a review using text already in your Codex task:
 Use $codex-pro-dispatch to ask my ChatGPT Pro worker to review the implementation plan above. Include the plan in the assignment, ask for the three biggest risks, and bring the findings back here. Do not change any files.
 ```
 
-No GitHub connector is needed for reviewing content included in the prompt.
+You do **not** need a connector for reviewing content included in the prompt.
 
 ## What happens
 
@@ -75,7 +79,7 @@ The workflow does not fall back to browser or UI automation when native controls
 
 For a review of pasted code or a plan, start with the prompt-only example above.
 
-To ask ChatGPT to create a branch or commit, its conversation needs a GitHub connector or tool authorized to write to the exact repository. Read access alone is not enough. The repository and starting commit must already be on GitHub, and Codex must be able to independently fetch and inspect the reported commit.
+To ask ChatGPT to create a branch or commit, its conversation needs a write-capable GitHub connector authorized for the exact repository. Read access alone is not enough. The repository and starting commit must already be on GitHub, and Codex must be able to independently fetch and inspect the reported commit. Local and uncommitted files are invisible to the worker.
 
 The plugin does not install the connector or grant permissions. Start the first write test on a disposable, unprotected branch in a repository without sensitive material. Do not use `main` or another protected branch.
 
@@ -101,7 +105,7 @@ This favors preventing duplicates over guaranteed delivery. If the app stops rig
 
 Do not delete receipts or force-reset the worker to bypass an active assignment. If ChatGPT blocks a request as unusual activity (HTTP 403), the plugin waits 30 minutes before allowing a fresh assignment.
 
-## Troubleshooting
+## Common first-run problems
 
 | Problem | What to do |
 | --- | --- |
@@ -122,7 +126,7 @@ The v1.2.2 release checks covered short responses, long responses, GitHub reads 
 
 The plugin checks the answer it reads from the app’s native history, reported as `bounded_native_summary` verification. It cannot prove that this is an exact copy of the original response or independently establish that ChatGPT has finished generating. Reported repository changes require separate commit verification.
 
-The v1.2.2 helper retains IDs, timestamps, state transitions, markers, and hashes needed for recovery, including an OpenAI request ID when available for unusual-activity error recovery, rather than prompt bodies, response transcripts, credentials, or repository source. State directories use `0700` permissions; receipt and lock files use `0600`.
+The v1.2.2 helper retains IDs, timestamps, state transitions, markers, hashes, and an OpenAI request ID when one is available for unusual-activity error recovery, rather than prompt bodies, response transcripts, credentials, or repository source. State directories use `0700` permissions; receipt and lock files use `0600`.
 
 The workflow can use short-lived private files during collection. App and terminal logs are outside the helper's storage guarantee. Read [SECURITY.md](SECURITY.md) before working with sensitive material.
 
