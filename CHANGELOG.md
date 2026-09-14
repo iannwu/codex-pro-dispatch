@@ -2,6 +2,21 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## [1.3.0-rc.1] - 2026-09-14
+
+Local release candidate. The live native acceptance matrix is still pending;
+this is not a stable or public release.
+
+- Add an opt-in resident Claude client and one sequential native listener for
+  handoff to the configured ChatGPT Pro worker.
+- Validate deterministic wrapped-prompt constraints before native handoff,
+  including the exclusive 20,000 UTF-16-unit limit, without creating queue or
+  session state when validation fails.
+- Keep resident observation milestones quiet and preserve collect-only recovery
+  and at-most-once sending.
+- Add client setup, native lifecycle, compatibility, packaging, and admission
+  regression coverage for the candidate.
+
 ## [1.2.2] - 2026-09-05
 
 - Promote the build-7982 recovery runtime without further protocol changes.

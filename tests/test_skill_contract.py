@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "codex-pro-dispatch" / "SKILL.md"
+STANDALONE = SKILL.parent / "references" / "standalone-dispatch.md"
 NATIVE_PROTOCOL = ROOT / "skills" / "codex-pro-dispatch" / "references" / "native-protocol.md"
 OPENAI_YAML = ROOT / "skills" / "codex-pro-dispatch" / "agents" / "openai.yaml"
 PLUGIN_MANIFEST = ROOT / ".codex-plugin" / "plugin.json"
@@ -38,7 +39,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn(f'"version": "{version}"', PLUGIN_MANIFEST.read_text(encoding="utf-8"))
 
     def test_skill_preserves_at_most_once_and_official_app_boundaries(self) -> None:
-        text = SKILL.read_text(encoding="utf-8")
+        text = STANDALONE.read_text(encoding="utf-8")
         for phrase in [
             "Never resend automatically",
             "official combined ChatGPT/Codex desktop app",
@@ -63,7 +64,7 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn("--reason '<exact", text)
 
     def test_skill_documents_the_exact_bounded_continuation_contract(self) -> None:
-        text = SKILL.read_text(encoding="utf-8")
+        text = STANDALONE.read_text(encoding="utf-8")
         normalized = " ".join(text.split())
         continuation = (
             "[CODEX_PRO_DISPATCH_CONTINUE root_assignment_id=<root-assignment-id> "

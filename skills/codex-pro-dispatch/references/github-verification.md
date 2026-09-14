@@ -1,6 +1,18 @@
 # GitHub verification contract
 
-Read this reference before authorizing a GitHub mutation and again when Chat Pro reports one.
+Read this reference for repository-specific consultation, before authorizing a
+GitHub mutation, and again when Chat Pro reports one.
+
+## Read-only consultation
+
+The worker may read an authorized remote repository through its own GitHub
+connector/app even though dispatch carries only prompt text and grants no local
+filesystem access. Include the repository, requested revision, and relevant paths.
+Require evidence of the files and revision actually retrieved; if the connector
+cannot resolve the requested revision, report that limitation instead of claiming
+an exact-commit review. Supply local-only changes separately when needed.
+
+This does not grant writes or change the parked broker's consultation scope.
 
 ## Before dispatch
 
@@ -11,7 +23,7 @@ Repository-write mode requires all of the following:
 - organization, SSO, branch-protection, and repository policies permit the proposed disposable branch action
 - the parent has independent remote read access for verification
 
-Connector presence does not prove write permission. If the worker has read-only access, keep the assignment prompt-only. Test new connector authorization on a disposable unprotected branch, never a protected ref.
+Connector presence does not prove write permission. If the worker has read-only access, keep the assignment read-only, including connector-backed review. Test new write authorization on a disposable unprotected branch, never a protected ref.
 
 ## Worker responsibility
 

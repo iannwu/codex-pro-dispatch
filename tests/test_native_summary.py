@@ -19,7 +19,7 @@ class NativeSummaryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve(strict=True)
         self.paths = core.RuntimePaths(self.root / "config", self.root / "state")
         core.save_worker("native-worker", confirm_pro=True, paths=self.paths)
         self.prepared = core.prepare_assignment("Review this arithmetic: 17 * 23.", parent_task_id="parent", paths=self.paths)
@@ -145,7 +145,8 @@ class NativeSummaryTests(unittest.TestCase):
         next_one = core.prepare_assignment("next", parent_task_id="parent", paths=self.paths)
         receipt = core.load_assignment(self.aid, self.paths)
         receipt["cooldown_until"] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).isoformat()
-        core._save_assignment(self.aid, receipt, self.paths)
+        with core.state_lock(self.paths) as locked:
+            core._save_assignment(self.aid, receipt, self.paths, _locked=locked)
         with self.assertRaises(core.CooldownError):
             core.arm_assignment(next_one.assignment_id, self.paths)
         self.assertEqual(core.load_assignment(next_one.assignment_id, self.paths)["status"], "prepared")
@@ -171,7 +172,10 @@ class NativeSummaryTests(unittest.TestCase):
     def test_foreign_schema_cannot_hide_unresolved_work(self):
         receipt = core.load_assignment(self.aid, self.paths)
         receipt["schema_version"] = 2
-        core.atomic_write_json(core.assignment_path(self.aid, self.paths), receipt)
+        with core.state_lock(self.paths) as locked:
+            core.atomic_write_json(
+                core.assignment_path(self.aid, self.paths), receipt, _locked=locked
+            )
         with self.assertRaises(core.StateError):
             core.active_assignment(self.paths)
 
@@ -179,7 +183,8 @@ class NativeSummaryTests(unittest.TestCase):
         self.complete()
         receipt = core.load_assignment(self.aid, self.paths)
         receipt["cooldown_until"] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).isoformat()
-        core._save_assignment(self.aid, receipt, self.paths)
+        with core.state_lock(self.paths) as locked:
+            core._save_assignment(self.aid, receipt, self.paths, _locked=locked)
         with self.assertRaises(core.CooldownError):
             core.purge_local_state(paths=self.paths)
         self.assertTrue(self.paths.worker_file.exists())

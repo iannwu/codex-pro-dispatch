@@ -1,5 +1,36 @@
 # Codex Pro Dispatch
 
+> Local README draft for the resident candidate. Not published to GitHub.
+> Public v1.2.2 installation commands do not include the Claude registration
+> and resident-listener features described here.
+
+## Claude Code registration (local resident candidate)
+
+Install the Codex source runtime first using `./install.sh` in a trusted copy
+of this release. Then register that same copy globally for Claude Code:
+
+```sh
+python3 ~/.agents/skills/codex-pro-dispatch/scripts/register-claude.py
+```
+
+This creates `~/.claude/skills/codex-pro-dispatch` pointing to the shared
+Codex installation. It is user-global, not project-local. Repeating it is
+safe; unrelated files or links are refused. No listener starts, request is
+sent, or Claude permission setting is changed. Use `/codex-pro-dispatch` in
+a fresh Claude Code task to check discovery. A missing listener produces a
+copy-paste Codex setup prompt, not an improvised launcher.
+
+If starting from a downloaded copy in Claude before Codex is installed, run
+`python3 skills/codex-pro-dispatch/scripts/register-claude.py` from that copy.
+It reports the missing prerequisite and the prompt to give Codex. It does not
+install the Codex runtime itself. This registration expects the documented
+source installation, not an arbitrary marketplace cache path.
+
+To unregister only Claude, run the same command with `--remove`, preferably
+before uninstalling Codex. Codex uninstall does not remove this separate
+registration; without the Codex source link it becomes inactive. The runtime
+and canonical request records are never deleted by registration.
+
 [![CI](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/iannwu/codex-pro-dispatch)](https://github.com/iannwu/codex-pro-dispatch/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,11 +40,18 @@ An independent macOS safety wrapper for a supported Codex desktop workflow. It h
 
 **Desktop-only:** the dispatch workflow runs only inside the official ChatGPT desktop app for macOS with Codex. It does not run from ChatGPT on the web, Codex CLI alone, an IDE extension, Windows, or Linux. The Codex CLI is used only to install and manage the plugin.
 
-**Version: v1.2.2.** Restores native Pro dispatch on desktop build `7982`,
-including collect-only restart recovery and exact assembly of long responses.
-The [release receipt](docs/releases/v1.2.2-acceptance.md) records the live checks
-and the disclosed clipboard-verification exception. Results verify bounded
-native summaries; original source bytes and generation finality remain unverified.
+**Version: v1.3.0-rc.1.** Local source candidate with an opt-in resident
+Claude-to-native-Pro broker. Actual Claude completed a single-request test and
+two requests through one listener with a 185-second quiet gap. Each request had
+one verified send, matching repeated collections and acknowledgement; the listener
+then stopped cleanly. Fresh local Claude Code skill discovery also passed.
+Real-work acceptance is still pending. These checks do not prove indefinite
+availability, restart survival, zero model overhead or public-release readiness.
+
+The [v1.2.2 release receipt](docs/releases/v1.2.2-acceptance.md) records historical
+standalone checks and their clipboard-verification exception, not qualification
+of this candidate. Results verify bounded native summaries; original source bytes
+and generation finality remain unverified.
 
 This project is independent and unofficial. It is not affiliated with, endorsed by, or maintained by OpenAI.
 
@@ -59,6 +97,7 @@ If you only want another Codex subagent, use Codex's native subagent tools. If y
 | Installer | A current Codex CLI that exposes `codex plugin marketplace` and `codex plugin add` |
 | Account | ChatGPT account or workspace where the user can visibly select Pro |
 | Runtime | Python 3.9 or newer; no third-party Python packages |
+| Parked client | Node.js with the standard-library modules checked by the source installer; no npm packages |
 | Invocation | Explicit `$codex-pro-dispatch` invocation |
 | Worker | One dedicated Chat conversation with Pro visibly selected |
 | Native capabilities | Current parent-task ID; list/resolve chats; exact-ID send; exact user-message read-back; completed-response read; exact-ID open/restore |
@@ -92,6 +131,11 @@ See [docs/compatibility.md](docs/compatibility.md) for the exact capability cont
 
 ## Install
 
+The marketplace/tag commands below describe the historical v1.2.2 release.
+They do not install this untagged candidate. For the candidate's source-link
+installation and recovery boundaries, read the
+[broker release reference](skills/codex-pro-dispatch/references/native-request-broker.md).
+
 OpenAI's current guidance packages reusable skills as plugins. This repository includes the plugin manifest and marketplace catalog needed for a normal Codex install. See the official [skills](https://developers.openai.com/codex/skills) and [plugin packaging](https://developers.openai.com/plugins/build/plugins) documentation.
 
 To install v1.2.2, tested on build `7982`:
@@ -106,7 +150,8 @@ source-byte integrity or generation finality. See the
 [release receipt](docs/releases/v1.2.2-acceptance.md) for the acceptance evidence
 and clipboard-verification exception.
 
-Restart Codex if the plugin does not appear, then invoke `$codex-pro-dispatch` explicitly.
+If the plugin does not appear, stop and report discovery failure. This candidate
+does not use app restart as an installation or qualification step.
 
 To remove the plugin while retaining private receipts:
 
@@ -138,7 +183,8 @@ It does not use `sudo`, install dependencies, start a daemon, alter model routin
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Then restart Codex if the skill does not appear and invoke `$codex-pro-dispatch` explicitly.
+Invoke `$codex-pro-dispatch` explicitly only when the skill is available.
+If discovery fails, stop without restarting the app or changing permissions.
 
 When upgrading an installation made before v1.1 from the same checkout, `install.sh` safely migrates its owned legacy `$CODEX_HOME/skills/codex-pro-dispatch` symlink. It refuses regular files and symlinks owned by another checkout.
 
@@ -154,7 +200,10 @@ To also purge worker configuration and receipts:
 ./uninstall.sh --purge-state
 ```
 
-Purge is irreversible and is refused while an assignment is unresolved.
+Purge is irreversible. Without `--force`, it refuses unresolved assignments and
+active cooldowns. Any existing queue storage also blocks purge, including with
+`--force`. The integrity restrictions under Safety and privacy apply to forced
+operations as well.
 
 ## First run
 
@@ -173,7 +222,100 @@ The skill will:
 
 The native interface does not machine-verify the selected model, so Pro selection is stored honestly as user-confirmed.
 
+## Claude listener: setup and Q&A
+
+### Try one real, low-risk request
+
+After global registration, start a fresh local Claude Code task and say:
+
+> Use /codex-pro-dispatch to ask native Pro to review the plan below. Return
+> its three biggest concerns. Do not change files. If no listener is ready,
+> give me the documented Codex setup prompt. Never resend an uncertain request.
+>
+> [Paste your plan here.]
+
+Claude checks client access and owner-provided readiness. If no listener is
+ready, it gives you a prompt to paste into a Codex desktop task. Codex checks
+ownership and native capabilities, follows documented resident setup or guarded
+recovery, and supplies the session path and exact client command. Claude obtains
+any required command permission before executing. Setup is not send permission.
+
+### What is the listener?
+
+It is the local handoff point between Claude and the native Codex owner.
+Claude submits a request; Codex sends it to the configured Pro conversation
+and returns a validated answer. Creating a Pro chat does not start a listener.
+
+### Do I need two installations?
+
+No. Codex owns one source installation. Claude gets a user-global link to it,
+so fresh local Claude Code tasks can discover `/codex-pro-dispatch` across
+projects. This does not cover Claude web, Cowork or cloud sessions.
+Registration neither grants shell permissions nor starts the listener.
+
+### Must I reopen it for every request?
+
+Not while the same resident listener remains healthy and accepting requests.
+Two sequential requests through one listener were tested. If the owning runtime
+ends or the listener stops, documented setup or recovery is needed again.
+Unattended startup after shutdown is not provided by this candidate.
+
+### Is leaving Codex open enough? Does task mean conversation?
+
+A Codex task is the conversation, but its active execution runs the listener.
+An open app or visible task alone does not prove it is serving. The owner must
+keep the serving execution active. Archiving, ending or reloading the task,
+or restarting the app, must not be assumed to preserve service.
+
+### Does it expire after two hours? What is the 45-second limit?
+
+Opt-in resident mode removes the old finite session's two-hour age limit.
+It retains request deadlines and service limits. The pickup deadline starts
+when Claude executes rendezvous, not while command approval is pending, and
+is separate from Pro's response time. The 64-admission ceiling and finite
+pickup, reply and active-observation budgets still apply. See the
+[resident protocol](skills/codex-pro-dispatch/references/native-activation.md#resident-opt-in-candidate).
+This is not a guarantee of forever-running service.
+
+### Does it wake a model every few minutes while idle?
+
+The resident flow uses ordinary code to wait for requests, not scheduled idle
+model polling. Active requests and model observations can consume tokens.
+Zero total overhead and production costs have not been established.
+
+### What if Pro is slow, rate-limited, or a request times out?
+
+Ten minutes is an observation checkpoint, not proof of failure. Inspect the
+existing request and follow its recovery state. If a send may have occurred,
+recover collect-only. Do not resend, replace the request or clear receipts.
+A local timeout does not cancel a request already sent to Pro.
+
+### Can I archive 01/02 and create new chats with the same names?
+
+Names are labels; routing uses saved conversation IDs. A new chat is a different
+worker even with the same name. Ask Codex to follow documented worker replacement,
+resolving old assignments first. Recovery stays bound to the original worker.
+Names 01 and 02 alone do not enable parallel dispatch.
+
+### What happens in Claude Auto mode?
+
+Claude enforces its own permissions. Preflight approval is not send approval.
+If a command is denied, stop and report it without changing modes or trying an
+alternate execution route. User-managed scoped approval may be needed. One
+successful invocation does not establish permission persistence across tasks.
+
+### How do I stop it?
+
+Ask the owner or client to use documented resident-stop. Preserve in-flight
+or uncertain work for recovery. A clean stop does not remove the installation
+or authorize a resend. Reopening requires ownership and recovery checks,
+not replaying a consumed setup command.
+
 ## GitHub connector for repository work
+
+The Claude resident client is limited to prompt-only consultations. The repository
+write workflow below belongs to standalone Codex dispatch, not permission for a
+Claude broker request to execute commands or change repositories.
 
 You do **not** need a connector when the Pro worker only reviews or researches the prompt you send it.
 
@@ -202,7 +344,7 @@ That distinction matters: if the app stops after arming but before transport, th
 | Symptom | Likely cause and fix |
 | --- | --- |
 | `codex plugin` is unknown | Update the Codex CLI. Plugin installation requires a build with plugin marketplace support. |
-| Plugin installed but `$codex-pro-dispatch` is missing | Restart the ChatGPT desktop app, confirm the plugin is enabled, then invoke the skill explicitly in a new Codex task. |
+| Plugin installed but `$codex-pro-dispatch` is missing | Report discovery failure. Do not restart the app or use another transport as part of this candidate's qualification. |
 | Compatibility check reports missing native controls | This app build or task surface cannot run the workflow. Use the supported macOS desktop surface; there is no web, CLI-only, IDE, or UI-automation fallback. |
 | Pro cannot be selected | The account or workspace does not currently expose the required Pro setting. The helper cannot select or verify it for you. |
 | Worker cannot see the repository or latest code | Grant the GitHub connector access to that repository and push the required starting commit. Local and uncommitted files are invisible to the worker. |
@@ -229,9 +371,37 @@ The skill opens the saved worker ID, verifies any existing outbound message, col
 
 The helper stores only worker identity, parent and assignment IDs, timestamps, state transitions, markers, prompt/response hashes, and an OpenAI request ID when one is available for unusual-activity HTTP 403 recovery. Config directories use mode `0700`; receipt and lock files use `0600`.
 
-The helper does not retain prompt bodies, response transcripts, raw diagnostic bodies, credentials, cookies, browser profiles, or repository source. Diagnostic commands store only a category and SHA-256 hash. `doctor` durably redacts raw diagnostic bodies left by releases before v1.1. During a dispatch, the skill may need short-lived prompt, read-back, response, and error files. It requires a private temporary directory, restrictive permissions, minimal output, and cleanup after parent restoration. Host and terminal logs remain outside the helper's storage guarantee.
+Standalone receipts do not contain prompt or response bodies. The Claude broker
+does retain private request and answer bodies for collection until explicit
+acknowledgement. Acknowledgement removes queue bodies, not identity/fingerprint
+tombstones or all session evidence. Private session prompt snapshots, saved client
+proof and host logs may remain; do not claim acknowledgement erases every copy.
+Diagnostic commands store a category and SHA-256 hash. `doctor` redacts older
+stored diagnostic bodies. Use private directories and restrictive permissions,
+and preserve unresolved recovery evidence. Host and terminal logs are outside
+the helper's storage guarantee.
 
 `worker reset --force` and `purge --yes --force` are break-glass commands. They can erase recovery identity or unresolved receipts and therefore destroy the workflow's no-resend evidence. They are not part of normal operation.
+
+### Intentional break-glass compatibility change
+
+The reduced broker candidate no longer supports forced deletion through corrupt
+or unclassifiable assignment state. Both reset and purge refuse such state even
+with `--force`, preserving the worker configuration and receipt files. Unsupported
+`native-client` storage or a receipt carrying the `native_client` field also
+blocks mutation. These checks are not bypassed by the force flag.
+
+For readable, supported standalone state, the existing explicitly authorized
+force behavior remains: reset may bypass the active-assignment check, and purge
+may bypass active-assignment and cooldown checks. That remains destructive and
+must never be used as automatic dispatch recovery. Queue storage separately
+blocks purge even when empty or acknowledged.
+
+An unreadable receipt is unknown state, not evidence that no send occurred.
+Preserve the files and resolve corruption through a separately reviewed,
+receipt-aware recovery procedure. Do not delete, rename, or edit records merely
+to bypass the guard. This candidate adds no automatic repair, quarantine,
+migration, ownership release, or resend permission.
 
 Read [SECURITY.md](SECURITY.md) before using the skill with private repositories.
 

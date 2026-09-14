@@ -1,6 +1,6 @@
 interface:
   display_name: "Codex Pro Dispatch"
   short_description: "Desktop-only dispatch to ChatGPT Pro"
-  default_prompt: "Use $codex-pro-dispatch to send this bounded assignment to my dedicated ChatGPT Pro worker and verify the result."
+  default_prompt: "Use $codex-pro-dispatch for this explicitly requested native Pro workflow. Check current native capabilities and canonical ownership, then follow the matching reference. Loading the skill does not authorize arming or sending."
 policy:
   allow_implicit_invocation: false
