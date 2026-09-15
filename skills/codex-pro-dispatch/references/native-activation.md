@@ -298,7 +298,15 @@ Omit the final three arguments as a group when there is no later unobserved comm
 
 Execute the decoded `calls.open` verbatim once through outer `functions.exec`. Preserve its returned directory as `SESSION` and its session ID. Then execute the decoded `calls.serve` verbatim once through another outer `functions.exec`, in the same actual native task/turn. Preserve that serve cell ID. Supply these strings as source, not through `eval` or dynamically reconstructed functions.
 
-While serve runs, it discovers request publications, performs the exact gate and receive, invokes the existing runner, and returns to an event wait after verified terminal success. The parent must NOT issue per-request `command-ready`, `receive`, dispatch or delivery-clear calls. No idle model turns are needed; terminal wait collection inside the owning evaluation is not a native read or model poll.
+While serve runs, it discovers request publications, performs the exact gate and receive, invokes the existing runner, and returns to an event wait after verified terminal success. The parent must NOT issue per-request `command-ready`, `receive`, dispatch or delivery-clear calls. Native idle observations last at most 25 seconds and repeat inside the same owning evaluation, without a helper process, model turn, chat read or navigation.
+
+Each authenticated admission call renews a native 60-second owner-loss detector.
+It never renews itself. If the outer evaluation stops, the detector withdraws
+readiness, closes the socket as `resident_failed`, and preserves failure evidence
+after joining the admission writer. It is disabled once a delivery is accepted:
+slow Pro work keeps its existing observation and collect-only rules. This is a
+failure detector, not a session-age lease, send deadline, or takeover permission.
+The loaded admission module is pinned by the generated open packet.
 
 Resident service stays in the background: it does not navigate to the owning task
 after observations or completion. Do not forward milestones or routine completion
@@ -418,13 +426,14 @@ as described above, in the same actual task/turn. Opening alone does not send,
 but serve can process eligible requests within the authorized consultation
 scope. Keep that owning execution active; a socket alone is not readiness.
 
-Readiness is enforced, not assumed: while `resident-next` waits for ordinal N
+Readiness is enforced, not assumed: while the native admission call waits for ordinal N
 it keeps the empty owner-only directory `waiting-N.<session ID>` beside
 `session.json` with a one-second heartbeat on its mtime. A resident
 `rendezvous` (including retry and queued resume) claims that marker by
 atomically renaming it into its command ticket, and only that claimed
 directory ever becomes a ticket; the waiter retires the marker with an atomic
-`rmdir` when it returns. Exactly one side wins: if the waiter has retired, the
+`rmdir` when its idle observation ends. The next observation is entered by the
+same serving evaluation, not by an independent heartbeat. Exactly one side wins: if the waiter has retired, the
 client fails with `Resident is not waiting for ordinal N` and creates no
 command, ticket, queue entry or send, so the same request ID can be submitted
 once a waiter exists; if the claim landed first, the waiter notices its marker is gone, stays
@@ -432,10 +441,11 @@ responsible for that publication (a stop is honored at the next ordinal), and
 fails the residence with the claimed ticket kept if no command follows within
 five seconds, whether or not a stop was ever published. A marker older than five
 seconds, or one that is not an owner-only directory, is `Stale resident
-readiness` and is never claimed. A marker left by a killed waiter therefore
-blocks clients once stale, makes the next `resident-next` for that ordinal
-fail, and stays in place as evidence (`closed-resident-packet` then refuses
-the directory as unproven artifacts).
+readiness` and is never claimed. Losing only the outer evaluation stops marker
+refresh and retires unclaimed readiness through the native detector. Losing the
+native runtime itself has no proven teardown guarantee: a leftover marker remains
+evidence and blocks another waiter. Existing closure and canonical checks still
+apply; no timer authorizes deleting that marker or claiming ownership.
 
 Use the returned `SESSION` to give Claude the exact rendezvous command below.
 Claude must obtain any required command permission before executing it. Do

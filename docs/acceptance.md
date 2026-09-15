@@ -43,6 +43,23 @@ Expected:
 - The config file is mode `0600`.
 - The model is reported as user-confirmed, not machine-verified.
 
+### A2. Resident owner liveness
+
+For resident candidates, use a disposable native session before any live send:
+
+- Await repeated idle admission observations in the same serving evaluation.
+  Verify no independent waiting process, model turn, chat read or navigation.
+- Stop renewing admission while the native runtime remains alive. Verify that
+  the owner-loss detector removes unclaimed readiness, closes the socket and
+  preserves a zero-event failure audit. It must not reopen or submit anything.
+- Exercise cleanup while receive is waiting. Verify close finishes without a
+  deadlock and preserves the observed-command and ready records.
+- Confirm an accepted slow request is not cancelled by the admission detector.
+
+Record native-host results separately from synthetic tests. Nonrenewal does not
+prove host cancellation, kernel-loss cleanup or recovery after a laptop reboot.
+Missing closure evidence remains a blocker, never permission to take over.
+
 ## B. One-turn roundtrip
 
 Submit:

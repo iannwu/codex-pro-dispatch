@@ -5,12 +5,21 @@ import {tmpdir} from "node:os";
 import {execFile} from "node:child_process";
 import {EventEmitter} from "node:events";
 import {fileURLToPath} from "node:url";
+import nativeFs from "node:fs/promises";
+import {syncBuiltinESMExports} from "node:module";
 
 const root=fileURLToPath(new URL("../",import.meta.url));
 const scripts=root+"skills/codex-pro-dispatch/scripts/",author=scripts+"parked-activation.mjs";
 const P="resident-parent",W="resident-pro",J=JSON.stringify;
 const AF=Object.getPrototypeOf(async function(){}).constructor;
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
+async function waitForFile(p){
+for(let i=0;i<2000;i++){
+try{await fs.lstat(p);return;}catch(e){if(e.code!=="ENOENT")throw e;}
+await new Promise(r=>setImmediate(r));
+}
+throw Error("Missing fixture file: "+p);
+}
 const mcp=v=>({content:[{type:"text",text:J(v)}]});
 async function missing(p){await assert.rejects(fs.lstat(p),e=>e.code==="ENOENT");}
 
@@ -44,6 +53,7 @@ const cli=args=>json("python3",[root+"bin/pro-dispatch",...args]);
 const activate=(args,preload=[])=>json(process.execPath,[...preload,author,...args]);
 t.after(async()=>{
 try{
+await (await import(author)).stopResidentAdmission(g.parkedResident??{});
 await g.parkedSocket?.close("unit_cleanup");
 for(const child of children)child.kill("SIGTERM");
 await Promise.allSettled([...jobs]);
@@ -69,6 +79,9 @@ const prompt=d+"/prompt.txt";await fs.writeFile(prompt,"Fixture answer.",{mode:3
 const tools={
 async mcp__node_repl__js(a){
 s.repls++;
+if(a.code.includes("activation.residentAdmission(")&&!a.code.includes('"command":')){
+s.waits++;events.emit("change");
+}
 // Incident boundary: after the actual synthetic send, one owner-guard REPL
 // reply ("decoder") or the socket finish reply ("transport") is undecodable.
 const claim=a.code.includes("Serve consumed");
@@ -100,11 +113,7 @@ return {exit_code:0,output:J({ok:true,request_id:last.id,parent_task_id:P,
 worker_conversation_id:W,observation:"pending"})};
 }
 const pending=run("/bin/sh",["-c",a.cmd]);
-if(a.cmd.includes("'resident-next'")){
-const id=++serial;sessions.set(id,pending);s.waits++;events.emit("change");
-return {session_id:id,output:""};
-}
-if(mode==="helperlost"&&a.cmd.includes("'command-ready'")){
+if(mode==="helperlost"&&a.cmd.includes("'arm'")){
 // The helper yields, then its host continuation is lost for good.
 const id=++serial;sessions.set(id,pending);s.lostSession=id;
 return {session_id:id,output:""};
@@ -142,6 +151,7 @@ turns:last?[{id:"turn-"+last.id,items:[
 },
 async mcp__codex_app__send_message_to_thread(a){
 assert.equal(a.threadId,W);
+assert.equal(g.parkedResident.admission.deadlineAt,null,"Idle detector must not time out Pro");
 const id=/^\[CODEX_PRO_DISPATCH assignment_id=([^\]]+)\]\n/.exec(a.prompt)?.[1];
 assert(id);last={id,prompt:a.prompt};s.sends.push(id);
 // Retained incident acknowledgment shape, its empty variant, a foreign thread.
@@ -194,6 +204,174 @@ await pause(25);
 }
 }};
 }
+
+test("idle admission has no independently living helper process",async t=>{
+const f=await fixture(t);await f.open();const serving=f.serve();
+await f.idle(1);
+try{
+assert.equal([...f.children].filter(c=>c.spawnargs.includes("resident-next")||
+c.spawnargs.some(a=>a.includes("'resident-next'"))).length,0);
+}finally{await f.stop();await serving;}
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("bounded idle observations renew only from their owner and abandoned idle closes",async t=>{
+const f=await fixture(t),old=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const {residentAdmission}=await import(author);
+const realTimeout=globalThis.setTimeout;
+const timerMock=t.mock.method(globalThis,"setTimeout",(fn,ms,...args)=>
+realTimeout(fn,ms===25000?100:ms===60000?1000:ms,...args));
+const next=()=>residentAdmission(f.g,f.meta,"fixture-owner",1);
+for(let i=0;i<3;i++){
+const wait=next();await waitForFile(f.waiting(1));
+assert.deepEqual(await wait,{pending:true,sessionId:o.socket.config.sessionId});
+await missing(f.waiting(1));
+await missing(old+"/transport-audit.json");
+}
+// The outer caller never re-enters. Native code must not renew itself.
+await new Promise(r=>realTimeout(r,1100));
+await o.admission.failure;
+await missing(f.waiting(1));await missing(old+"/wake.sock");
+assert.equal(JSON.parse(await fs.readFile(old+"/transport-audit.json")).reason,"resident_failed");
+const before=await fs.readFile(old+"/resident-failure.json");
+assert.equal(JSON.parse(before).heldDelivery,null);
+await assert.rejects(next(),/ended or occupied/);
+assert.deepEqual(await fs.readFile(old+"/resident-failure.json"),before);
+timerMock.mock.restore();
+assert.deepEqual(f.s.sends,[]);
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+// Existing cooperative recovery works; no new takeover protocol is needed.
+assert.notEqual(await f.reopen("failed-resident-packet"),old);
+const serving=f.serve();await f.idle(1);await f.stop();await serving;
+});
+
+test("a client claim wins over the idle observation boundary",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const realTimeout=globalThis.setTimeout;
+const timerMock=t.mock.method(globalThis,"setTimeout",(fn,ms,...args)=>
+realTimeout(fn,ms===25000?100:ms,...args));
+let settled=false;
+const waiting=o.activation.residentAdmission(f.g,f.meta,"fixture-owner",1);
+waiting.then(()=>{settled=true;},()=>{settled=true;});
+await waitForFile(f.waiting(1));
+await fs.rename(f.waiting(1),d+"/command-1");
+await new Promise(r=>realTimeout(r,200));
+assert.equal(settled,false,"An idle boundary must not strand a winning claimant");
+await f.publish(1,"job-A");
+const next=await waiting;timerMock.mock.restore();
+assert.equal(next.command.requestId,"job-A");assert.equal(next.pending,undefined);
+await fs.lstat(d+"/command-1");await fs.lstat(d+"/command-1.json");
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("owner loss during a native wait retires the marker before failure proof",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const {residentAdmission}=await import(author);
+const waiting=residentAdmission(f.g,f.meta,"fixture-owner",1);
+const rejected=assert.rejects(waiting,/stopped renewing admission/);
+await waitForFile(f.waiting(1));
+o.admission.expire();await rejected;await o.admission.failure;
+await missing(f.waiting(1));await missing(d+"/wake.sock");
+await assert.rejects(f.start(1,"never-sent"),/Existing rendezvous artifact|ENOENT/);
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("a resumed stale owner cannot renew before a delayed timer runs",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const {residentAdmission}=await import(author);
+const realTimeout=globalThis.setTimeout;
+const timerMock=t.mock.method(globalThis,"setTimeout",(fn,ms,...args)=>
+realTimeout(fn,ms===25000?100:ms,...args));
+const waiting=residentAdmission(f.g,f.meta,"fixture-owner",1);
+await waitForFile(f.waiting(1));await waiting;
+o.admission.deadlineAt=Date.now()-1;
+await assert.rejects(residentAdmission(f.g,f.meta,"fixture-owner",1),/ended or occupied/);
+await o.admission.failure;timerMock.mock.restore();
+await missing(d+"/wake.sock");assert.deepEqual(f.s.sends,[]);
+});
+
+test("owner loss while receive waits closes it and preserves observed-command recovery blocker",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const {residentAdmission}=o.activation;
+const waiting=residentAdmission(f.g,f.meta,"fixture-owner",1);
+await waitForFile(f.waiting(1));
+await fs.rename(f.waiting(1),d+"/command-1");await f.publish(1,"job-A");
+const next=await waiting;
+const receiving=residentAdmission(f.g,f.meta,"fixture-owner",1,next);
+const rejected=assert.rejects(receiving,/stopped renewing admission/);
+await waitForFile(d+"/ready-1.json");
+o.admission.expire();await rejected;await o.admission.failure;
+await missing(d+"/wake.sock");
+await assert.rejects(f.reopen("failed-resident-packet"),/Unproven resident artifacts/);
+await fs.lstat(d+"/command-observed-1.json");
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("cleanup closes an active receive before joining it",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const waiting=o.activation.residentAdmission(f.g,f.meta,"fixture-owner",1);
+await waitForFile(f.waiting(1));
+await fs.rename(f.waiting(1),d+"/command-1");await f.publish(1,"job-A");
+const next=await waiting;
+const receiving=o.activation.residentAdmission(f.g,f.meta,"fixture-owner",1,next);
+const rejected=assert.rejects(receiving,/Resident admission stopped/);
+await waitForFile(d+"/ready-1.json");
+await o.activation.stopResidentAdmission(o);await rejected;
+await missing(d+"/wake.sock");
+await fs.lstat(d+"/ready-1.json");await fs.lstat(d+"/command-observed-1.json");
+assert.equal(o.admission.expired,true);assert.equal(o.admission.deadlineAt,null);
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("owner loss preserves a concurrently published stop without claiming a clean stop",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const realTimeout=globalThis.setTimeout;
+const timerMock=t.mock.method(globalThis,"setTimeout",(fn,ms,...args)=>
+realTimeout(fn,ms===25000?100:ms,...args));
+await o.activation.residentAdmission(f.g,f.meta,"fixture-owner",1);
+timerMock.mock.restore();
+await f.stop();o.admission.expire();await o.admission.failure;
+const failure=JSON.parse(await fs.readFile(d+"/resident-failure.json"));
+assert.equal(failure.stopRequested,true);assert.equal(failure.reason,"resident_failed");
+assert.notEqual(await f.reopen("failed-resident-packet"),d);
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("owner expiry withdraws readiness even while its filesystem check is stalled",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+let release,entered=false;
+const barrier=new Promise(r=>{release=r;}),original=nativeFs.readdir;
+const hook=t.mock.method(nativeFs,"readdir",async(...args)=>{
+if(args[0]===d&&!entered){entered=true;await barrier;}
+return await original(...args);
+});
+syncBuiltinESMExports();
+try{
+const waiting=o.activation.residentAdmission(f.g,f.meta,"fixture-owner",1);
+const rejected=assert.rejects(waiting,/stopped renewing admission/);
+while(!entered)await new Promise(r=>setImmediate(r));
+o.admission.expire();
+await waitForFile(d+"/transport-audit.json");
+// The blocked filesystem reader is still live, but cannot keep advertising.
+for(let i=0;;i++){
+try{await fs.lstat(f.waiting(1));}catch(e){if(e.code==="ENOENT")break;throw e;}
+if(i>2000)throw Error("Marker was not withdrawn");
+await new Promise(r=>setImmediate(r));
+}
+await missing(d+"/wake.sock");await missing(d+"/resident-failure.json");
+release();await rejected;await o.admission.failure;
+await fs.lstat(d+"/resident-failure.json");assert.deepEqual(f.s.sends,[]);
+}finally{release();hook.mock.restore();syncBuiltinESMExports();}
+});
 
 test("interrupted unserved owner cancels and reopens without sending",async t=>{
 const f=await fixture(t),old=await f.open();
@@ -335,15 +513,12 @@ await f.stop();await serving;
 assert.deepEqual(f.s.sends,["job-A"]);
 });
 
-// A waiter that crashed leaves a marker whose heartbeat stopped; stale
-// readiness fails closed and nothing is published toward the dead waiter.
-test("stale readiness after a crashed waiter refuses to publish",async t=>{
+// Legacy crash evidence remains a blocker. No cleanup silently retires an
+// unknown marker merely because the current implementation no longer uses a child.
+test("stale readiness from a legacy waiter remains evidence",async t=>{
 const f=await fixture(t),d=await f.open();
-const waiting=f.activate(["resident-next",d,"1"]).catch(e=>e);
 const marker=f.waiting(1);
-for(let i=0;i<200;i++){try{await fs.lstat(marker);break;}catch{await pause(25);}}
-const waiter=[...f.children].find(c=>c.spawnargs.includes("resident-next"));
-waiter.kill("SIGKILL");await waiting;
+await fs.mkdir(marker,{mode:448});
 assert((await fs.lstat(marker)).isDirectory());
 // Heartbeat stopped with the process; once stale the client fails closed.
 const stale=new Date(Date.now()-6000);await fs.utimes(marker,stale,stale);
@@ -352,7 +527,7 @@ await missing(d+"/command-1.json");await missing(d+"/command-1");
 assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
 // The crash evidence stays; a later serve cannot silently take the ordinal.
 await fs.lstat(marker);
-await assert.rejects(f.serve(),/Helper failed/);
+await assert.rejects(f.serve(),/EEXIST/);
 assert.equal(f.out.find(v=>v.kind==="resident_closed")?.outcome,"resident_failed");
 assert.deepEqual(f.s.sends,[]);
 });
@@ -414,7 +589,7 @@ await fs.rename(f.waiting(1),d+"/command-1"); // The client's atomic claim.
 await f.stop();
 await pause(1500);
 assert.equal(f.out.some(v=>v.kind==="resident_closed"),false);
-await assert.rejects(serving,/Helper failed/);
+await assert.rejects(serving,/Claimed readiness never published/);
 assert.equal(f.out.find(v=>v.kind==="resident_closed")?.outcome,"resident_failed");
 await fs.lstat(d+"/command-1");await missing(d+"/command-1.json");
 assert.deepEqual(f.s.sends,[]);
@@ -429,7 +604,7 @@ const f=await fixture(t),d=await f.open(),serving=f.serve();
 await f.idle(1);
 const at=Date.now();
 await fs.rename(f.waiting(1),d+"/command-1"); // Claim, then the client is gone.
-await assert.rejects(serving,/Helper failed/);
+await assert.rejects(serving,/Claimed readiness never published/);
 assert(Date.now()-at<15000);
 assert.equal(f.out.find(v=>v.kind==="resident_closed")?.outcome,"resident_failed");
 assert.deepEqual(await fs.readdir(d+"/command-1"),[]);
@@ -453,7 +628,7 @@ const f=await fixture(t),old=await f.open(),serving=f.serve();
 await f.idle(1);
 await fs.rename(f.waiting(1),old+"/command-1"); // Claimed, then published too late.
 await f.publish(1,"job-A",1);
-await assert.rejects(serving,/Helper failed/);
+await assert.rejects(serving,/Claimed readiness never published/);
 const failure=JSON.parse(await fs.readFile(old+"/resident-failure.json","utf8"));
 assert.equal(failure.requestId,null);assert.equal(failure.heldDelivery,null);
 assert.equal(failure.stopRequested,false);
@@ -792,17 +967,17 @@ const f=await fixture(t,"helperlost"),d=await f.open(),serving=f.serve();
 await f.idle(1);
 const [served]=await Promise.allSettled([serving,f.start(1,"job-A")]);
 assert.equal(served.status,"rejected");
-assert.equal(served.reason.message,"host lost");
+assert.match(served.reason.message,/Resident delivery unresolved/);
 assert.equal(f.s.drains,2);
 assert.deepEqual(f.s.sends,[]);
 const closed=f.out.find(v=>v.kind==="resident_closed");
 assert.equal(closed.outcome,"resident_failed");
 assert.equal(closed.transportReason,"resident_failed");
 assert.deepEqual(closed.supplemental,[{step:"helper_drain",message:"host lost again"}]);
-assert.equal(closed.reconciliation,null);
+assert.deepEqual(closed.reconciliation,{requestId:"job-A",skipped:"helper_pending"});
 const failure=JSON.parse(await fs.readFile(d+"/resident-failure.json","utf8"));
 assert.equal(failure.pendingHelperSession,f.s.lostSession);
-assert.equal(failure.error.message,"host lost");
+assert.match(failure.error.message,/Resident delivery unresolved/);
 await missing(d+"/wake.sock");
 });
 
