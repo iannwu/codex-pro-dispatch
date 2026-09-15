@@ -1203,8 +1203,12 @@ if(Object.keys(stop).join(",")!=="sessionId"||stop.sessionId!==c.sessionId)
 throw Error("Invalid stop");
 // A claim that beat this stop holds the waiter here until its command appears.
 if(!await retire()){end(null,{stopped:true});return;}
-bound??=setTimeout(()=>end(Error("Claimed readiness never published; preserve evidence")),WAITER_FRESH_MS);
 }catch(e){if(e.code!=="ENOENT")throw e;}
+// The marker vanishing means a rendezvous claimed it (the watcher reports that
+// rename); its command must follow within the bound or the residence fails
+// with the claimed ticket kept as evidence.
+if(!claimed)try{await fs.lstat(marker);}catch(e){if(e.code!=="ENOENT")throw e;claimed=true;}
+if(claimed)bound??=setTimeout(()=>end(Error("Claimed readiness never published; preserve evidence")),WAITER_FRESH_MS);
 const pattern=new RegExp("^command-"+ordinal+"(?:-retry-([a-f0-9]{32}))?[.]json$");
 const found=[];
 for(const name of await fs.readdir(directory)){

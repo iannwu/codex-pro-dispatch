@@ -404,9 +404,10 @@ directory ever becomes a ticket; the waiter retires the marker with an atomic
 `rmdir` when it returns. Exactly one side wins: if the waiter has retired, the
 client fails with `Resident is not waiting for ordinal N` and creates no
 command, ticket, queue entry or send, so the same request ID can be submitted
-once a waiter exists; if the claim landed first, the waiter stays responsible
-for that publication (a stop is honored at the next ordinal) and fails the
-residence if no command follows within five seconds. A marker older than five
+once a waiter exists; if the claim landed first, the waiter notices its marker is gone, stays
+responsible for that publication (a stop is honored at the next ordinal), and
+fails the residence with the claimed ticket kept if no command follows within
+five seconds, whether or not a stop was ever published. A marker older than five
 seconds, or one that is not an owner-only directory, is `Stale resident
 readiness` and is never claimed. A marker left by a killed waiter therefore
 blocks clients once stale, makes the next `resident-next` for that ordinal

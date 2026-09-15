@@ -419,6 +419,30 @@ await fs.lstat(d+"/command-1");await missing(d+"/command-1.json");
 assert.deepEqual(f.s.sends,[]);
 });
 
+// A claimant that dies right after its atomic claim, with no stop anywhere:
+// the waiter notices its marker is gone, waits the bounded window for the
+// command, then fails the residence with the empty ticket kept. Nothing is
+// sent or replayed, and the ordinal is never silently retaken.
+test("claimant crash after the claim fails the resident within the bound",async t=>{
+const f=await fixture(t),d=await f.open(),serving=f.serve();
+await f.idle(1);
+const at=Date.now();
+await fs.rename(f.waiting(1),d+"/command-1"); // Claim, then the client is gone.
+await assert.rejects(serving,/Helper failed/);
+assert(Date.now()-at<15000);
+assert.equal(f.out.find(v=>v.kind==="resident_closed")?.outcome,"resident_failed");
+assert.deepEqual(await fs.readdir(d+"/command-1"),[]);
+await missing(d+"/command-1.json");await missing(d+"/command-observed-1.json");
+await missing(d+"/ready-1.json");await missing(d+"/resident-stop.json");
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+// No replay: the closed resident refuses clients, and the claimed ticket
+// blocks replacement while staying exactly as it was.
+await assert.rejects(f.start(1,"job-A"),/Existing rendezvous artifact/);
+await assert.rejects(f.reopen());
+assert.deepEqual(await fs.readdir(d+"/command-1"),[]);await missing(d+"/command-1.json");
+assert.deepEqual(f.s.sends,[]);
+});
+
 test("waiting for client permission creates no request or pickup deadline",async t=>{
 const f=await fixture(t),d=await f.open(),serving=f.serve();
 await f.idle(1);
