@@ -18,7 +18,8 @@ import codex_pro_dispatch as cpd
 class CoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        root = Path(self.temporary.name)
+        # Resolve only this newly created fixture, never runtime authority input.
+        root = Path(self.temporary.name).resolve(strict=True)
         self.paths = cpd.RuntimePaths(
             config_dir=root / "config",
             state_dir=root / "state",
@@ -34,6 +35,9 @@ class CoreTests(unittest.TestCase):
             self.worker_id,
             label="Official App Pro Worker",
             confirm_pro=True,
+            expected_conversation_id=(
+                self.worker_id if self.paths.worker_file.exists() else None
+            ),
             paths=self.paths,
         )
 
@@ -882,8 +886,10 @@ class CoreTests(unittest.TestCase):
 
     def test_corrupt_receipt_fails_closed(self) -> None:
         self.configure_worker()
-        self.paths.assignments_dir.mkdir(parents=True, exist_ok=True)
-        (self.paths.assignments_dir / "broken.json").write_text("not json", encoding="utf-8")
+        self.paths.assignments_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        broken = self.paths.assignments_dir / "broken.json"
+        broken.write_text("not json", encoding="utf-8")
+        broken.chmod(0o600)
         with self.assertRaises(cpd.StateError):
             cpd.prepare_assignment(
                 "Task",
@@ -989,22 +995,37 @@ class CoreTests(unittest.TestCase):
         )
         self.assertFalse(recovery["readback_correction_allowed"])
 
-    def test_force_repairs_corrupt_state(self) -> None:
+    def test_force_preserves_unclassifiable_state(self) -> None:
         self.configure_worker()
-        self.paths.assignments_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.assignments_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         broken = self.paths.assignments_dir / "broken.json"
         broken.write_text("not json", encoding="utf-8")
+        broken.chmod(0o600)
 
-        with self.assertRaises(cpd.StateError):
-            cpd.reset_worker(paths=self.paths)
-        self.assertTrue(cpd.reset_worker(force=True, paths=self.paths))
-
-        with self.assertRaises(cpd.StateError):
-            cpd.purge_local_state(paths=self.paths)
-        result = cpd.purge_local_state(force=True, paths=self.paths)
-        self.assertFalse(result["worker_removed"])
-        self.assertTrue(result["assignments_removed"])
-        self.assertFalse(broken.exists())
+        worker_before = self.paths.worker_file.read_bytes()
+        broken_before = broken.read_bytes()
+        # Intentional compatibility change: force is not an integrity override.
+        # Unreadable state cannot establish absence of foreign or armed work.
+        for force in (False, True):
+            with self.subTest(operation="reset", force=force):
+                with self.assertRaises(cpd.StateError):
+                    cpd.reset_worker(force=force, paths=self.paths)
+                self.assertEqual(
+                    self.paths.worker_file.read_bytes(), worker_before
+                )
+                self.assertEqual(broken.read_bytes(), broken_before)
+            with self.subTest(operation="purge", force=force):
+                with self.assertRaises(cpd.StateError):
+                    cpd.purge_local_state(force=force, paths=self.paths)
+                self.assertEqual(
+                    self.paths.worker_file.read_bytes(), worker_before
+                )
+                self.assertEqual(broken.read_bytes(), broken_before)
+        self.assertEqual(stat.S_IMODE(broken.stat().st_mode), 0o600)
+        self.assertEqual(
+            sorted(path.name for path in self.paths.assignments_dir.iterdir()),
+            ["broken.json"],
+        )
 
 
 if __name__ == "__main__":

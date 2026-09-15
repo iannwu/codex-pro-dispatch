@@ -13,6 +13,7 @@ from . import __version__
 from .core import (
     DispatchError,
     ConfigurationError,
+    StateError,
     _parse_result,
     _native_response,
     abandon_assignment,
@@ -62,18 +63,11 @@ def read_exact_bytes_source(path: str) -> bytes:
 
 def read_native_source(path: str) -> bytes:
     """Bound a private, unedited tool response before decoding it."""
-    parent = Path(path).parent.lstat()
-    if path == "-" or not stat.S_ISDIR(parent.st_mode) or parent.st_mode & 0o077:
-        raise ConfigurationError("Native read requires a private directory")
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as source:
-        info = os.fstat(source.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-            raise ConfigurationError("Native read requires a private regular file")
-        raw = source.read(4 * 1024 * 1024 + 1)
-    if len(raw) > 4 * 1024 * 1024:
-        raise ConfigurationError("Native read exceeds 4 MiB")
-    return raw
+    from .native_storage import read_evidence, IntegrityError
+    try:
+        return read_evidence(path)
+    except (IntegrityError, OSError):
+        raise ConfigurationError("Native evidence integrity rejected") from None
 
 
 def add_reason_source(parser: argparse.ArgumentParser) -> None:
@@ -99,11 +93,54 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    queue = subparsers.add_parser("queue", help="Private native request broker queue")
+    qs = queue.add_subparsers(dest="queue_command", required=True)
+    for name in ("submit", "check-submit"):
+        submit = qs.add_parser(name)
+        submit.add_argument("--request-id", required=True)
+        submit.add_argument("--prompt-file", default="-")
+        submit.add_argument("--client-session-id")
+    qs.add_parser("status").add_argument("request_id", nargs="?")
+    resume_check = qs.add_parser(
+        "resume-check", help="Read-only queued-resume eligibility; never submit or claim"
+    )
+    resume_check.add_argument("request_id")
+    resume_check.add_argument("--fingerprint", required=True)
+    resume_check.add_argument("--worker-conversation-id", required=True)
+    resume_check.add_argument("--client-session-id", required=True)
+    resume_check.add_argument("--raw-prompt-sha256", required=True)
+    for name in ("collect", "acknowledge", "cancel", "release"):
+        command = qs.add_parser(name)
+        command.add_argument("request_id")
+        if name == "release":
+            command.add_argument("--parent-task-id", required=True)
+    claim = qs.add_parser("claim")
+    claim.add_argument("--request-id", help="Claim only this request; never substitute another queued item")
+    claim.add_argument(
+        "--expected-worker-conversation-id",
+        help="Expected session worker; omit only for legacy/non-session callers",
+    )
+    publish = qs.add_parser("publish")
+    publish.add_argument("request_id")
+    publish.add_argument("--native-read-file")
+    observe = qs.add_parser(
+        "observe", help="Validate/publish existing post-arm native work; never send"
+    )
+    observe.add_argument("request_id")
+    observe.add_argument("--native-read-file")
+    for command in (claim, publish, observe):
+        command.add_argument("--parent-task-id", required=True)
+        command.add_argument("--native-controls-confirmed", action="store_true")
+
     worker = subparsers.add_parser("worker", help="Configure the dedicated Chat Pro worker")
     worker_sub = worker.add_subparsers(dest="worker_command", required=True)
 
     worker_set = worker_sub.add_parser("set", help="Save a user-confirmed Pro worker")
     worker_set.add_argument("--conversation-id", required=True)
+    worker_set.add_argument(
+        "--expected-conversation-id",
+        help="Required current worker ID for guarded replacement",
+    )
     worker_set.add_argument("--label", default="Codex Pro Dispatch Worker")
     worker_set.add_argument(
         "--confirm-pro",
@@ -205,6 +242,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="Show one assignment or all local state")
     status.add_argument("assignment_id", nargs="?")
+    status.add_argument(
+        "--current", action="store_true",
+        help="Current authority only; no history, at most 8192 UTF-8 bytes",
+    )
 
     doctor = subparsers.add_parser(
         "doctor", help="Check local state and the current host-capability assertion"
@@ -234,6 +275,61 @@ def worker_payload(worker: Any) -> dict[str, Any]:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     paths = default_paths()
 
+    if args.command == "queue":
+        from .queue import Queue, read_private
+        q = Queue(paths)
+        command = args.queue_command
+        if command in {"claim", "publish", "observe"} and not args.native_controls_confirmed:
+            raise StateError("Broker requires the live desktop six-capability preflight")
+        if getattr(args, "request_id", None) is not None:
+            q.path(args.request_id)  # Validate before reading any caller-selected file.
+        if command in {"submit", "check-submit"}:
+            raw = sys.stdin.buffer.read(4 * 1024 * 1024 + 1) if args.prompt_file == "-" else read_private(Path(args.prompt_file))
+            if command == "check-submit":
+                q.validate_submission(args.request_id, raw, args.client_session_id)
+                value = {"input_valid": True, "send_authorized": False}
+            else:
+                value = q.submit(args.request_id, raw, args.client_session_id)
+        elif command == "status":
+            value = q.status(args.request_id)
+        elif command == "collect":
+            value = q.collect(args.request_id)
+        elif command == "resume-check":
+            try:
+                value = q.resume_check(
+                    args.request_id, args.fingerprint,
+                    args.worker_conversation_id, args.client_session_id,
+                    args.raw_prompt_sha256,
+                )
+            except DispatchError as exc:
+                # Preserve the failure category without unbounded history details.
+                raise type(exc)(str(exc), details={
+                    "cause": type(exc).__name__,
+                }) from exc
+        elif command in {"acknowledge", "cancel"}:
+            value = q.cleanup(args.request_id, acknowledge=command == "acknowledge")
+        elif command == "release":
+            value = q.release(args.request_id, args.parent_task_id)
+        elif command == "claim":
+            value = q.claim(
+                args.parent_task_id, args.native_controls_confirmed, args.request_id,
+                expected_worker_conversation_id=args.expected_worker_conversation_id,
+            )
+        elif command == "observe":
+            native = read_native_source(args.native_read_file) if args.native_read_file else None
+            value = q.observe(
+                args.request_id,
+                args.parent_task_id,
+                args.native_controls_confirmed,
+                native,
+            )
+        else:
+            native = None
+            if args.native_read_file:
+                native = read_native_source(args.native_read_file)
+            value = q.publish(args.request_id, args.parent_task_id, args.native_controls_confirmed, native)
+        return {"ok": True, **value}
+
     if args.command == "worker":
         if args.worker_command == "set":
             if not args.native_controls_confirmed:
@@ -245,6 +341,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 args.conversation_id,
                 label=args.label,
                 confirm_pro=args.confirm_pro,
+                expected_conversation_id=args.expected_conversation_id,
                 paths=paths,
             )
             return {"ok": True, "worker": worker_payload(worker), "path": str(paths.worker_file)}
@@ -362,6 +459,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {"ok": True, "assignment": value}
 
     if args.command == "status":
+        if args.current:
+            if args.assignment_id:
+                raise ConfigurationError("--current cannot be combined with assignment_id")
+            from .core import state_lock
+            # Validate all receipts and cooldowns under one canonical lock.
+            # Omit history from the wire, not from integrity/ownership checks.
+            try:
+                with state_lock(paths, create=False) as locked:
+                    value = {
+                        "ok": True,
+                        "worker": worker_payload(load_worker(paths, _locked=locked)),
+                        "active_assignment": active_assignment(paths, _locked=locked),
+                        "active_cooldown": active_cooldown(paths, _locked=locked),
+                        "paths": {
+                            "config_dir": str(paths.config_dir),
+                            "state_dir": str(paths.state_dir),
+                        },
+                    }
+                    wire = json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+                    size = len(wire.encode("utf-8"))
+            except (DispatchError, OSError, UnicodeError, ValueError) as exc:
+                # Do not emit an unbounded list of conflicting IDs or raw state.
+                raise StateError("Current status validation failed; inspect explicit state",
+                                 details={"cause": type(exc).__name__}) from exc
+            if size > 8192:
+                raise StateError("Current status exceeds 8192 bytes; inspect explicit state")
+            return value
         if args.assignment_id:
             return {"ok": True, "assignment": load_assignment(args.assignment_id, paths)}
         worker: dict[str, Any] | None

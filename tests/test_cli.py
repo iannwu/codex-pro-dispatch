@@ -24,7 +24,9 @@ class CliTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.env = os.environ.copy()
-        self.env["CODEX_PRO_DISPATCH_HOME"] = self.temporary.name
+        self.env["CODEX_PRO_DISPATCH_HOME"] = str(
+            Path(self.temporary.name).resolve(strict=True)
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -40,6 +42,11 @@ class CliTests(unittest.TestCase):
         )
 
     def configure_and_prepare(self, assignment_id: str) -> dict[str, object]:
+        expected = (
+            ["--expected-conversation-id", "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e"]
+            if (Path(self.env["CODEX_PRO_DISPATCH_HOME"]) / "config" / "worker.json").exists()
+            else []
+        )
         worker = self.run_cli(
             "worker",
             "set",
@@ -47,6 +54,7 @@ class CliTests(unittest.TestCase):
             "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e",
             "--confirm-pro",
             "--native-controls-confirmed",
+            *expected,
         )
         self.assertEqual(worker.returncode, 0, worker.stderr)
 
@@ -473,6 +481,7 @@ class CliTests(unittest.TestCase):
         self.configure_and_prepare("dispatch-doctor-corrupt-7319")
         assignments = Path(self.temporary.name) / "state" / "assignments"
         (assignments / "broken.json").write_text("not json", encoding="utf-8")
+        (assignments / "broken.json").chmod(0o600)
 
         doctor = self.run_cli("doctor")
         self.assertEqual(doctor.returncode, 1, doctor.stderr)
@@ -554,7 +563,7 @@ class CliTests(unittest.TestCase):
         with (
             mock.patch.dict(
                 os.environ,
-                {"CODEX_PRO_DISPATCH_HOME": self.temporary.name},
+                {"CODEX_PRO_DISPATCH_HOME": self.env["CODEX_PRO_DISPATCH_HOME"]},
             ),
             mock.patch.object(cli_module.platform, "system", return_value="Linux"),
             mock.patch.object(

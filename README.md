@@ -14,18 +14,18 @@ This unofficial plugin is not affiliated with, endorsed by, or maintained by Ope
 
 ## Install
 
-**Version: v1.2.2.**
+**Version: v1.3.0-rc.1.**
 
 Run these commands in your terminal:
 
 ```bash
-codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.2.2
+codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.3.0-rc.1
 codex plugin add codex-pro-dispatch@codex-pro-dispatch
 ```
 
 You need macOS, Python 3.9 or newer, Git, and a Codex CLI with plugin support. No extra Python packages are required. The workflow runs inside the official ChatGPT desktop app for macOS with Codex. The CLI installs the plugin; it cannot run the dispatch workflow on its own.
 
-This pins v1.2.2, tested on desktop build `26.901.41600` (`7982`). App updates can affect compatibility. Every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.2.2-acceptance.md).
+This pins the v1.3.0 release candidate. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.3.0-rc.1-acceptance.md).
 
 Restart the desktop app if the plugin does not appear.
 
@@ -46,6 +46,19 @@ Use $codex-pro-dispatch to ask my ChatGPT Pro worker to review the implementatio
 ```
 
 You do **not** need a connector for reviewing content included in the prompt.
+
+### Use it from Claude Code
+
+For a source installation, register the same global skill for Claude Code:
+
+```bash
+python3 ~/.agents/skills/codex-pro-dispatch/scripts/register-claude.py
+```
+
+Then invoke `/codex-pro-dispatch` in a fresh local Claude Code task. Claude uses
+the resident listener owned by Codex. If no listener is ready, it returns the
+documented Codex setup prompt. Registration does not start a listener, grant
+shell permission, or authorize a send. See the [Claude client guide](skills/codex-pro-dispatch/references/claude-client.md).
 
 ## What happens
 
@@ -68,7 +81,7 @@ The supported workflow handles one unresolved assignment at a time. It does not 
 ## Requirements and limits
 
 - **Native macOS desktop only.** ChatGPT on the web, Codex CLI alone, IDE extensions, Windows, and Linux cannot run this workflow.
-- **Pro selected in ChatGPT.** Other model and reasoning configurations are outside the supported v1.2.2 workflow. The plugin does not select or route models.
+- **Pro selected in ChatGPT.** Other model and reasoning configurations are outside the supported v1.3.0-rc.1 workflow. The plugin does not select or route models.
 - **Compatible native controls.** The app must let Codex identify both conversations, send a message, read it back, collect a response, and restore the original task. If any required control is missing, the workflow stops.
 - **Explicit invocation.** Start requests with `$codex-pro-dispatch`.
 - **Shared context is explicit.** ChatGPT does not automatically see your Codex task, local files, uncommitted changes, or worktree. Include the relevant material in the assignment or provide authorized repository access.
@@ -122,7 +135,7 @@ For help, follow [SUPPORT.md](SUPPORT.md). Share redacted version and capability
 
 ## Verification and privacy
 
-The v1.2.2 release checks covered short responses, long responses, GitHub reads and writes, and recovery after an app restart on the tested build. Clipboard preservation was not measured, so that part of the release checks remains unverified. No clipboard API was used. Read the [release receipt](docs/releases/v1.2.2-acceptance.md) for the evidence and its limits.
+The v1.3.0-rc.1 candidate adds the resident Claude client and deterministic prompt-admission checks. Its automated suites pass, while the candidate-specific live native gates remain pending. Read the [release receipt](docs/releases/v1.3.0-rc.1-acceptance.md) for the evidence and limits.
 
 The plugin checks the answer it reads from the app’s native history, reported as `bounded_native_summary` verification. It cannot prove that this is an exact copy of the original response or independently establish that ChatGPT has finished generating. Reported repository changes require separate commit verification.
 
@@ -155,7 +168,7 @@ For a source installation, run `./uninstall.sh` from its checkout. Recovery reco
 
 ## Development and documentation
 
-This README describes the pinned v1.2.2 workflow.
+This README describes the v1.3.0-rc.1 workflow.
 
 - [Contributing](CONTRIBUTING.md): development and contribution guidance.
 - [Skill protocol](skills/codex-pro-dispatch/SKILL.md): dispatch, verification, and recovery rules.

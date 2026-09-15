@@ -47,7 +47,11 @@ verify_owned_link "$SKILL_TARGET" "$EXPECTED_SKILL"
 verify_owned_link "$LEGACY_SKILL_TARGET" "$EXPECTED_SKILL"
 
 if $PURGE_STATE; then
-  "$EXPECTED_BIN" purge --yes
+  if ! "$EXPECTED_BIN" purge --yes; then
+    echo "Purge refused; installation links and private state were retained." >&2
+    echo "To uninstall without deleting recovery state, rerun without --purge-state." >&2
+    exit 1
+  fi
 fi
 
 remove_owned_link "$BIN_TARGET" "$EXPECTED_BIN"

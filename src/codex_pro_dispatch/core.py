@@ -11,9 +11,12 @@ import re
 import secrets
 import stat
 import tempfile
+import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from .native_storage import Directory, IntegrityError, decode
 
 APP_NAME = "codex-pro-dispatch"
 SCHEMA_VERSION = 1
@@ -171,47 +174,45 @@ def _parse_utc(value: str, *, field: str) -> dt.datetime:
 
 
 def _secure_directory(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.chmod(0o700)
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if mode & 0o077:
-        raise ConfigurationError(
-            f"Directory is not private: {path}", details={"mode": oct(mode)}
-        )
-
-
-def atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    _secure_directory(path.parent)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary_path = Path(temporary_name)
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True, ensure_ascii=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
-        path.chmod(0o600)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temporary_path.unlink()
+        with Directory(path.absolute(), create=True):
+            pass
+    except (IntegrityError, OSError) as exc:
+        raise ConfigurationError("Unsafe authority directory") from exc
+
+
+def _remove_file(path):
+    with Directory(path.parent.absolute()) as directory:
+        if not directory.exists(path.name):
+            raise FileNotFoundError(str(path))
+        directory.remove(path.name)
+
+
+def atomic_write_json(path: Path, payload: Mapping[str, Any], *, _locked) -> None:
+    _locked.validate(_locked.runtime)
+    if not any(path.absolute().is_relative_to(root.absolute()) for root in
+               (_locked.runtime.state_dir, _locked.runtime.config_dir)):
+        raise StateError("Writer target is outside locked authority")
+    if "native_client" in payload:
+        raise StateError("Unsupported native-client receipt; preserve it")
+    try:
+        with Directory(path.parent.absolute(), create=True) as directory:
+            _locked.validate(_locked.runtime)
+            raw = (json.dumps(payload, indent=2, sort_keys=True,
+                              ensure_ascii=False) + "\n").encode("utf-8")
+            directory.write(path.name, raw)
+    except IntegrityError as exc:
+        raise ConfigurationError("Authority storage recovery required") from exc
 
 
 def read_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        with Directory(path.parent.absolute()) as directory:
+            value = decode(directory.read(path.name))
     except FileNotFoundError as exc:
         raise ConfigurationError(f"Missing file: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise ConfigurationError(f"Invalid JSON in {path}: {exc}") from exc
+    except (ValueError, UnicodeError) as exc:
+        raise ConfigurationError("Invalid authority JSON; recovery required") from exc
     if not isinstance(value, dict):
         raise ConfigurationError(f"Expected a JSON object in {path}")
     return value
@@ -544,19 +545,101 @@ def parse_result(
     return parsed.response, parsed.payload
 
 
+class LockedToken:
+    def __init__(self, runtime, directory, descriptor):
+        self.runtime, self.directory, self.descriptor = runtime, directory, descriptor
+        self.owner = (os.getpid(), threading.get_ident())
+        self.active = True
+        self.config_directory = None
+
+    def validate(self, runtime):
+        if (not self.active or self.runtime != runtime or
+                self.owner != (os.getpid(), threading.get_ident())):
+            raise StateError("Invalid authority lock token")
+        self.directory.revalidate()
+        if self.config_directory is None and os.path.lexists(runtime.config_dir):
+            self.config_directory = Directory(runtime.config_dir.absolute())
+        if self.config_directory is not None:
+            self.config_directory.revalidate()
+        info = os.stat("state.lock", dir_fd=self.directory.fd, follow_symlinks=False)
+        held = os.fstat(self.descriptor)
+        if (info.st_dev, info.st_ino) != (held.st_dev, held.st_ino):
+            raise StateError("Authority lock replaced")
+
+
+_lock_owners = set()
+_lock_owners_guard = threading.Lock()
+
+
 @contextlib.contextmanager
-def state_lock(paths: RuntimePaths | None = None) -> Iterable[None]:
+def state_lock(paths: RuntimePaths | None = None, *, token=None,
+               deadline=None, create=True):
     runtime = paths or default_paths()
-    _secure_directory(runtime.state_dir)
-    descriptor = os.open(runtime.lock_file, os.O_CREAT | os.O_RDWR, 0o600)
+    if token is not None:
+        token.validate(runtime)
+        yield token
+        return
+    owner = (os.getpid(), threading.get_ident(), str(runtime.state_dir.absolute()))
+    with _lock_owners_guard:
+        if owner in _lock_owners:
+            raise StateError("Recursive authority lock acquisition")
+        _lock_owners.add(owner)
     try:
-        os.fchmod(descriptor, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
+        with Directory(runtime.state_dir.absolute(), create=create) as directory:
+            try:
+                descriptor = directory.open("state.lock", os.O_RDWR, create=create)
+                if create:
+                    os.fsync(directory.fd)
+            except FileExistsError:
+                descriptor = directory.open("state.lock", os.O_RDWR)
+            locked = LockedToken(runtime, directory, descriptor)
+            try:
+                limit = deadline if deadline is not None else time.monotonic() + 30
+                while True:
+                    if time.monotonic() >= limit:
+                        raise TimeoutError("authority_lock_deadline")
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        time.sleep(min(0.01, max(0, limit - time.monotonic())))
+                locked.validate(runtime)
+                yield locked
+            finally:
+                locked.active = False
+                if locked.config_directory is not None:
+                    locked.config_directory.close()
+                os.close(descriptor)
+    except (IntegrityError, NotADirectoryError) as exc:
+        raise ConfigurationError("Authority lock integrity failure") from exc
     finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+        with _lock_owners_guard:
+            _lock_owners.discard(owner)
+
+
+def _snapshot(function):
+    import functools
+    import inspect
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def read(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        runtime = bound.arguments.get("paths") or default_paths()
+        with state_lock(runtime, token=bound.arguments.get("_locked"),
+                        create=False) as locked:
+            bound.arguments["_locked"] = locked
+            return function(*bound.args, **bound.kwargs)
+    return read
+
+
+def reservation_guard(runtime, token, assignment_id=None, parent=None, claim=None):
+    token.validate(runtime)
+    if os.path.lexists(runtime.state_dir / "native-client"):
+        raise StateError("Unsupported native-client storage; preserve it")
+    if any("native_client" in value
+           for value in list_assignments(runtime, _locked=token)):
+        raise StateError("Unsupported native-client receipt; preserve it")
 
 
 def save_worker(
@@ -564,10 +647,14 @@ def save_worker(
     *,
     label: str = "Codex Pro Dispatch Worker",
     confirm_pro: bool,
+    expected_conversation_id: str | None = None,
     paths: RuntimePaths | None = None,
+    _locked=None,
 ) -> WorkerConfig:
     runtime = paths or default_paths()
     validate_identifier(conversation_id, field="conversation_id")
+    if expected_conversation_id is not None:
+        validate_identifier(expected_conversation_id, field="expected_conversation_id")
     cleaned_label = label.strip()
     if not cleaned_label:
         raise ConfigurationError("Worker label is empty")
@@ -577,14 +664,9 @@ def save_worker(
         raise ConfigurationError(
             "The user must visibly select Pro in the worker conversation and confirm it"
         )
-    worker = WorkerConfig(
-        conversation_id=conversation_id,
-        label=cleaned_label,
-        model_confirmation="user-confirmed-pro",
-        configured_at=utc_now(),
-    )
-    with state_lock(runtime):
-        current = active_assignment(runtime)
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
+        current = active_assignment(runtime, _locked=locked)
         if current:
             raise BusyError(
                 "Cannot replace the worker while an assignment is unresolved",
@@ -593,6 +675,36 @@ def save_worker(
                     "status": current.get("status"),
                 },
             )
+        # Import after core initialization; reuse the existing authority token.
+        from .queue import Queue
+        queue = Queue(runtime)
+        with queue.locked(create=False, _locked=locked):
+            claims = [r for r in queue.records(_locked=locked) if r["state"] == "claimed"]
+        if claims:
+            raise BusyError(
+                "Cannot replace the worker while a queue claim is outstanding",
+                details={"request_id": claims[0]["request_id"], "state": "claimed"},
+            )
+        existing = load_worker(runtime, _locked=locked) if os.path.lexists(runtime.worker_file) else None
+        if expected_conversation_id is not None and (
+            existing is None or existing.conversation_id != expected_conversation_id
+        ):
+            raise StateError(
+                "Configured worker does not match expected conversation",
+                details={"expected_conversation_id": expected_conversation_id,
+                         "conversation_id": existing.conversation_id if existing else None},
+            )
+        if existing is not None:
+            if expected_conversation_id is None:
+                raise ConfigurationError("Replacing a configured worker requires expected_conversation_id")
+            if existing.conversation_id == conversation_id:
+                return existing
+        worker = WorkerConfig(
+            conversation_id=conversation_id,
+            label=cleaned_label,
+            model_confirmation="user-confirmed-pro",
+            configured_at=utc_now(),
+        )
         atomic_write_json(
             runtime.worker_file,
             {
@@ -601,12 +713,16 @@ def save_worker(
                 "label": worker.label,
                 "model_confirmation": worker.model_confirmation,
                 "configured_at": worker.configured_at,
-            },
+            }, _locked=locked,
         )
     return worker
 
 
-def load_worker(paths: RuntimePaths | None = None) -> WorkerConfig:
+@_snapshot
+def load_worker(paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
+) -> WorkerConfig:
     runtime = paths or default_paths()
     value = read_json(runtime.worker_file)
     if value.get("schema_version") != SCHEMA_VERSION:
@@ -639,8 +755,11 @@ def assignment_path(assignment_id: str, paths: RuntimePaths | None = None) -> Pa
     return runtime.assignments_dir / f"{assignment_id}.json"
 
 
+@_snapshot
 def load_assignment(
-    assignment_id: str, paths: RuntimePaths | None = None
+    assignment_id: str, paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
 ) -> dict[str, Any]:
     path = assignment_path(assignment_id, paths)
     value = read_json(path)
@@ -657,17 +776,24 @@ def _save_assignment(
     assignment_id: str,
     value: Mapping[str, Any],
     paths: RuntimePaths | None = None,
+    *,
+    _locked,
 ) -> Path:
+    _locked.validate(paths or default_paths())
     path = assignment_path(assignment_id, paths)
     payload = dict(value)
     payload["schema_version"] = SCHEMA_VERSION
     payload["assignment_id"] = assignment_id
     payload["updated_at"] = utc_now()
-    atomic_write_json(path, payload)
+    atomic_write_json(path, payload, _locked=_locked)
     return path
 
 
-def list_assignments(paths: RuntimePaths | None = None) -> list[dict[str, Any]]:
+@_snapshot
+def list_assignments(paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
+) -> list[dict[str, Any]]:
     runtime = paths or default_paths()
     if not runtime.assignments_dir.exists():
         return []
@@ -690,11 +816,15 @@ def list_assignments(paths: RuntimePaths | None = None) -> list[dict[str, Any]]:
     return sorted(values, key=lambda value: str(value.get("created_at", "")))
 
 
-def redact_stored_diagnostics(paths: RuntimePaths | None = None) -> int:
+def redact_stored_diagnostics(paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
+) -> int:
     """Durably remove raw diagnostic bodies written by releases before v1.1."""
     runtime = paths or default_paths()
     redacted_count = 0
-    with state_lock(runtime):
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
         if not runtime.assignments_dir.exists():
             return 0
         for path in sorted(runtime.assignments_dir.glob("*.json")):
@@ -709,14 +839,18 @@ def redact_stored_diagnostics(paths: RuntimePaths | None = None) -> int:
                 )
             redacted, changed = _redact_diagnostic_fields(value)
             if changed:
-                atomic_write_json(path, redacted)
+                atomic_write_json(path, redacted, _locked=locked)
                 redacted_count += 1
     return redacted_count
 
 
-def active_assignment(paths: RuntimePaths | None = None) -> dict[str, Any] | None:
+@_snapshot
+def active_assignment(paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
+) -> dict[str, Any] | None:
     active = [
-        value for value in list_assignments(paths) if value.get("status") in ACTIVE_STATUSES
+        value for value in list_assignments(paths, _locked=_locked) if value.get("status") in ACTIVE_STATUSES
     ]
     if len(active) > 1:
         raise StateError(
@@ -726,10 +860,12 @@ def active_assignment(paths: RuntimePaths | None = None) -> dict[str, Any] | Non
     return active[0] if active else None
 
 
+@_snapshot
 def active_cooldown(
     paths: RuntimePaths | None = None,
     *,
     now: dt.datetime | None = None,
+    _locked=None,
 ) -> dict[str, Any] | None:
     """Return the latest unexpired native unusual-activity cooldown."""
     current = now or dt.datetime.now(dt.timezone.utc)
@@ -737,7 +873,7 @@ def active_cooldown(
         raise ConfigurationError("Cooldown comparison time must include a timezone")
     current = current.astimezone(dt.timezone.utc)
     active: list[tuple[dt.datetime, dict[str, Any]]] = []
-    for value in list_assignments(paths):
+    for value in list_assignments(paths, _locked=_locked):
         cooldown_until = value.get("cooldown_until")
         if not cooldown_until:
             continue
@@ -801,20 +937,23 @@ def prepare_assignment(
     continuation_of: str | None = None,
     assignment_id: str | None = None,
     paths: RuntimePaths | None = None,
+    queue_claim_token: str | None = None,
+    _locked=None,
 ) -> PreparedAssignment:
     runtime = paths or default_paths()
     validate_identifier(parent_task_id, field="parent_task_id")
     resolved_id = assignment_id if assignment_id is not None else new_assignment_id()
     validate_identifier(resolved_id, field="assignment_id")
 
-    with state_lock(runtime):
-        worker = load_worker(runtime)
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
+        worker = load_worker(runtime, _locked=locked)
         if assignment_path(resolved_id, runtime).exists():
             raise StateError(
                 "Assignment ID already exists; refusing a possible duplicate submission",
                 details={"assignment_id": resolved_id},
             )
-        existing_active = active_assignment(runtime)
+        existing_active = active_assignment(runtime, _locked=locked)
         if existing_active:
             _reject_legacy_active_assignment(existing_active, operation="prepare")
             raise BusyError(
@@ -824,7 +963,7 @@ def prepare_assignment(
                     "status": existing_active.get("status"),
                 },
             )
-        cooldown = active_cooldown(runtime)
+        cooldown = active_cooldown(runtime, _locked=locked)
         if cooldown:
             raise CooldownError(
                 "Native ChatGPT HTTP 403 cooldown is still active",
@@ -834,7 +973,7 @@ def prepare_assignment(
         previous: dict[str, Any] | None = None
         if continuation_of:
             validate_identifier(continuation_of, field="continuation_of")
-            previous = load_assignment(continuation_of, runtime)
+            previous = load_assignment(continuation_of, runtime, _locked=locked)
             if previous.get("status") != "complete":
                 raise StateError(
                     "Continuation requires a completed prior assignment",
@@ -867,7 +1006,9 @@ def prepare_assignment(
         }
         if continuation_of:
             receipt["continuation_of"] = continuation_of
-        path = _save_assignment(resolved_id, receipt, runtime)
+        if queue_claim_token is not None:
+            receipt["queue_claim_token"] = queue_claim_token
+        path = _save_assignment(resolved_id, receipt, runtime, _locked=locked)
 
     return PreparedAssignment(
         assignment_id=resolved_id,
@@ -886,11 +1027,13 @@ def _transition(
     target: str,
     updates: Mapping[str, Any] | None = None,
     paths: RuntimePaths | None = None,
+    _locked=None,
 ) -> dict[str, Any]:
     runtime = paths or default_paths()
     validate_status(target)
-    with state_lock(runtime):
-        value = load_assignment(assignment_id, runtime)
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
+        value = load_assignment(assignment_id, runtime, _locked=locked)
         current = str(value["status"])
         if target != "abandoned":
             _reject_legacy_active_assignment(value, operation=target)
@@ -900,18 +1043,20 @@ def _transition(
                 details={"assignment_id": assignment_id, "status": current},
             )
         if target == "armed":
-            active_assignment(runtime)  # Reject multiple unresolved assignments.
-            if active_cooldown(runtime):
+            active_assignment(runtime, _locked=locked)  # Reject multiple unresolved assignments.
+            if active_cooldown(runtime, _locked=locked):
                 raise CooldownError("Native unusual-activity cooldown blocks arming")
         value["status"] = target
         if updates:
             value.update(dict(updates))
-        _save_assignment(assignment_id, value, runtime)
+        _save_assignment(assignment_id, value, runtime, _locked=locked)
         return value
 
 
 def arm_assignment(
-    assignment_id: str, paths: RuntimePaths | None = None
+    assignment_id: str, paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
 ) -> dict[str, Any]:
     """Durably prohibit resends immediately before the one native send attempt."""
     return _transition(
@@ -919,7 +1064,7 @@ def arm_assignment(
         allowed={"prepared"},
         target="armed",
         updates={"armed_at": utc_now(), "no_resend": True},
-        paths=paths,
+        paths=paths, _locked=_locked,
     )
 
 
@@ -927,10 +1072,13 @@ def mark_submitted(
     assignment_id: str,
     sent_prompt: str,
     paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
 ) -> dict[str, Any]:
     runtime = paths or default_paths()
-    with state_lock(runtime):
-        value = load_assignment(assignment_id, runtime)
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
+        value = load_assignment(assignment_id, runtime, _locked=locked)
         _reject_legacy_active_assignment(value, operation="submitted")
         current = str(value.get("status"))
         submission_count = int(value.get("submission_count", 0))
@@ -1015,7 +1163,7 @@ def mark_submitted(
                 value.pop("readback_correction_allowed", None)
                 value.pop("readback_correction_kind", None)
             value["last_error_kind"] = "native-readback-mismatch"
-            _save_assignment(assignment_id, value, runtime)
+            _save_assignment(assignment_id, value, runtime, _locked=locked)
             raise StateError(
                 "Submitted prompt failed exact read-back verification; never resend",
                 details={
@@ -1044,19 +1192,21 @@ def mark_submitted(
             value.pop("readback_correction_allowed", None)
         if is_late_verification or is_readback_correction:
             value["submission_recovered_from"] = current
-        _save_assignment(assignment_id, value, runtime)
+        _save_assignment(assignment_id, value, runtime, _locked=locked)
         return value
 
 
 def mark_pending(
-    assignment_id: str, paths: RuntimePaths | None = None
+    assignment_id: str, paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
 ) -> dict[str, Any]:
     return _transition(
         assignment_id,
         allowed={"submitted"},
         target="pending",
         updates={"pending_since": utc_now()},
-        paths=paths,
+        paths=paths, _locked=_locked,
     )
 
 
@@ -1065,6 +1215,7 @@ def mark_indeterminate(
     *,
     reason: str,
     paths: RuntimePaths | None = None,
+    _locked=None,
 ) -> dict[str, Any]:
     cleaned = reason.strip()
     if not cleaned:
@@ -1079,7 +1230,7 @@ def mark_indeterminate(
             "submission_may_have_occurred": True,
             "no_resend": True,
         },
-        paths=paths,
+        paths=paths, _locked=_locked,
     )
 
 
@@ -1089,6 +1240,7 @@ def mark_unusual_activity_403(
     reason: str,
     request_id: str | None = None,
     paths: RuntimePaths | None = None,
+    _locked=None,
 ) -> dict[str, Any]:
     """Record a native unusual-activity HTTP 403 and start a fixed cooldown."""
     cleaned = reason.strip()
@@ -1101,8 +1253,9 @@ def mark_unusual_activity_403(
         )
     runtime = paths or default_paths()
     allowed = {"armed", "submitted", "pending", "ambiguous", "indeterminate"}
-    with state_lock(runtime):
-        value = load_assignment(assignment_id, runtime)
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
+        value = load_assignment(assignment_id, runtime, _locked=locked)
         _reject_legacy_active_assignment(value, operation="unusual-activity")
         current = str(value["status"])
         if current not in allowed:
@@ -1114,7 +1267,7 @@ def mark_unusual_activity_403(
         if value.get("native_error_kind") == "openai-unusual-activity":
             if cleaned_request_id and not value.get("openai_request_id"):
                 value["openai_request_id"] = cleaned_request_id
-                _save_assignment(assignment_id, value, runtime)
+                _save_assignment(assignment_id, value, runtime, _locked=locked)
             return value
 
         started = dt.datetime.now(dt.timezone.utc)
@@ -1137,7 +1290,7 @@ def mark_unusual_activity_403(
         )
         if cleaned_request_id:
             value["openai_request_id"] = cleaned_request_id
-        _save_assignment(assignment_id, value, runtime)
+        _save_assignment(assignment_id, value, runtime, _locked=locked)
         return value
 
 
@@ -1146,6 +1299,7 @@ def mark_ambiguous(
     *,
     reason: str,
     paths: RuntimePaths | None = None,
+    _locked=None,
 ) -> dict[str, Any]:
     cleaned = reason.strip()
     if not cleaned:
@@ -1159,7 +1313,7 @@ def mark_ambiguous(
             "last_error_sha256": sha256_text(cleaned),
             "no_resend": True,
         },
-        paths=paths,
+        paths=paths, _locked=_locked,
     )
 
 
@@ -1168,6 +1322,7 @@ def abandon_assignment(
     *,
     reason: str,
     paths: RuntimePaths | None = None,
+    _locked=None,
 ) -> dict[str, Any]:
     cleaned = reason.strip()
     if not cleaned:
@@ -1181,7 +1336,7 @@ def abandon_assignment(
             "abandon_reason_kind": "user-authorized",
             "abandon_reason_sha256": sha256_text(cleaned),
         },
-        paths=paths,
+        paths=paths, _locked=_locked,
     )
 
 
@@ -1296,12 +1451,14 @@ def complete_assignment(
     expected_chunk_index: int | str | None = None,
     truncated: bool | None = None,
     native_read: bytes | None = None,
+    _locked=None,
 ) -> tuple[dict[str, Any], str]:
     runtime = paths or default_paths()
     raw = _response_bytes(response)
 
-    with state_lock(runtime):
-        value = load_assignment(assignment_id, runtime)
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
+        value = load_assignment(assignment_id, runtime, _locked=locked)
         current = str(value["status"])
         _reject_legacy_active_assignment(value, operation="complete")
         native_collection = None
@@ -1359,14 +1516,17 @@ def complete_assignment(
         if native_collection:
             value["native_collection"] = native_collection
         value["no_resend"] = True
-        _save_assignment(assignment_id, value, runtime)
-        return load_assignment(assignment_id, runtime), parsed.payload
+        _save_assignment(assignment_id, value, runtime, _locked=locked)
+        return load_assignment(assignment_id, runtime, _locked=locked), parsed.payload
 
 
+@_snapshot
 def recovery_info(
-    assignment_id: str, paths: RuntimePaths | None = None
+    assignment_id: str, paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
 ) -> dict[str, Any]:
-    value = load_assignment(assignment_id, paths)
+    value = load_assignment(assignment_id, paths, _locked=_locked)
     recovery = {
         "assignment_id": assignment_id,
         "status": value["status"],
@@ -1399,19 +1559,21 @@ def recovery_info(
     ):
         if value.get(field) is not None:
             recovery[field] = value[field]
-    cooldown = active_cooldown(paths)
+    cooldown = active_cooldown(paths, _locked=_locked)
     if cooldown and cooldown.get("assignment_id") == assignment_id:
         recovery["active_cooldown"] = cooldown
     return recovery
 
 
 def reset_worker(
-    *, force: bool = False, paths: RuntimePaths | None = None
+    *, force: bool = False, paths: RuntimePaths | None = None,
+    _locked=None,
 ) -> bool:
     runtime = paths or default_paths()
-    with state_lock(runtime):
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
         if not force:
-            current = active_assignment(runtime)
+            current = active_assignment(runtime, _locked=locked)
             if current:
                 raise BusyError(
                     "Cannot reset the worker while an assignment is unresolved",
@@ -1421,19 +1583,23 @@ def reset_worker(
                     },
                 )
         try:
-            runtime.worker_file.unlink()
+            _remove_file(runtime.worker_file)
             return True
         except FileNotFoundError:
             return False
 
 
 def purge_local_state(
-    *, force: bool = False, paths: RuntimePaths | None = None
+    *, force: bool = False, paths: RuntimePaths | None = None,
+    _locked=None,
 ) -> dict[str, bool]:
     runtime = paths or default_paths()
-    with state_lock(runtime):
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked)
+        if os.path.lexists(runtime.state_dir / "queue"):
+            raise StateError("Cannot purge while queue records exist; preserve queue receipts")
         if not force:
-            current = active_assignment(runtime)
+            current = active_assignment(runtime, _locked=locked)
             if current:
                 raise BusyError(
                     "Cannot purge local state while an assignment is unresolved",
@@ -1442,16 +1608,16 @@ def purge_local_state(
                         "status": current.get("status"),
                     },
                 )
-            if active_cooldown(runtime):
+            if active_cooldown(runtime, _locked=locked):
                 raise CooldownError("Cannot purge receipts while a native cooldown is active")
         worker_removed = False
         assignments_removed = False
         with contextlib.suppress(FileNotFoundError):
-            runtime.worker_file.unlink()
+            _remove_file(runtime.worker_file)
             worker_removed = True
         if runtime.assignments_dir.exists():
             for path in runtime.assignments_dir.glob("*.json"):
-                path.unlink()
+                _remove_file(path)
             with contextlib.suppress(OSError):
                 runtime.assignments_dir.rmdir()
             assignments_removed = True

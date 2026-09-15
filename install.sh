@@ -69,6 +69,31 @@ refuse_unowned_target() {
 refuse_unowned_target "$BIN_TARGET" "$EXPECTED_BIN"
 refuse_unowned_target "$SKILL_TARGET" "$EXPECTED_SKILL"
 
+command -v node >/dev/null || {
+  echo "Node.js is required for the parked client; install Node.js separately." >&2
+  exit 1
+}
+if ! node --input-type=module - <<'JS'
+import { readFile, mkdtemp } from "node:fs/promises";
+import { createServer, createConnection } from "node:net";
+import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
+if ([readFile, mkdtemp, createServer, createConnection, randomBytes, execFile]
+    .some(value => typeof value !== "function"))
+  throw Error("Required Node.js standard-library functions are unavailable");
+JS
+then
+  echo "Node.js standard-library preflight failed." >&2
+  exit 1
+fi
+for name in parked-runner.js parked-socket.mjs parked-client.mjs parked-activation.mjs; do
+  source_file="${EXPECTED_SKILL}/scripts/${name}"
+  if [[ ! -f "$source_file" || -L "$source_file" ]]; then
+    echo "Missing regular packaged script: $source_file" >&2
+    exit 1
+  fi
+done
+
 mkdir -p "$BIN_DIR" "${HOME}/.agents/skills"
 chmod +x "$EXPECTED_BIN"
 
@@ -83,5 +108,7 @@ echo "Installed source-visible links:"
 echo "  $BIN_TARGET -> $EXPECTED_BIN"
 echo "  $SKILL_TARGET -> $EXPECTED_SKILL"
 echo
-echo "Next: restart Codex if the skill is not immediately visible, then invoke:"
+echo "No native session was started and no worker configuration was changed."
+echo "If skill discovery is unavailable, stop; do not restart the app."
+echo "After native ownership and qualification gates pass, invoke explicitly:"
 echo "  \$codex-pro-dispatch"

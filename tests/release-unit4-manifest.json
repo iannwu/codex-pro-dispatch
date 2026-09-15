@@ -1,0 +1,98 @@
+{
+  "assembly_context": {
+    "__init__.py": "9c0cfa0e4501af630d6f57d764b9659fe857711e5f5a3f09b0e7a12a13e572ac",
+    "cli.py": "79c995b436067ef8ec01630cc4a272f11a4851a134ebe06c9f1f62509e70202c",
+    "core.py": "1be05776685e73fe6f4dea77ca1e6f8b03761a6fdd3776b05b929c18a0ba829a",
+    "native_storage.py": "87ab304fa2b9e39162b05f09f0285c0b24e8419cd94ffe9584d25221f0a7a144",
+    "queue.py": "71af30b560532cdc6506c4f9ba1d4cd1ff48192a9ee94abb4f6a2a1771334a99"
+  },
+  "baseline": "860876820ef52e7d3ffc62e626de213b527fe710",
+  "reviewed_active_job_update": {
+    "previous_runtime_pins": {
+      "skills/codex-pro-dispatch/scripts/parked-runner.js": "044d9d4f56d8b363f72c486aea61d3734d0b233019457b9b871c3ae11e4b4f3f",
+      "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "2fcd0913911c0d58a8421b4a5152feabdf839a58eedfcb3da41ab1363d8b563f"
+    },
+    "reason": "Accepted-request check-ins allowed; empty-session polling forbidden"
+  },
+  "reviewed_current_status_update": {
+    "previous_runtime_pins": {
+      "skills/codex-pro-dispatch/scripts/parked-client.mjs": "b1e8d2cb284381670e19c0c88fd281706110c59a6b8c6e50f8424a4c734d0494",
+      "skills/codex-pro-dispatch/scripts/parked-runner.js": "0fe3a66d00c661a3ddd40c2e9e407d2d73732fd0e7ab5f84364aadd134c22959"
+    },
+    "reason": "Bound current authority output; retain complete canonical validation"
+  },
+  "reviewed_queued_resume_update": {
+    "previous_runtime_pins": {
+      "skills/codex-pro-dispatch/scripts/parked-client.mjs": "321ad045a2a08a65d39adcc2431f16040392dc4e528bbf36647e358b0583ec29"
+    },
+    "reason": "Explicit evidence-bound first delivery of an untouched queued request; no post-arm retry"
+  },
+  "runtime": {
+    "skills/codex-pro-dispatch/scripts/parked-client.mjs": "f77698abac3f59ba0da48a39dfe6a4d8e3583f26b8d16b5e58975be2ecb22d27",
+    "skills/codex-pro-dispatch/scripts/parked-runner.js": "e9731cc362f7929cf9993bb256554a2377e089edc780d457ef7306c6de211a44",
+    "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "cdb435ff84dbb13774b0e69dde77c1b8da4b11819500f87ffb313c26549480a2"
+  },
+  "schema_version": 1,
+  "scope": "Source assembly only; runtime tests and native qualification separate",
+  "tests": {
+    "tests/test_parked_delivery_integration.mjs": {
+      "cases": [
+        "actual delivery: CLI errors, evidence bytes, identity, collection",
+        "pending then explicit actual collect-only recovery, without another send",
+        "lost publication reply preserves the actual published answer",
+        "native send error uses real indeterminate CLI and preserved reason",
+        "different runner authority is rejected before claim or native work",
+        "active delivery automatically observes pending work without a second send",
+        "active observation budget exhaustion preserves armed collect-only work",
+        "large history stays off the native wire without changing one-send behavior"
+      ],
+      "pin_origin": "reviewed bounded-current-status patch",
+      "sha256": "9ed5888dedf3738490ee03745e77866e270488a288c381dfe5fd8627ee71e594"
+    },
+    "tests/test_parked_queued_resume.mjs": {
+      "cases": [
+        "closed queued replacement preserves immediate and ancestor evidence",
+        "concurrent closed queued opens allow one replacement only",
+        "closed queued proof rejects altered audit, command, readiness and prompt",
+        "new canonical receipt after packet generation prevents replacement",
+        "changed closed evidence after generation cannot consume replacement marker",
+        "wrong broker and retained delivery still block closed queued replacement",
+        "explicit queued resume makes one first send and reuses the listener for B",
+        "duplicate gates and altered observation cannot produce a queued resume",
+        "a receipt appearing after command-ready blocks wake even when already armed",
+        "expired resume command stops without receive, resubmission or rearming",
+        "retained-config mismatch or a recreated socket path defeats closure proof"
+      ],
+      "pin_origin": "reviewed closed queued-resume patch; actual local CLI/fs/socket and synthetic native tools",
+      "sha256": "e4f6a7f1d49b536421ce5aa27452ed430a65b9b2fa60e94fba23fe7dacc0be8a"
+    },
+    "tests/test_parked_runner.cjs": {
+      "cases": [
+        "fresh job: one arm/send, raw snapshots, pending then publication",
+        "post-arm recovery never arms or sends",
+        "staged recovery uses stored history without a new native read",
+        "already published collection performs no native work",
+        "send error preserves uncertainty and never attempts a second send",
+        "observation slice ends pending without cancellation or resend",
+        "navigation failure does not discard the published answer",
+        "wrong native target prevents arm and send",
+        "invalid request identity is rejected before tool execution",
+        "replacement worker IDs, not labels, govern a fresh runner",
+        "recovery keeps the session worker and never repeats arm or send",
+        "a mismatched claimed worker is rejected before native work",
+        "real CLI fences a replaced session and completes only on its new stable worker"
+      ],
+      "pin_origin": "captured_for_unit4; no prior test hash supplied",
+      "sha256": "40e531aa109bd392af9fe46f76f0499306ab0d672d7145b62e26ede62c55ded0"
+    },
+    "tests/test_parked_socket.mjs": {
+      "cases": [
+        "real submit/observe/collect/ack; socket cannot forge an answer",
+        "pending recovery uses actual post-arm metadata and explicit observe",
+        "busy rejection stores B only in canonical queue, never auto-delivers it"
+      ],
+      "pin_origin": "captured_for_unit4; no prior test hash supplied",
+      "sha256": "d31b67ebdf5d0b4ed2db647fc90b0ebc57e50a7b6b1f7825fd6815023d455e89"
+    }
+  }
+}
