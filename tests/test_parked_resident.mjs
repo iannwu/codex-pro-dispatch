@@ -41,7 +41,7 @@ async function json(file,args){
 const r=await run(file,args);assert.equal(r.exit_code,0,r.output);return JSON.parse(r.output);
 }
 const cli=args=>json("python3",[root+"bin/pro-dispatch",...args]);
-const activate=args=>json(process.execPath,[author,...args]);
+const activate=(args,preload=[])=>json(process.execPath,[...preload,author,...args]);
 t.after(async()=>{
 try{
 await g.parkedSocket?.close("unit_cleanup");
@@ -181,12 +181,13 @@ ordinal:2,requestId:"job-B",clientSessionId:"unit-client",nonce:"2".repeat(32),
 deadlineAt:Date.now()+30000,promptSha256:createHash("sha256").update(raw).digest("hex"),
 pid:process.pid,ppid:process.ppid}),{mode:384});
 }
-return {g,meta,s,out,cli,open,serve,start,stop,repeat,reopen,activate,d,children,
+const waiting=n=>g.parkedResident.directory+"/waiting-"+n+"."+g.parkedResident.socket.config.sessionId;
+return {g,meta,s,out,cli,open,serve,start,stop,repeat,reopen,activate,d,children,waiting,
 // Idle means resident-next N is executing and has proven it is waiting.
 idle:async n=>{
 await until(()=>s.waits>=n);
 for(let i=0;;i++){
-if((await fs.readdir(g.parkedResident.directory)).some(v=>/^waiting-\d+[.]json$/.test(v)))return;
+if((await fs.readdir(g.parkedResident.directory)).some(v=>/^waiting-\d+[.][a-f0-9]{32}$/.test(v)))return;
 if(i>=200)throw Error("Resident never proved it was waiting");
 await pause(25);
 }
@@ -314,10 +315,13 @@ test("open socket without an active waiter refuses to publish a command",async t
 const f=await fixture(t),d=await f.open();
 await fs.lstat(d+"/wake.sock");
 await assert.rejects(f.start(1,"job-A"),/not waiting for ordinal 1; do not publish/);
-// A forged or foreign marker is not readiness either.
-await fs.writeFile(d+"/waiting-1.json",J({sessionId:"0".repeat(32),ordinal:1,pid:1}),{mode:384});
+// A foreign session's marker or a forged file is not readiness either.
+await fs.mkdir(d+"/waiting-1."+"0".repeat(32),{mode:448});
+await assert.rejects(f.start(1,"job-A"),/not waiting for ordinal 1; do not publish/);
+await fs.rmdir(d+"/waiting-1."+"0".repeat(32));
+await fs.writeFile(f.waiting(1),"{}",{mode:384});
 await assert.rejects(f.start(1,"job-A"),/Stale resident readiness for ordinal 1; do not publish/);
-await fs.rm(d+"/waiting-1.json");
+await fs.rm(f.waiting(1));
 await missing(d+"/command-1.json");await missing(d+"/command-1");
 await missing(d+"/command-observed-1.json");await missing(d+"/ready-1.json");
 assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
@@ -335,12 +339,11 @@ assert.deepEqual(f.s.sends,["job-A"]);
 test("stale readiness after a crashed waiter refuses to publish",async t=>{
 const f=await fixture(t),d=await f.open();
 const waiting=f.activate(["resident-next",d,"1"]).catch(e=>e);
-const marker=d+"/waiting-1.json";
+const marker=f.waiting(1);
 for(let i=0;i<200;i++){try{await fs.lstat(marker);break;}catch{await pause(25);}}
 const waiter=[...f.children].find(c=>c.spawnargs.includes("resident-next"));
 waiter.kill("SIGKILL");await waiting;
-const v=JSON.parse(await fs.readFile(marker,"utf8"));
-assert.equal(v.ordinal,1);assert.equal(v.sessionId,f.g.parkedResident.socket.config.sessionId);
+assert((await fs.lstat(marker)).isDirectory());
 // Heartbeat stopped with the process; once stale the client fails closed.
 const stale=new Date(Date.now()-6000);await fs.utimes(marker,stale,stale);
 await assert.rejects(f.start(1,"job-A"),/Stale resident readiness for ordinal 1; do not publish/);
@@ -350,6 +353,69 @@ assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
 await fs.lstat(marker);
 await assert.rejects(f.serve(),/Helper failed/);
 assert.equal(f.out.find(v=>v.kind==="resident_closed")?.outcome,"resident_failed");
+assert.deepEqual(f.s.sends,[]);
+});
+
+// The decisive boundary: the client has read fresh readiness but not yet
+// claimed it when the production waiter returns. Retirement and claim are both
+// atomic on one marker, so the client finds nothing to claim and creates no
+// ticket, command, queue request or send; the same request ID then completes
+// once a real waiter exists again.
+test("waiter exit between readiness and publication leaves nothing behind",async t=>{
+const f=await fixture(t),old=await f.open(),first=f.serve();
+await f.idle(1);
+const hook=f.d+"/claim-pause.cjs",paused=f.d+"/paused",release=f.d+"/release";
+// Child-only barrier inside the client: after its freshness read, before its claim.
+await fs.writeFile(hook,`
+const fs=require("node:fs/promises"),{existsSync}=require("node:fs");
+const rename=fs.rename;
+fs.rename=async function(from,to){
+if(from===${J(f.waiting(1))}){
+await fs.writeFile(${J(paused)},"");
+const limit=Date.now()+20000;
+while(!existsSync(${J(release)})){
+if(Date.now()>limit)throw Error("Fixture barrier timed out");
+await new Promise(r=>setTimeout(r,10));
+}
+}
+return rename(from,to);
+};
+require("node:module").syncBuiltinESMExports();
+`);
+const client=assert.rejects(f.activate(["rendezvous",old,"1","job-A",f.d+"/prompt.txt","unit-client"],
+["--require",hook]),/not waiting for ordinal 1; do not publish/);
+for(let i=0;;i++){try{await fs.lstat(paused);break;}catch{if(i>=400)throw Error("Client never paused");await pause(25);}}
+// The waiter returns while the client is paused, so retirement wins the race.
+await f.stop();await first;
+await missing(f.waiting(1));
+await fs.writeFile(release,"");
+await client;
+await missing(old+"/command-1");await missing(old+"/command-1.json");
+await missing(old+"/command-observed-1.json");await missing(old+"/ready-1.json");
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+assert.deepEqual(f.s.sends,[]);
+// Nothing was burned: the same request ID completes through a real waiter.
+assert.notEqual(await f.reopen(),old);
+const second=f.serve();await f.idle(2);
+await f.start(1,"job-A");await f.idle(3);
+assert.equal((await f.cli(["queue","collect","job-A"])).state,"published");
+await f.stop();await second;
+assert.deepEqual(f.s.sends,["job-A"]);
+});
+
+// The other side of the same race: a claim that lands before the stop keeps
+// the waiter responsible for that publication instead of returning stopped.
+// A claimant that never publishes fails the residence with the ticket kept.
+test("claimed waiter stays past a later stop until its command is published",async t=>{
+const f=await fixture(t),d=await f.open(),serving=f.serve();
+await f.idle(1);
+await fs.rename(f.waiting(1),d+"/command-1"); // The client's atomic claim.
+await f.stop();
+await pause(1500);
+assert.equal(f.out.some(v=>v.kind==="resident_closed"),false);
+await assert.rejects(serving,/Helper failed/);
+assert.equal(f.out.find(v=>v.kind==="resident_closed")?.outcome,"resident_failed");
+await fs.lstat(d+"/command-1");await missing(d+"/command-1.json");
 assert.deepEqual(f.s.sends,[]);
 });
 

@@ -66,8 +66,8 @@ const activate=(...args)=>run(process.execPath,[scripts+"parked-activation.mjs",
 const beats=new Set();
 async function waiting(ordinal){
 if(!resident)return;
-const marker=session+"/waiting-"+ordinal+".json";
-try{await fs.writeFile(marker,JSON.stringify({sessionId:socket.config.sessionId,ordinal,pid:process.pid}),{flag:"wx",mode:384});}
+const marker=session+"/waiting-"+ordinal+"."+socket.config.sessionId;
+try{await fs.mkdir(marker,{mode:448});}
 catch(e){if(e.code!=="EEXIST")throw e;}
 beats.add(setInterval(()=>fs.utimes(marker,new Date(),new Date()).catch(()=>{}),1000));
 }

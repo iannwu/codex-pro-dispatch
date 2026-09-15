@@ -1084,10 +1084,10 @@ await absent(directory+"/ready-"+ordinal+".json");
 await absent(directory+"/command-observed-"+ordinal+".json");
 const name="command-"+ordinal+(attempt===undefined?"":"-retry-"+attempt);
 await absent(directory+"/"+name+".json");
-// Publish only toward a resident-next that is waiting for this ordinal now.
-if(c.resident===true)await activeWaiter(directory,ordinal,c);
-const ticket=directory+"/"+name;
-await fs.mkdir(ticket,{mode:448}); // Exclusive attempt marker; never remove to retry.
+const ticket=directory+"/"+name; // Exclusive attempt marker; never remove to retry.
+// A resident ticket is the claimed readiness of the waiter it publishes toward.
+if(c.resident===true)await claimWaiter(directory,ordinal,c,ticket);
+else await fs.mkdir(ticket,{mode:448});
 const snapshot=ticket+"/prompt.txt";
 if(!resume){
 await fs.writeFile(snapshot,raw,{flag:"wx",mode:384});
@@ -1154,17 +1154,24 @@ await publishResidentStop(directory,c.sessionId);
 return {stopRequested:true,sessionId:c.sessionId};
 }
 
-// A live waiter is proven by waiting-N.json whose mtime this process keeps
-// fresh; a crashed or ended waiter goes stale within WAITER_FRESH_MS and an
-// open socket alone never counts as readiness.
+// Readiness for ordinal N of one session is the empty owner-only directory
+// waiting-N.<sessionId>, whose mtime the waiting resident-next keeps fresh.
+// A rendezvous claims it by renaming it into its ticket; the waiter retires
+// it with rmdir. Both are atomic, so exactly one side wins: a retired waiter
+// leaves nothing to claim (no ticket exists), and a waiter that loses the
+// race sees ENOENT and stays responsible for observing that publication. A
+// killed waiter cannot retire; its marker goes stale within WAITER_FRESH_MS.
 const WAITER_FRESH_MS=5000;
-async function activeWaiter(directory,ordinal,c){
-const path=directory+"/waiting-"+ordinal+".json";
-let v,stat;
-try{v=JSON.parse((await privateBytes(path,4096)).toString("utf8"));stat=await fs.lstat(path);}
-catch(e){if(e.code!=="ENOENT")throw e;throw Error("Resident is not waiting for ordinal "+ordinal+"; do not publish");}
-if(v.sessionId!==c.sessionId||v.ordinal!==ordinal||Date.now()-stat.mtimeMs>WAITER_FRESH_MS)
+const waiterPath=(directory,ordinal,sessionId)=>directory+"/waiting-"+ordinal+"."+sessionId;
+async function claimWaiter(directory,ordinal,c,ticket){
+const marker=waiterPath(directory,ordinal,c.sessionId);
+const gone=()=>Error("Resident is not waiting for ordinal "+ordinal+"; do not publish");
+let stat;
+try{stat=await fs.lstat(marker);}catch(e){if(e.code!=="ENOENT")throw e;throw gone();}
+if(!stat.isDirectory()||stat.uid!==ownerUid||(stat.mode&511)!==448||Date.now()-stat.mtimeMs>WAITER_FRESH_MS)
 throw Error("Stale resident readiness for ordinal "+ordinal+"; do not publish");
+await absent(ticket);
+try{await fs.rename(marker,ticket);}catch(e){if(e.code!=="ENOENT")throw e;throw gone();}
 }
 
 async function residentNext(directory,ordinal){
@@ -1172,14 +1179,18 @@ const c=await rendezvousSession(directory,ordinal,"resident-next");
 if(c.resident!==true||c.helper!==helper)throw Error("Resident mismatch");
 await absent(directory+"/ready-"+ordinal+".json");
 await absent(directory+"/command-observed-"+ordinal+".json");
-const marker=directory+"/waiting-"+ordinal+".json";
-await fs.writeFile(marker,J({sessionId:c.sessionId,ordinal,pid:process.pid}),{flag:"wx",mode:384});
+const marker=waiterPath(directory,ordinal,c.sessionId);
+await fs.mkdir(marker,{mode:448});
 const beat=setInterval(()=>fs.utimes(marker,new Date(),new Date()).catch(()=>{}),1000);
-let choice;
+let claimed=false,choice;
+async function retire(){
+if(!claimed)try{await fs.rmdir(marker);}catch(e){if(e.code!=="ENOENT")throw e;claimed=true;}
+return claimed;
+}
 try{
 choice=await new Promise((resolve,reject)=>{
-let done=false,busy=false,again=false;
-function end(e,v){if(done)return;done=true;w.close();e?reject(e):resolve(v);}
+let done=false,busy=false,again=false,bound;
+function end(e,v){if(done)return;done=true;clearTimeout(bound);w.close();e?reject(e):resolve(v);}
 const w=watch(directory,()=>{again=true;void check();});
 w.on("error",e=>end(e));
 async function check(){
@@ -1190,7 +1201,9 @@ try{
 const stop=JSON.parse((await privateBytes(directory+"/resident-stop.json",4096)).toString("utf8"));
 if(Object.keys(stop).join(",")!=="sessionId"||stop.sessionId!==c.sessionId)
 throw Error("Invalid stop");
-end(null,{stopped:true});return;
+// A claim that beat this stop holds the waiter here until its command appears.
+if(!await retire()){end(null,{stopped:true});return;}
+bound??=setTimeout(()=>end(Error("Claimed readiness never published; preserve evidence")),WAITER_FRESH_MS);
 }catch(e){if(e.code!=="ENOENT")throw e;}
 const pattern=new RegExp("^command-"+ordinal+"(?:-retry-([a-f0-9]{32}))?[.]json$");
 const found=[];
@@ -1209,7 +1222,7 @@ finally{busy=false;if(again&&!done)void check();}
 }
 void check();
 });
-}finally{clearInterval(beat);await fs.rm(marker,{force:true});}
+}finally{clearInterval(beat);await retire();}
 if(choice.stopped)return {...choice,sessionId:c.sessionId};
 const s=await cli(["status","--current"]),q=await cli(["queue","status"]);
 if(s.paths?.state_dir!==c.stateDir||s.paths?.config_dir!==c.configDir||

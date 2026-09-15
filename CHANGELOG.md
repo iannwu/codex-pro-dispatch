@@ -27,11 +27,14 @@ this is not a stable or public release.
   separately, refuse further admission after an unresolved delivery, and let
   collect-only observation publish an already-complete receipt whose queue
   history was never staged.
-- Make resident readiness explicit: `resident-next` proves it is waiting for
-  the exact next ordinal with a heartbeat marker, and a resident rendezvous
-  refuses to publish a command toward an open socket without a live waiter or
-  with stale readiness, so nothing is burned and the same request can be
-  submitted once service is actually waiting.
+- Make resident readiness explicit and claimed: `resident-next` proves it is
+  waiting for the exact next ordinal with a heartbeat marker that a resident
+  rendezvous atomically claims as its command ticket, while the waiter retires
+  it atomically on return. A client that finds no live waiter, stale
+  readiness, or a waiter that returned before the claim publishes nothing, so
+  nothing is burned and the same request can be submitted once service is
+  actually waiting; a waiter whose readiness was claimed stays to observe that
+  publication.
 
 ## [1.2.2] - 2026-09-05
 

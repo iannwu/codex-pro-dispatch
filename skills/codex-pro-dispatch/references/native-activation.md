@@ -396,16 +396,22 @@ but serve can process eligible requests within the authorized consultation
 scope. Keep that owning execution active; a socket alone is not readiness.
 
 Readiness is enforced, not assumed: while `resident-next` waits for ordinal N
-it keeps `waiting-N.json` (session ID, ordinal, pid) beside `session.json`
-with a one-second heartbeat on its mtime and removes it when it returns. A
-resident `rendezvous` (including retry and queued resume) publishes a command
-only after reading a matching marker fresher than five seconds; otherwise it
-fails with `Resident is not waiting for ordinal N` or `Stale resident
-readiness`, creating no command, ticket, queue entry or send, so the same
-request ID can be submitted once a waiter exists. A marker left by a crashed
-or terminated waiter goes stale within that window, blocks clients, makes the
-next `resident-next` for that ordinal fail, and stays in place as evidence
-(`closed-resident-packet` then refuses the directory as unproven artifacts).
+it keeps the empty owner-only directory `waiting-N.<session ID>` beside
+`session.json` with a one-second heartbeat on its mtime. A resident
+`rendezvous` (including retry and queued resume) claims that marker by
+atomically renaming it into its command ticket, and only that claimed
+directory ever becomes a ticket; the waiter retires the marker with an atomic
+`rmdir` when it returns. Exactly one side wins: if the waiter has retired, the
+client fails with `Resident is not waiting for ordinal N` and creates no
+command, ticket, queue entry or send, so the same request ID can be submitted
+once a waiter exists; if the claim landed first, the waiter stays responsible
+for that publication (a stop is honored at the next ordinal) and fails the
+residence if no command follows within five seconds. A marker older than five
+seconds, or one that is not an owner-only directory, is `Stale resident
+readiness` and is never claimed. A marker left by a killed waiter therefore
+blocks clients once stale, makes the next `resident-next` for that ordinal
+fail, and stays in place as evidence (`closed-resident-packet` then refuses
+the directory as unproven artifacts).
 
 Use the returned `SESSION` to give Claude the exact rendezvous command below.
 Claude must obtain any required command permission before executing it. Do
