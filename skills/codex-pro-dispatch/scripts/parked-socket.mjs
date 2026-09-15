@@ -185,10 +185,12 @@ export async function openSession(directory, trusted) {
         await ended;
       }
       active = null;
+      // The first close reason is immutable. A resident that ends here did not
+      // stop cleanly; finite sessions keep their historical label.
       if (retired || disposition === "blocked" ||
           result.pending_helper_session != null ||
           result.restoration?.status === "failed_or_unverified")
-        await close("retired_after_job");
+        await close(resident ? "resident_failed" : "retired_after_job");
       return { closed: closing !== null, reservedRequestId: reserved };
     }
   };

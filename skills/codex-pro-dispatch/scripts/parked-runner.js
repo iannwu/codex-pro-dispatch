@@ -1,4 +1,22 @@
 // @exec: {"yield_time_ms":1000}
+// Structural failure record shared by the runner and the generated resident
+// code. Tool exceptions can come from another realm, so no instanceof checks;
+// Error instances otherwise serialize as {}.
+globalThis.describeFailure = function describeFailure(error, depth = 0) {
+  if (error === null || typeof error !== "object") {
+    return error === undefined ? null : { message: String(error) };
+  }
+  if (typeof error.message !== "string" && typeof error.stack !== "string")
+    return error;
+  return {
+    name: typeof error.name === "string" ? error.name : null,
+    message: String(error.message),
+    stack: typeof error.stack === "string" ? error.stack : null,
+    cause: depth < 3 ? describeFailure(error.cause, depth + 1) : null,
+    detail: error.detail === undefined ? null : error.detail
+  };
+};
+
 globalThis.runParkedJob = async function runParkedJob(config, requestId) {
   const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
   const validPath = value =>
@@ -31,6 +49,8 @@ globalThis.runParkedJob = async function runParkedJob(config, requestId) {
     return error;
   }
 
+  // The deployed tools return one text block. The block text is the payload
+  // to decode; the surrounding envelope is preserved before decoding.
   function nativeText(value) {
     if (!value || value.isError === true ||
         !Array.isArray(value.content) || value.content.length !== 1 ||
@@ -39,6 +59,24 @@ globalThis.runParkedJob = async function runParkedJob(config, requestId) {
       throw problem("Unsupported or failed native tool result", value);
     }
     return value.content[0].text;
+  }
+
+  // A send acknowledgment is not a submission record. Only the two evidenced
+  // success variants are accepted: the retained incident acknowledgment
+  // {"threadId": <bound worker>} and the identity-free {} acknowledgment.
+  // Everything else is preserved for diagnostic review, never resent.
+  function acknowledged(sent) {
+    if (!sent || sent.isError === true) {
+      throw problem("Native send needs diagnostic review; never resend", sent);
+    }
+    let value;
+    try { value = JSON.parse(nativeText(sent)); } catch { value = undefined; }
+    const keys = value && typeof value === "object" && !Array.isArray(value) ?
+      Object.keys(value) : null;
+    if (!keys || !(keys.length === 0 ||
+        (keys.length === 1 && value.threadId === config.worker))) {
+      throw problem("Unsupported native send acknowledgment; never resend", sent);
+    }
   }
 
   function bound(value) {
@@ -109,12 +147,42 @@ const raw=${JSON.stringify(raw)};
 const handle=await fs.open(path,"wx",0o600);
 try { await handle.writeFile(raw,"utf8"); await handle.sync(); }
 finally { await handle.close(); }
+const parent=await fs.open(${JSON.stringify(directory)},"r");
+try { await parent.sync(); } finally { await parent.close(); }
 console.log(JSON.stringify({path}));
 }`;
-    const saved = JSON.parse(nativeText(await tools.mcp__node_repl__js({
+    const ack = await tools.mcp__node_repl__js({
       code, timeout_ms: 30000, title: "Preserve native evidence"
-    })));
-    if (saved.path !== path) throw Error("Evidence path mismatch");
+    });
+    let saved;
+    try { saved = JSON.parse(nativeText(ack)); } catch { saved = null; }
+    if (saved?.path === path) return path;
+    // The exclusive write may have completed although its acknowledgment did
+    // not decode. Never rewrite it; confirm the exact bytes and sync the file
+    // and its directory, and stop when durability still cannot be confirmed.
+    const verification = await tools.mcp__node_repl__js({
+      code: `{
+const fs=await import("node:fs/promises");
+const path=${JSON.stringify(path)};
+const raw=${JSON.stringify(raw)};
+const handle=await fs.open(path,"r");
+try {
+  if (await handle.readFile("utf8")!==raw) throw Error("Evidence bytes differ");
+  await handle.sync();
+} finally { await handle.close(); }
+const parent=await fs.open(${JSON.stringify(directory)},"r");
+try { await parent.sync(); } finally { await parent.close(); }
+console.log(JSON.stringify({verified:true}));
+}`, timeout_ms: 30000, title: "Verify native evidence"
+    });
+    let verified;
+    try { verified = JSON.parse(nativeText(verification)); } catch { verified = null; }
+    if (verified?.verified !== true) {
+      throw problem("Evidence persistence unconfirmed", {
+        path, acknowledgment: ack, verification
+      });
+    }
+    trace.push({ kind: "evidence_verified", path });
     return path;
   }
 
@@ -124,11 +192,20 @@ console.log(JSON.stringify({path}));
     const response = await tools.mcp__codex_app__read_thread({
       threadId: config.worker, turnLimit: 2, maxOutputCharsPerItem: 20000
     });
-    const raw = nativeText(response);
+    // The original envelope and operation identity are preserved before any
+    // extraction; the extracted history bytes follow for the helper.
+    const envelope = await evidence(JSON.stringify({
+      operation: "read_thread", request_id: requestId, phase,
+      worker_conversation_id: config.worker, startedAt, returnedAt: Date.now(),
+      result: response
+    }));
+    let raw;
+    try { raw = nativeText(response); }
+    catch (error) { error.evidence = envelope; throw error; }
     const path = await evidence(raw);
     let value;
     try { value = JSON.parse(raw); }
-    catch { throw Error("Native inner history is not JSON"); }
+    catch { throw problem("Native inner history is not JSON", { path }); }
     if (value.schemaVersion !== 1 ||
         value.thread?.kind !== "chatgpt" ||
         value.thread?.id !== config.worker) {
@@ -211,10 +288,12 @@ console.log(JSON.stringify({path}));
         const sent = await tools.mcp__codex_app__send_message_to_thread({
           threadId: config.worker, prompt: claim.wrapped_prompt
         });
-        await evidence(JSON.stringify(sent));
-        if (!sent || sent.isError === true) {
-          throw problem("Native send needs diagnostic review; never resend", sent);
-        }
+        await evidence(JSON.stringify({
+          operation: "send_message_to_thread", request_id: requestId, phase,
+          worker_conversation_id: config.worker, returnedAt: Date.now(),
+          result: sent
+        }));
+        acknowledged(sent);
       } else {
         potentiallyArmed = true;
       }
@@ -253,9 +332,15 @@ console.log(JSON.stringify({path}));
     };
     try {
       result.error_evidence = await evidence(JSON.stringify({
-        phase, error: String(error.message || error), detail: error.detail ?? null
+        phase, request_id: requestId, parent_task_id: config.parent,
+        worker_conversation_id: config.worker, at: Date.now(),
+        error: describeFailure(error), envelope_evidence: error.evidence ?? null
       }));
-    } catch { result.evidence_write_failed = true; }
+    } catch (persistence) {
+      // The original error stays in the result; the persistence failure is
+      // supplemental.
+      result.evidence_write_failed = describeFailure(persistence);
+    }
 
     // Preserve post-arm uncertainty, but never alter a completed receipt.
     if (potentiallyArmed && !published && pendingCommand === null) {
@@ -353,7 +438,7 @@ globalThis.runParkedDelivery = async function runParkedDelivery(config, delivery
   } catch (error) {
     result = {
       request_id: delivery.requestId, observation: "blocked",
-      error: String(error.message || error)
+      error: String(error.message || error), failure: describeFailure(error)
     };
   }
 

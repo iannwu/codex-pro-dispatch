@@ -24,8 +24,8 @@ const dir=await fs.realpath(dirname(fileURLToPath(import.meta.url)));
 const ownerUid=typeof process==="undefined"?(await fs.stat(dir)).uid:process.getuid();
 const helper=join(dir,"pro-dispatch"),J=JSON.stringify;
 const pins={
-  "parked-runner.js":"e9731cc362f7929cf9993bb256554a2377e089edc780d457ef7306c6de211a44",
-"parked-socket.mjs":"cdb435ff84dbb13774b0e69dde77c1b8da4b11819500f87ffb313c26549480a2",
+  "parked-runner.js":"781cf78be08efa025efd86e07fa1d43f1e1639f73bd43b291ab15d1441368860",
+"parked-socket.mjs":"65b791760427c44ddd5afdf4756e02d73b886cd15dfe3028ed6b0dbbb2135ffc",
 "parked-client.mjs":"f77698abac3f59ba0da48a39dfe6a4d8e3583f26b8d16b5e58975be2ecb22d27"
 };
 const sources={};
@@ -670,14 +670,17 @@ throw Error("Owner changed");
 }`;
 const quote=v=>"'"+String(v).replace(/'/g,"'\\''")+"'";
 const residentCommand=[process.execPath,fileURLToPath(import.meta.url)]
-.map(quote).join(" ");
+.map(quote).join(" "),helperCommand=["python3",helper].map(quote).join(" ");
 const serve=resident?`// @exec: {"yield_time_ms":1000}
 const host=tools;
 {
+// Decode one text block; keep the undecodable envelope on the failure.
 function value(r){
 if(r?.isError===true||!Array.isArray(r?.content)||r.content.length!==1||
-r.content[0].type!=="text")throw Error("Invalid tool result");
-return JSON.parse(r.content[0].text);
+r.content[0].type!=="text"||typeof r.content[0].text!=="string")
+throw Object.assign(Error("Invalid tool result"),{detail:r});
+try{return JSON.parse(r.content[0].text);}
+catch(e){throw Object.assign(Error("Invalid tool result"),{detail:r,cause:e});}
 }
 const guard=${J(ownerGuard)},quote=${quote.toString()};
 async function native(code){
@@ -694,12 +697,17 @@ mcp__codex_app__send_message_to_thread:a=>checked(x=>host.mcp__codex_app__send_m
 mcp__codex_app__navigate_to_codex_page:a=>checked(x=>host.mcp__codex_app__navigate_to_codex_page(x),a),
 mcp__node_repl__js:a=>host.mcp__node_repl__js({...a,code:guard+a.code+guard})
 };
-${sources["parked-runner.js"].replace("globalThis.runParkedJob =","const runParkedJob =")
+${sources["parked-runner.js"].replace("globalThis.describeFailure =","const describeFailure =")
+.replace("globalThis.runParkedJob =","const runParkedJob =")
 .replace("globalThis.runParkedDelivery =","const runParkedDelivery =")}
-let claimed=false,pending=null;
-async function command(args){
+// Service ends as resident_failed unless an explicit stop was observed with
+// no delivery left unresolved. Failure wins over a simultaneous stop request.
+// The invocation token binds serve ownership to this exact evaluation.
+const invocation=Date.now().toString(36)+Math.random().toString(36).slice(2);
+let claimed=false,pending=null,stopped=false,failure=null,owner=null,current=null;
+async function command(args,executable=${J(residentCommand)}){
 let r=await host.exec_command({
-cmd:${J(residentCommand)}+" "+args.map(quote).join(" "),
+cmd:executable+" "+args.map(quote).join(" "),
 login:false,tty:false,yield_time_ms:30000,max_output_tokens:4096
 }),out="";
 for(;;){
@@ -718,18 +726,39 @@ r=await host.write_stdin({session_id:pending,chars:"",
 yield_time_ms:30000,max_output_tokens:4096});
 }
 }
+// Ownership proof for cleanup and claim recovery: same parent, this exact
+// invocation token, retained descriptor. It runs without the turn gate: a
+// changed turn is itself a failure that still needs its socket closed.
+const cleanup=async code=>value(await host.mcp__node_repl__js({
+code:"{"+code+"}",timeout_ms:60000,title:"Resident close"}));
+const ownerCode=\`const o=globalThis.parkedResident;
+if(nodeRepl.requestMeta?.threadId!==${J(broker)}||o?.attempt!==${J(openAttempt)}||
+o.used!==true||o.serveInvocation!==\${JSON.stringify(invocation)}||o.binding?.broker!==${J(broker)}||
+JSON.stringify(o.socket.config)!==o.descriptor)
+throw Error("Wrong cleanup owner");
+const fs=await import("node:fs/promises");\`;
+const identity='console.log(JSON.stringify({directory:o.directory,sessionId:o.socket.config.sessionId}));';
 try{
-const owner=await native(\`{
+try{
+owner=await native(\`{
 const o=globalThis.parkedResident;
 if(o.used||globalThis.parkedDelivery!==null)throw Error("Serve consumed");
-o.used=true;
-console.log(JSON.stringify({directory:o.directory,sessionId:o.socket.config.sessionId}));
-}\`);
+o.used=true;o.serveInvocation=\${JSON.stringify(invocation)};
+\`+identity+'}');
+}catch(e){
+// The claim may have succeeded although its acknowledgment was lost. Only
+// the invocation whose token the owner records cleans up; a duplicate serve
+// never closes the running owner.
+owner=await cleanup(ownerCode+identity).catch(()=>null);
+if(owner===null)throw e;
+claimed=true;
+throw e;
+}
 claimed=true;
 for(let ordinal=1;ordinal<=64;ordinal++){
 const next=await command(["resident-next",owner.directory,ordinal]);
 if(next.sessionId!==owner.sessionId)throw Error("Session mismatch");
-if(next.stopped===true)break;
+if(next.stopped===true){stopped=true;break;}
 await native('console.log("{}");');
 const ready=await command(["command-ready",owner.directory,ordinal,next.command.requestId,
 ...(next.attempt?[next.attempt]:[])]);
@@ -748,46 +777,110 @@ console.log(JSON.stringify(globalThis.parkedDelivery));
 if(!delivery||delivery.sessionId!==owner.sessionId||
 delivery.requestId!==ready.requestId||delivery.operation!=="run")
 throw Error("Delivery/gate mismatch");
+current=delivery.requestId;
 const completed=await runParkedDelivery({
 ...${J(trusted)},sessionId:owner.sessionId,preflightConfirmed:true,restoreParent:false
 },delivery);
-const transport=value(completed.transport),result=completed.result;
-if(!["published","acknowledged"].includes(result.observation||result.state))
-text((${runnerReceipt.toString()})(result));
-if(!["published","acknowledged"].includes(result.observation||result.state)||
-result.ok!==true||result.pending_helper_session!=null||
+// The runner result exists before its transport reply is decoded; capture
+// its unresolved helper first, report the receipt even when that reply is
+// undecodable, then fail the residence.
+const result=completed.result,receipt=(${runnerReceipt.toString()})(result);
+pending??=result?.pending_helper_session??null;
+const terminal=["published","acknowledged"].includes(receipt.state);
+let transport;
+try{transport=value(completed.transport);}
+catch(e){text(receipt);throw e;}
+if(!terminal)text(receipt);
+if(!terminal||result.ok!==true||result.pending_helper_session!=null||
 !["native_navigation_returned","not_requested"].includes(result.restoration?.status)||
-transport.closed!==false||transport.reservedRequestId!==null)break;
+transport.closed!==false||transport.reservedRequestId!==null)
+throw Object.assign(Error("Resident delivery unresolved; collect-only recovery required"),
+{detail:{receipt,transport}});
 await native(\`{
 if(globalThis.parkedDelivery?.callId!==\${JSON.stringify(delivery.callId)})
 throw Error("Delivery changed");
 globalThis.parkedDelivery=null;
 console.log("{}");
 }\`);
+current=null;
 }
-}finally{
+}catch(e){failure=e;}
+finally{
 if(claimed){
+const report={kind:"resident_closed",outcome:null,transportReason:null,reconciliation:null,supplemental:[]};
+const supplement=(step,e)=>report.supplemental.push({step,error:describeFailure(e)});
+// 1. Join an unresolved helper execution before touching canonical state.
+if(pending!==null)try{
+const r=await host.write_stdin({session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096});
+if(r.exit_code!==undefined)pending=null;else supplement("helper_drain",{message:"Helper still pending",detail:r});
+}catch(e){supplement("helper_drain",e);}
+// 2. Persist the failure summary unless this is a proven clean stop: observed
+// explicit stop, no failure, no pending helper, no held delivery. The stop
+// file is never published here; only a client publishes it.
+const failurePath=owner.directory+"/resident-failure.json";
+const summarize=error=>({sessionId:owner.sessionId,at:Date.now(),reason:"resident_failed",
+stopRequested:stopped,pendingHelperSession:pending,requestId:current,error:describeFailure(error)});
+const summary=stopped&&failure===null&&pending===null?null:
+summarize(failure??Error("Resident service ended without an explicit stop"));
+// REPL snippet: persist a non-null summary exclusively beside session.json.
+const persist=\`if(summary!==null){
+const h=await fs.open(\${JSON.stringify(failurePath)},"wx",0o600);
+try{await h.writeFile(JSON.stringify({...summary,heldDelivery:globalThis.parkedDelivery}),"utf8");await h.sync();}
+finally{await h.close();}
+const d=await fs.open(o.directory,"r");
+try{await d.sync();}finally{await d.close();}
+}\`;
+let held=null,recorded=false;
 try{
-text(value(await host.mcp__node_repl__js({
-code:\`{
-const o=globalThis.parkedResident;
-if(nodeRepl.requestMeta?.threadId!==${J(broker)}||o?.attempt!==${J(openAttempt)}||
-o.used!==true||o.binding?.broker!==${J(broker)}||
-JSON.stringify(o.socket.config)!==o.descriptor)
-throw Error("Wrong cleanup owner");
-const fs=await import("node:fs/promises");
-${publishResidentStop.toString()}
-try{await publishResidentStop(o.directory,o.socket.config.sessionId);}
-catch(e){if(e.code!=="EEXIST")throw e;}
-finally{await o.socket.close("resident_stopped");}
-console.log(JSON.stringify({closed:true}));
-}\`,timeout_ms:60000,title:"Resident stop"
-})));
-}finally{
-if(pending!==null)text({session_id:pending,cleanup:await host.write_stdin({
-session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096})});
+const persisted=await cleanup(ownerCode+\`
+let summary=\${JSON.stringify(summary)};
+if(summary===null)try{
+if(globalThis.parkedDelivery!==null)throw Error("Held delivery blocks a clean stop");
+const stop=JSON.parse(await fs.readFile(o.directory+"/resident-stop.json","utf8"));
+if(stop.sessionId!==o.socket.config.sessionId)throw Error("Stop evidence mismatch");
+}catch(e){summary={sessionId:o.socket.config.sessionId,at:Date.now(),reason:"resident_failed",
+stopRequested:true,pendingHelperSession:null,requestId:null,error:{name:e.name,message:String(e.message),stack:e.stack??null}};}
+\`+persist+\`
+console.log(JSON.stringify({outcome:summary===null?"resident_stopped":"resident_failed",
+held:globalThis.parkedDelivery?.requestId??null}));\`);
+report.outcome=persisted.outcome;held=persisted.held;recorded=persisted.outcome==="resident_failed";
+}catch(e){report.outcome="resident_failed";supplement("failure_summary",e);}
+// 3. Reconcile the captured request's canonical receipt through the existing
+// locked indeterminate transition; completed receipts are preserved.
+const rid=current??held;
+if(report.outcome==="resident_failed"&&rid!==null){
+if(pending!==null)report.reconciliation={requestId:rid,skipped:"helper_pending"};
+else try{
+const a=(await command(["status",rid],${J(helperCommand)})).assignment;
+if(!a)report.reconciliation={requestId:rid,receipt:null};
+else if(a.parent_task_id!==${J(parent)}||a.worker_conversation_id!==${J(worker)})
+report.reconciliation={requestId:rid,receipt:a.status,skipped:"association_mismatch"};
+else if(["armed","submitted","pending","ambiguous"].includes(a.status)){
+const v=await command(["indeterminate",rid,"--reason-file",failurePath],${J(helperCommand)});
+report.reconciliation={requestId:rid,receipt:v.assignment?.status??null,transition:"indeterminate",from:a.status};
+}else report.reconciliation={requestId:rid,receipt:a.status,transition:null};
+}catch(e){report.reconciliation={requestId:rid,skipped:"helper_failed"};supplement("reconciliation",e);}
 }
+// 4. Close the owned socket. Its first audit reason is immutable and may
+// differ from the service outcome; report both. An unconfirmed close or
+// audit is a failed service even after a clean stop.
+try{
+const closed=await cleanup(ownerCode+\`
+await o.socket.close(\${JSON.stringify(report.outcome)});
+console.log(JSON.stringify({closed:true,
+transportReason:JSON.parse(await fs.readFile(o.directory+"/transport-audit.json","utf8")).reason}));\`);
+report.transportReason=closed.transportReason;
+}catch(e){
+report.outcome="resident_failed";supplement("socket_close",e);
+// A clean stop that fails to close is still a failed residence on disk.
+if(!recorded)try{
+await cleanup(ownerCode+"const summary="+JSON.stringify({...summarize(e),cleanupStep:"socket_close"})+";"+persist+'console.log("{}");');
+}catch(e2){supplement("failure_summary",e2);}
 }
+text({...report,supplemental:report.supplemental.map(v=>({step:v.step,message:v.error?.message??null}))});
+if(failure===null&&report.supplemental.length)failure=Object.assign(Error("Resident cleanup incomplete"),{detail:report.supplemental});
+}
+if(failure!==null)throw failure;
 }
 }
 `:undefined;

@@ -308,6 +308,59 @@ Report actionable service failures to the owner without replaying a request.
 
 Do not restart a consumed open/serve call. A returned pending/blocked result, failed navigation, unresolved helper or owner mismatch stops service rather than authorizing another send. Preserve held delivery and canonical state. Forced host termination has no proven teardown guarantee.
 
+### Failed residence
+
+Serve closes its socket as `resident_stopped` only after it observed the
+explicit stop with no failure, no pending helper and no held delivery. Every
+other ending—an exception, an undecodable tool result, a pending or blocked
+delivery, an unresolved helper, a changed owner or turn, a stop request that
+races a failure—closes as `resident_failed` and writes
+`resident-failure.json` (exclusive, synced) beside `session.json` with the
+error name, message, stack, cause, the undecodable tool result when there is
+one, the captured request ID and the held delivery. Serve never publishes the
+stop file itself; an existing client stop request stays as evidence.
+
+Failure finalization runs in a fixed order: any unresolved helper execution—
+serve's own or the runner's `pending_helper_session`, captured before the
+transport reply is decoded—is joined once (never raced with another writer);
+the failure summary is persisted; the captured request's canonical receipt is
+inspected with `status` and, when it is still `armed`, `submitted`, `pending`
+or `ambiguous`, moved through the existing locked `indeterminate` transition
+using the failure file as its reason—`complete` and already `indeterminate`
+receipts are preserved, and reconciliation is skipped and reported while a
+helper remains pending; finally the owned socket is closed. The
+`resident_closed` report separates the service outcome from the transport
+audit reason, which is immutable and may already read differently (for
+example `idle_expired`); the reason is reported only once the audit confirms
+it, and an unconfirmed close or audit turns even a clean stop into
+`resident_failed`—in that case the close failure itself is persisted as
+`resident-failure.json` (`cleanupStep: "socket_close"`) unless a primary
+failure record already exists, which is never rewritten. Cleanup problems are
+supplemental to the primary error and never replace it. Cleanup and claim recovery share one ownership proof—same
+parent broker, this invocation's token, the retained descriptor—evaluated
+without the per-turn gate, so a serve claim whose acknowledgment was lost
+still fails closed after a turn change while a duplicate serve, holding no
+token, never closes the running owner.
+
+The runner preserves every native envelope with its operation identity in
+the private evidence directory before decoding; an ambiguous evidence
+acknowledgment is confirmed by reading the file's exact bytes and syncing
+the file and its directory, and if any of that fails it stops pre-arm
+progress or enters post-arm failure handling without repeating any write or
+native operation. Only the two evidenced send
+acknowledgments are accepted: `{"threadId": <bound worker>}` and `{}`; any
+other shape is collect-only. Nothing is resent and `submission_count` is
+never inferred from a send acknowledgment.
+
+A failed residence admits no further request: its held delivery is retained,
+`resident-next` is not called again, and later published commands remain
+unobserved evidence. `closed-resident-packet` refuses a `resident_failed`
+audit, as does canonical occupancy. Recover the affected request through its
+original request ID only: `pro-dispatch status "$RID"`, then collect-only
+observation with one read-only history (see native-request-broker.md), or
+explicitly authorized abandonment. Historical `resident_stopped` audits from
+earlier code are unchanged and, alone, still do not authorize replacement.
+
 ### Bounded actual-Claude qualification
 
 Authorize actual Claude once to perform the sequence below. The parent only starts open/serve, preserves evidence and retrieves the original cell afterward. Do not prepublish B or have the parent impersonate Claude.

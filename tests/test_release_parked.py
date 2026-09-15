@@ -78,7 +78,7 @@ class ReleaseParkedTests(unittest.TestCase):
         self.assertEqual(set(manifest["runtime"]), RUNTIME_NAMES)
         self.assertEqual(set(manifest["tests"]), TEST_NAMES)
         self.assertEqual(
-            sum(len(v["cases"]) for v in manifest["tests"].values()), 35
+            sum(len(v["cases"]) for v in manifest["tests"].values()), 59
         )
         pins = dict(manifest["runtime"])
         pins.update({k: v["sha256"] for k, v in manifest["tests"].items()})

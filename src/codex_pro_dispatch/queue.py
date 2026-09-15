@@ -449,9 +449,10 @@ class Queue:
                 if native_read is not None and native_read != staged_bytes:
                     raise core.StateError("Staged native history is immutable")
                 native_read = staged_bytes
-            elif receipt["status"] == "complete":
-                raise core.StateError("Completed broker receipt lacks staged history")
             elif native_read is None:
+                # A complete receipt without a stage (core completed while the
+                # queue publication was lost) is recovered from a read-only
+                # history fetch that must match the immutable receipt below.
                 raise core.StateError("No native snapshot or staged history")
 
             if len(native_read) > 4 * 1024 * 1024:
@@ -533,10 +534,16 @@ class Queue:
                     r["blocked_reason"] = "native-result-rejected"
                     self.save(r, _locked=locked)
                 raise
+            completed = None
             if staged is None:
+                if receipt["status"] == "complete":
+                    # Immutable response/message-identity revalidation must
+                    # precede staging, or a conflicting history would become
+                    # an immutable poisoned stage. This call does not mutate.
+                    completed = core.complete_assignment(rid, b"", self.paths, native_read=native_read, _locked=locked)
                 r["native_read"] = native_read.decode("utf-8")
                 self.save(r, _locked=locked)  # Durable before the core completion transition.
-            value, payload = core.complete_assignment(rid, b"", self.paths, native_read=native_read, _locked=locked)
+            value, payload = completed or core.complete_assignment(rid, b"", self.paths, native_read=native_read, _locked=locked)
             if value.get("verification_level") != "bounded_native_summary":
                 raise core.StateError("Queue requires native verification")
             if r["state"] == "published":

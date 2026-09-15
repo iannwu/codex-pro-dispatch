@@ -16,6 +16,17 @@ this is not a stable or public release.
   and at-most-once sending.
 - Add client setup, native lifecycle, compatibility, packaging, and admission
   regression coverage for the candidate.
+- Preserve every native tool envelope with its operation identity before
+  decoding, verify ambiguous evidence writes byte-for-byte and stop when
+  persistence is unconfirmed, accept only the two evidenced send
+  acknowledgment shapes without inferring a submission, reconcile unresolved
+  post-arm receipts to `indeterminate` from resident failure finalization,
+  recover a lost serve-claim acknowledgment through an invocation-bound
+  ownership token, close a failed residence as `resident_failed` with a
+  persisted failure summary and the immutable transport reason reported
+  separately, refuse further admission after an unresolved delivery, and let
+  collect-only observation publish an already-complete receipt whose queue
+  history was never staged.
 
 ## [1.2.2] - 2026-09-05
 

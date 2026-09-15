@@ -27,10 +27,17 @@
     },
     "reason": "Explicit evidence-bound first delivery of an untouched queued request; no post-arm retry"
   },
+  "reviewed_resident_failure_update": {
+    "previous_runtime_pins": {
+      "skills/codex-pro-dispatch/scripts/parked-runner.js": "e9731cc362f7929cf9993bb256554a2377e089edc780d457ef7306c6de211a44",
+      "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "cdb435ff84dbb13774b0e69dde77c1b8da4b11819500f87ffb313c26549480a2"
+    },
+    "reason": "Raw native envelopes preserved with operation identity before decoding; ambiguous evidence writes confirmed by bytes plus file and directory sync or stopped; acknowledgments limited to evidenced variants; outer resident failure reconciles unresolved receipts and drains runner-owned helpers; lost serve-claim ownership recovered by invocation token; unconfirmed close fails the service; failed residence labeled resident_failed; complete receipt publishes without staged history"
+  },
   "runtime": {
     "skills/codex-pro-dispatch/scripts/parked-client.mjs": "f77698abac3f59ba0da48a39dfe6a4d8e3583f26b8d16b5e58975be2ecb22d27",
-    "skills/codex-pro-dispatch/scripts/parked-runner.js": "e9731cc362f7929cf9993bb256554a2377e089edc780d457ef7306c6de211a44",
-    "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "cdb435ff84dbb13774b0e69dde77c1b8da4b11819500f87ffb313c26549480a2"
+    "skills/codex-pro-dispatch/scripts/parked-runner.js": "781cf78be08efa025efd86e07fa1d43f1e1639f73bd43b291ab15d1441368860",
+    "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "65b791760427c44ddd5afdf4756e02d73b886cd15dfe3028ed6b0dbbb2135ffc"
   },
   "schema_version": 1,
   "scope": "Source assembly only; runtime tests and native qualification separate",
@@ -44,10 +51,11 @@
         "different runner authority is rejected before claim or native work",
         "active delivery automatically observes pending work without a second send",
         "active observation budget exhaustion preserves armed collect-only work",
+        "collect-only recovery publishes a complete receipt whose queue stage is missing",
         "large history stays off the native wire without changing one-send behavior"
       ],
-      "pin_origin": "reviewed bounded-current-status patch",
-      "sha256": "9ed5888dedf3738490ee03745e77866e270488a288c381dfe5fd8627ee71e594"
+      "pin_origin": "reviewed resident-failure patch; complete_without_stage added",
+      "sha256": "0a3e103cf48453d8651fe295b1a17629310e890d7b11819a90ba35c13c046c60"
     },
     "tests/test_parked_queued_resume.mjs": {
       "cases": [
@@ -80,10 +88,33 @@
         "replacement worker IDs, not labels, govern a fresh runner",
         "recovery keeps the session worker and never repeats arm or send",
         "a mismatched claimed worker is rejected before native work",
-        "real CLI fences a replaced session and completes only on its new stable worker"
+        "real CLI fences a replaced session and completes only on its new stable worker",
+        "undecodable native history is preserved before refusal: two text blocks",
+        "undecodable native history is preserved before refusal: image block",
+        "undecodable native history is preserved before refusal: empty content",
+        "undecodable native history is preserved before refusal: null result",
+        "successful reads and sends preserve their original envelopes with operation identity",
+        "send acknowledgment variant: incident threadId",
+        "send acknowledgment variant: empty object",
+        "send acknowledgment variant: foreign thread",
+        "send acknowledgment variant: threadId plus extra field",
+        "send acknowledgment variant: arbitrary object without identity",
+        "send acknowledgment variant: array",
+        "send acknowledgment variant: no content",
+        "send acknowledgment variant: two text blocks",
+        "send acknowledgment variant: non-object text",
+        "ambiguous evidence acknowledgment is verified, never rewritten: {\"isError\":false,\"content\":[]}",
+        "ambiguous evidence acknowledgment is verified, never rewritten: {\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"EIO\"}]}",
+        "persisted evidence whose bytes differ is never trusted or rewritten",
+        "unconfirmed pre-arm evidence persistence stops before arm and send",
+        "verified bytes with a failed file sync stop before arm",
+        "verified bytes with a failed parent sync stop before arm",
+        "verified bytes with a failed sync after send enter post-arm failure handling",
+        "unconfirmed send-evidence persistence enters post-arm failure handling",
+        "cross-realm and non-Error failures serialize structurally"
       ],
-      "pin_origin": "captured_for_unit4; no prior test hash supplied",
-      "sha256": "40e531aa109bd392af9fe46f76f0499306ab0d672d7145b62e26ede62c55ded0"
+      "pin_origin": "reviewed resident-failure repair; raw_before_decode, evidence verification, evidenced acknowledgment variants, structural failures",
+      "sha256": "346d238562f9247212e86df5cae7eb297b975a08bcd82e09117572509d91a3fb"
     },
     "tests/test_parked_socket.mjs": {
       "cases": [

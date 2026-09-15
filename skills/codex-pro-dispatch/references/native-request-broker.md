@@ -86,6 +86,16 @@ from model turns. Slow-Pro snapshot observation belongs inside one awaited,
 bounded native orchestration; exhaustion means pending, not cancellation.
 Ten minutes is an observation point, never a generation cutoff.
 
+Observe also recovers a receipt that core already completed while the queue
+publication was lost (queue state `claimed`, `dispatch_status` `complete`, no
+staged history). Without a listener, the same recovery is the helper command
+`queue observe "$REQUEST" --parent-task-id "$PARENT" --native-controls-confirmed
+--native-read-file "$HISTORY"`, where `HISTORY` is one read-only native history
+of the worker. Matching history is staged and published through the existing
+publication path; a history whose response or message identity differs from
+the immutable receipt is refused before anything is staged. Nothing here
+re-arms or resends.
+
 ## Closed listener with an untouched queued request
 
 A queued status alone does not authorize another delivery. Use the separate
