@@ -230,6 +230,25 @@ assert.equal(JSON.parse(await fs.readFile(old+"/replacement-open.once.json","utf
 JSON.parse(await fs.readFile(old+"/session.json","utf8")).sessionId);
 });
 
+test("stopped resident preserves and skips multiple expired unobserved commands",async t=>{
+const f=await fixture(t),old=await f.open(),first=f.serve(),{createHash}=await import("node:crypto");
+await f.idle(1);await f.stop();await first;
+for(let n=1;n<=3;n++){
+const prompt="Unobserved "+n,base=old+"/command-"+n;
+await fs.mkdir(base,{mode:448});
+await fs.writeFile(base+"/prompt.txt",prompt,{mode:384});
+await fs.writeFile(base+".json",J({
+sessionId:f.g.parkedResident.socket.config.sessionId,ordinal:n,
+requestId:"unobserved-"+n,clientSessionId:"unit-client-"+n,
+nonce:String(n).padStart(32,"0"),deadlineAt:1,
+promptSha256:createHash("sha256").update(prompt).digest("hex"),pid:1,ppid:1
+}),{mode:384});
+}
+assert.notEqual(await f.reopen(),old);
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+assert.deepEqual(f.s.sends,[]);
+});
+
 test("waiting for client permission creates no request or pickup deadline",async t=>{
 const f=await fixture(t),d=await f.open(),serving=f.serve();
 await f.idle(1);

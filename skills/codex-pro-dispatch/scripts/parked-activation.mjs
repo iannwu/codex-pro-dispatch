@@ -272,6 +272,46 @@ fingerprint:queued.fingerprint,oldWorker:saved.worker,
 sentPromptSha256:assignment?.sent_prompt_sha256},c));
 allowed.push("command-"+n,"command-"+n+".json","command-observed-"+n+".json","ready-"+n+".json");
 }
+// A resident may be stopped after clients published commands but before the
+// serving loop reached them. Preserve and prove every contiguous, expired,
+// unobserved command instead of making that clean stop permanently
+// unrecoverable. These commands never entered the canonical queue and are
+// never replayed by the replacement listener.
+for(let n=cancelled?2:audit.events.length/2+1;;n++){
+const base=directory+"/command-"+n,commandPath=base+".json";
+let command;
+try{command=await privateBytes(commandPath,4096);}
+catch(e){if(e.code==="ENOENT")break;throw e;}
+try{
+const v=JSON.parse(command.toString("utf8"));
+const prompt=await privateBytes(base+"/prompt.txt",4194304);
+const {createHash}=await import("node:crypto");
+if(!v||Object.keys(v).sort().join(",")!==
+"clientSessionId,deadlineAt,nonce,ordinal,pid,ppid,promptSha256,requestId,sessionId"||
+v.sessionId!==saved.sessionId||v.ordinal!==n||
+!["requestId","clientSessionId"].every(k=>typeof v[k]==="string"&&
+/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v[k]))||
+!/^[a-f0-9]{32}$/.test(v.nonce)||
+!/^[a-f0-9]{64}$/.test(v.promptSha256)||!Number.isSafeInteger(v.deadlineAt)||
+v.deadlineAt>=Date.now()||
+!["pid","ppid"].every(k=>Number.isSafeInteger(v[k])&&v[k]>0)||
+createHash("sha256").update(prompt).digest("hex")!==v.promptSha256||
+(await fs.readdir(base)).join(",")!=="prompt.txt")
+throw Error("Unserved resident command evidence mismatch");
+await absent(directory+"/ready-"+n+".json");
+await absent(directory+"/command-observed-"+n+".json");
+const missingPath=c.stateDir+"/assignments/"+v.requestId+".json";
+await cli(["status",v.requestId],10000,missingPath);
+await absent(missingPath);
+const q=await cli(["queue","status"]);
+if(!Array.isArray(q.requests)||q.requests.some(r=>r.request_id===v.requestId))
+throw Error("Unserved resident request entered queue");
+allowed.push("command-"+n,"command-"+n+".json");
+}catch(e){
+if(e.message==="Unserved resident request entered queue")throw e;
+throw Error("Unproven resident artifacts; preserve evidence");
+}
+}
 const names=await fs.readdir(directory);
 if(names.length!==allowed.length||names.some(n=>!allowed.includes(n)))
 throw Error("Unproven resident artifacts; preserve evidence");
