@@ -181,8 +181,16 @@ ordinal:2,requestId:"job-B",clientSessionId:"unit-client",nonce:"2".repeat(32),
 deadlineAt:Date.now()+30000,promptSha256:createHash("sha256").update(raw).digest("hex"),
 pid:process.pid,ppid:process.ppid}),{mode:384});
 }
-return {g,meta,s,out,cli,open,serve,start,stop,repeat,reopen,activate,d,
-idle:n=>until(()=>s.waits>=n)};
+return {g,meta,s,out,cli,open,serve,start,stop,repeat,reopen,activate,d,children,
+// Idle means resident-next N is executing and has proven it is waiting.
+idle:async n=>{
+await until(()=>s.waits>=n);
+for(let i=0;;i++){
+if((await fs.readdir(g.parkedResident.directory)).some(v=>/^waiting-\d+[.]json$/.test(v)))return;
+if(i>=200)throw Error("Resident never proved it was waiting");
+await pause(25);
+}
+}};
 }
 
 test("interrupted unserved owner cancels and reopens without sending",async t=>{
@@ -300,6 +308,51 @@ assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
 assert.deepEqual(f.s.sends,[]);
 });
 
+// Incident shape: open and serve were reported, wake.sock exists, but no
+// resident-next is waiting. The client must refuse before publishing anything.
+test("open socket without an active waiter refuses to publish a command",async t=>{
+const f=await fixture(t),d=await f.open();
+await fs.lstat(d+"/wake.sock");
+await assert.rejects(f.start(1,"job-A"),/not waiting for ordinal 1; do not publish/);
+// A forged or foreign marker is not readiness either.
+await fs.writeFile(d+"/waiting-1.json",J({sessionId:"0".repeat(32),ordinal:1,pid:1}),{mode:384});
+await assert.rejects(f.start(1,"job-A"),/Stale resident readiness for ordinal 1; do not publish/);
+await fs.rm(d+"/waiting-1.json");
+await missing(d+"/command-1.json");await missing(d+"/command-1");
+await missing(d+"/command-observed-1.json");await missing(d+"/ready-1.json");
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+assert.deepEqual(f.s.sends,[]);
+// Nothing was burned: the same request ID is served once a waiter exists.
+const serving=f.serve();await f.idle(1);
+await f.start(1,"job-A");await f.idle(2);
+assert.equal((await f.cli(["queue","collect","job-A"])).state,"published");
+await f.stop();await serving;
+assert.deepEqual(f.s.sends,["job-A"]);
+});
+
+// A waiter that crashed leaves a marker whose heartbeat stopped; stale
+// readiness fails closed and nothing is published toward the dead waiter.
+test("stale readiness after a crashed waiter refuses to publish",async t=>{
+const f=await fixture(t),d=await f.open();
+const waiting=f.activate(["resident-next",d,"1"]).catch(e=>e);
+const marker=d+"/waiting-1.json";
+for(let i=0;i<200;i++){try{await fs.lstat(marker);break;}catch{await pause(25);}}
+const waiter=[...f.children].find(c=>c.spawnargs.includes("resident-next"));
+waiter.kill("SIGKILL");await waiting;
+const v=JSON.parse(await fs.readFile(marker,"utf8"));
+assert.equal(v.ordinal,1);assert.equal(v.sessionId,f.g.parkedResident.socket.config.sessionId);
+// Heartbeat stopped with the process; once stale the client fails closed.
+const stale=new Date(Date.now()-6000);await fs.utimes(marker,stale,stale);
+await assert.rejects(f.start(1,"job-A"),/Stale resident readiness for ordinal 1; do not publish/);
+await missing(d+"/command-1.json");await missing(d+"/command-1");
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+// The crash evidence stays; a later serve cannot silently take the ordinal.
+await fs.lstat(marker);
+await assert.rejects(f.serve(),/Helper failed/);
+assert.equal(f.out.find(v=>v.kind==="resident_closed")?.outcome,"resident_failed");
+assert.deepEqual(f.s.sends,[]);
+});
+
 test("waiting for client permission creates no request or pickup deadline",async t=>{
 const f=await fixture(t),d=await f.open(),serving=f.serve();
 await f.idle(1);
@@ -311,9 +364,14 @@ assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
 await missing(d+"/command-1.json");
 await missing(d+"/command-observed-1.json");
 await missing(d+"/ready-1.json");
+// An approval wait longer than the readiness freshness window is fine while
+// the waiter's heartbeat keeps its readiness current.
+await pause(5200);
+await f.start(1,"job-A");await f.idle(2);
+assert.equal((await f.cli(["queue","collect","job-A"])).state,"published");
 // Denial/cancellation uses the normal stop, not an alternate submit route.
 await f.stop();await serving;
-assert.deepEqual(f.s.sends,[]);
+assert.deepEqual(f.s.sends,["job-A"]);
 await missing(d+"/wake.sock");
 });
 

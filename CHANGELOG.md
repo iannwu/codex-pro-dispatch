@@ -27,6 +27,11 @@ this is not a stable or public release.
   separately, refuse further admission after an unresolved delivery, and let
   collect-only observation publish an already-complete receipt whose queue
   history was never staged.
+- Make resident readiness explicit: `resident-next` proves it is waiting for
+  the exact next ordinal with a heartbeat marker, and a resident rendezvous
+  refuses to publish a command toward an open socket without a live waiter or
+  with stale readiness, so nothing is burned and the same request can be
+  submitted once service is actually waiting.
 
 ## [1.2.2] - 2026-09-05
 

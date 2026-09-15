@@ -1084,6 +1084,8 @@ await absent(directory+"/ready-"+ordinal+".json");
 await absent(directory+"/command-observed-"+ordinal+".json");
 const name="command-"+ordinal+(attempt===undefined?"":"-retry-"+attempt);
 await absent(directory+"/"+name+".json");
+// Publish only toward a resident-next that is waiting for this ordinal now.
+if(c.resident===true)await activeWaiter(directory,ordinal,c);
 const ticket=directory+"/"+name;
 await fs.mkdir(ticket,{mode:448}); // Exclusive attempt marker; never remove to retry.
 const snapshot=ticket+"/prompt.txt";
@@ -1152,12 +1154,30 @@ await publishResidentStop(directory,c.sessionId);
 return {stopRequested:true,sessionId:c.sessionId};
 }
 
+// A live waiter is proven by waiting-N.json whose mtime this process keeps
+// fresh; a crashed or ended waiter goes stale within WAITER_FRESH_MS and an
+// open socket alone never counts as readiness.
+const WAITER_FRESH_MS=5000;
+async function activeWaiter(directory,ordinal,c){
+const path=directory+"/waiting-"+ordinal+".json";
+let v,stat;
+try{v=JSON.parse((await privateBytes(path,4096)).toString("utf8"));stat=await fs.lstat(path);}
+catch(e){if(e.code!=="ENOENT")throw e;throw Error("Resident is not waiting for ordinal "+ordinal+"; do not publish");}
+if(v.sessionId!==c.sessionId||v.ordinal!==ordinal||Date.now()-stat.mtimeMs>WAITER_FRESH_MS)
+throw Error("Stale resident readiness for ordinal "+ordinal+"; do not publish");
+}
+
 async function residentNext(directory,ordinal){
 const c=await rendezvousSession(directory,ordinal,"resident-next");
 if(c.resident!==true||c.helper!==helper)throw Error("Resident mismatch");
 await absent(directory+"/ready-"+ordinal+".json");
 await absent(directory+"/command-observed-"+ordinal+".json");
-const choice=await new Promise((resolve,reject)=>{
+const marker=directory+"/waiting-"+ordinal+".json";
+await fs.writeFile(marker,J({sessionId:c.sessionId,ordinal,pid:process.pid}),{flag:"wx",mode:384});
+const beat=setInterval(()=>fs.utimes(marker,new Date(),new Date()).catch(()=>{}),1000);
+let choice;
+try{
+choice=await new Promise((resolve,reject)=>{
 let done=false,busy=false,again=false;
 function end(e,v){if(done)return;done=true;w.close();e?reject(e):resolve(v);}
 const w=watch(directory,()=>{again=true;void check();});
@@ -1189,6 +1209,7 @@ finally{busy=false;if(again&&!done)void check();}
 }
 void check();
 });
+}finally{clearInterval(beat);await fs.rm(marker,{force:true});}
 if(choice.stopped)return {...choice,sessionId:c.sessionId};
 const s=await cli(["status","--current"]),q=await cli(["queue","status"]);
 if(s.paths?.state_dir!==c.stateDir||s.paths?.config_dir!==c.configDir||

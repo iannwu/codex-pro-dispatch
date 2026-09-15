@@ -61,10 +61,20 @@ leaseMs:resident?null:60000,idleMs,replyMs:10000,...(resident?{resident:true}:{}
 const prompt=d+"/prompt.txt";
 await fs.writeFile(prompt,"Review exact bytes: café.\n",{mode:384});
 const activate=(...args)=>run(process.execPath,[scripts+"parked-activation.mjs",...args]);
-const start=(ordinal,rid,file=prompt)=>activate(
-"rendezvous",session,String(ordinal),rid,file,"fixture-client");
-const retry=(ordinal,rid,attempt)=>activate(
-"rendezvous-retry",session,String(ordinal),rid,attempt);
+// A resident client publishes only toward a live resident-next waiter; this
+// fixture drives command-ready directly, so it stands in as that waiter.
+const beats=new Set();
+async function waiting(ordinal){
+if(!resident)return;
+const marker=session+"/waiting-"+ordinal+".json";
+try{await fs.writeFile(marker,JSON.stringify({sessionId:socket.config.sessionId,ordinal,pid:process.pid}),{flag:"wx",mode:384});}
+catch(e){if(e.code!=="EEXIST")throw e;}
+beats.add(setInterval(()=>fs.utimes(marker,new Date(),new Date()).catch(()=>{}),1000));
+}
+const start=async(ordinal,rid,file=prompt)=>{await waiting(ordinal);return activate(
+"rendezvous",session,String(ordinal),rid,file,"fixture-client");};
+const retry=async(ordinal,rid,attempt)=>{await waiting(ordinal);return activate(
+"rendezvous-retry",session,String(ordinal),rid,attempt);};
 const gate=(ordinal,rid,attempt,preload)=>run(process.execPath,[
 ...(preload?["--require",preload]:[]),scripts+"parked-activation.mjs",
 "command-ready",session,String(ordinal),rid,...(attempt===undefined?[]:[attempt])
@@ -94,6 +104,7 @@ await socket.finish(delivery.callId,answer);
 return answer;
 }
 t.after(async()=>{
+for(const beat of beats)clearInterval(beat);
 await socket.close("unit_finished");
 await Promise.allSettled([...outstanding]);
 await fs.rm(d,{recursive:true});
