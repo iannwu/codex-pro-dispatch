@@ -246,6 +246,29 @@ assert.notEqual(await f.reopen("failed-resident-packet"),old);
 const serving=f.serve();await f.idle(1);await f.stop();await serving;
 });
 
+test("a returned stop keeps the detector until owner cleanup finishes",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const realTimeout=globalThis.setTimeout;
+const timerMock=t.mock.method(globalThis,"setTimeout",(fn,ms,...args)=>
+realTimeout(fn,ms===60000?1000:ms,...args));
+const waiting=o.activation.residentAdmission(f.g,f.meta,"fixture-owner",1);
+await waitForFile(f.waiting(1));await f.stop();
+assert.equal((await waiting).stopped,true);
+assert.notEqual(o.admission.deadlineAt,null);
+await missing(f.waiting(1));
+// No outer finally follows the returned stop. The retained detector must
+// close it truthfully as failed, not pretend that clean shutdown completed.
+await new Promise(r=>realTimeout(r,1100));await o.admission.failure;
+timerMock.mock.restore();
+await missing(d+"/wake.sock");
+assert.equal(JSON.parse(await fs.readFile(d+"/transport-audit.json")).reason,"resident_failed");
+assert.equal(JSON.parse(await fs.readFile(d+"/resident-failure.json")).stopRequested,true);
+assert.notEqual(await f.reopen("failed-resident-packet"),d);
+assert.deepEqual(f.s.sends,[]);
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+});
+
 test("a client claim wins over the idle observation boundary",async t=>{
 const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
 o.used=true;o.serveInvocation="fixture-owner";

@@ -307,6 +307,9 @@ after joining the admission writer. It is disabled once a delivery is accepted:
 slow Pro work keeps its existing observation and collect-only rules. This is a
 failure detector, not a session-age lease, send deadline, or takeover permission.
 The loaded admission module is pinned by the generated open packet.
+An observed stop retains the detector until cleanup finishes. Readiness is
+withdrawn between observations, so a client can receive a safe pre-publication
+"not waiting" refusal during that gap; this is not a sent request or a retry grant.
 
 Resident service stays in the background: it does not navigate to the owning task
 after observations or completion. Do not forward milestones or routine completion
@@ -361,7 +364,7 @@ other shape is collect-only. Nothing is resent and `submission_count` is
 never inferred from a send acknowledgment.
 
 A failed residence admits no further request: its held delivery is retained,
-`resident-next` is not called again, and later published commands remain
+no further admission call is made, and later published commands remain
 unobserved evidence. `closed-resident-packet` refuses a `resident_failed`
 audit, as does canonical occupancy. Recover the affected request through its
 original request ID only: `pro-dispatch status "$RID"`, then collect-only

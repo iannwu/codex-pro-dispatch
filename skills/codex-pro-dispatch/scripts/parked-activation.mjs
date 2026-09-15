@@ -1178,7 +1178,7 @@ return {stopRequested:true,sessionId:c.sessionId};
 }
 
 // Readiness for ordinal N of one session is the empty owner-only directory
-// waiting-N.<sessionId>, whose mtime the waiting resident-next keeps fresh.
+// waiting-N.<sessionId>, whose mtime the native admission wait keeps fresh.
 // A rendezvous claims it by renaming it into its ticket; the waiter retires
 // it with rmdir. Both are atomic, so exactly one side wins: a retired waiter
 // leaves nothing to claim (no ticket exists), and a waiter that loses the
@@ -1265,7 +1265,7 @@ if(signal?.aborted)abort();else void check();
 }finally{clearInterval(beat);await withdrawal;await retire();}
 signal?.throwIfAborted();
 if(choice.stopped||choice.pending)return {...choice,sessionId:c.sessionId};
-const s=await cli(["status","--current"],5000),q=await cli(["queue","status"],5000);
+const s=await cli(["status","--current"],10000),q=await cli(["queue","status"],10000);
 if(s.paths?.state_dir!==c.stateDir||s.paths?.config_dir!==c.configDir||
 s.worker?.conversation_id!==c.worker||s.worker?.model_confirmation!=="user-confirmed-pro"||
 s.active_assignment!==null||s.active_cooldown!==null||!Array.isArray(q.requests)||
@@ -1334,8 +1334,9 @@ return g.parkedDelivery;
 try{
 const result=await a.work;
 controller.signal.throwIfAborted();
-// No ready marker remains after a stop or delivery. Pro uses its own budgets.
-if(next!==undefined||result.stopped){clearTimeout(a.timer);a.deadlineAt=null;}
+// Pro uses its own budgets. A stop still needs owner cleanup, so retain its
+// detector until cleanup joins us and closes the socket.
+if(next!==undefined){clearTimeout(a.timer);a.deadlineAt=null;}
 return result;
 }finally{a.work=null;a.controller=null;}
 }

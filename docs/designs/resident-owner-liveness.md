@@ -30,6 +30,12 @@ persisting failure once. Every later native action checks the failed owner. An a
 observed request still blocks zero-send replacement. Kernel loss remains an
 unqualified recovery case, not permission to infer an empty mailbox.
 
+A returned stop keeps the detector armed until cleanup completes. If the outer
+caller disappears in that gap, closure records failure with the stop preserved.
+Each post-claim helper authority read has a 10-second bound. Readiness still
+retires between observations; a client may receive a pre-publication refusal
+during that short gap. No automatic retry or second watcher is added.
+
 ## Acceptance
 
 - Idle observations repeat without subprocesses, model turns, sends or navigation.
@@ -49,7 +55,7 @@ tests. No new supervisor, queue, authority directory, or automatic restart.
 
 ## Verification
 
-Terra High's final code review passed with no actionable P1/P2 findings.
+Terra High's initial final code review passed with no actionable P1/P2 findings.
 Automated checks: all 162 Python tests and 199 Node tests passed, including the
 claim-at-observation-boundary regression. Skill validation passed.
 
@@ -59,3 +65,14 @@ cleanup released a waiting receive while preserving its ready/observed records.
 Both recorded zero socket events, touched no canonical queue and sent nothing.
 These checks do not qualify forced host cancellation, kernel death or reboot.
 The installed candidate and production runner remain unchanged.
+
+Cursor Fable's independent review passed but identified a native post-claim
+verification gap and the returned-stop cleanup gap. Follow-up native qualification
+exercised the actual post-claim status and queue reads successfully in the desktop
+runtime (422 ms), using canonical authority read-only and a disposable command
+fixture. No ready gate, queue write or send occurred. A second actual native
+check withheld cleanup after a returned stop: the detector closed the socket
+at 60,003 ms, preserving the stop with failure evidence and zero events.
+All 200 Node tests and 162 Python tests pass after the follow-up; skill validation,
+Python compilation, shell syntax and whitespace checks pass. Native Terra High's
+follow-up review passed with no actionable P1/P2 findings and 3/3 targeted tests.

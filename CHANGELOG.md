@@ -2,6 +2,16 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## Unreleased
+
+- Move resident admission into bounded native calls instead of an independently
+  living waiter process. Owner nonrenewal withdraws readiness and closes the
+  socket; it does not time out accepted Pro work or authorize a resend.
+- Keep owner-loss detection active across a returned stop until cleanup runs,
+  and allow ten seconds for each read-only post-claim authority check.
+- Preserve the existing guarded recovery rules. Forced kernel termination,
+  reboot recovery and automatic startup remain unqualified.
+
 ## [1.3.0-rc.1] - 2026-09-14
 
 Local release candidate. The live native acceptance matrix is still pending;
