@@ -35,6 +35,11 @@ this is not a stable or public release.
   nothing is burned and the same request can be submitted once service is
   actually waiting; a waiter whose readiness was claimed stays to observe that
   publication.
+- Add `failed-resident-packet`, the explicit replacement for a residence that
+  failed without capturing a request or holding a delivery: it proves every
+  unobserved command expired and absent from canonical state, binds to the
+  same retained owner, task and worker, consumes the once-only replacement
+  marker, preserves all old evidence and never replays those requests.
 
 ## [1.2.2] - 2026-09-05
 

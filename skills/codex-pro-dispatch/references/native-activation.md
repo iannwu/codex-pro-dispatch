@@ -361,6 +361,29 @@ observation with one read-only history (see native-request-broker.md), or
 explicitly authorized abandonment. Historical `resident_stopped` audits from
 earlier code are unchanged and, alone, still do not authorize replacement.
 
+One failure class never touched the worker and may be replaced explicitly,
+in the same retained native task, with:
+
+```sh
+node "$ACT" failed-resident-packet "$PARENT" "$PARENT" "$WORKER" "$OLD_DIR"
+```
+
+It accepts only a `resident_failed` audit with zero events whose
+`resident-failure.json` records `requestId: null`, `heldDelivery: null` and
+no pending helper, beside `session.json` and, when `stopRequested` is true,
+the stop pair; every `command-N` publication present must be contiguous,
+well formed, expired, unobserved (no `ready-N.json` or
+`command-observed-N.json`), and proven absent from canonical assignments and
+the queue. It further requires the retained owner (`used: true`, same closed
+socket, binding and descriptor), no held delivery, the same trusted parent
+and worker, clean canonical authority, and no other artifact of any kind.
+Everything else—an incomplete ticket, a fresh deadline, a captured request,
+a stale readiness marker, a foreign file—refuses, and the failed directory
+stays exactly as it was. On success it consumes the same exclusive
+`replacement-open.once.json` marker as a clean replacement before creating
+the fresh listener, and it never replays the unobserved requests; submit them
+again through a live waiter if still wanted.
+
 ### Bounded actual-Claude qualification
 
 Authorize actual Claude once to perform the sequence below. The parent only starts open/serve, preserves evidence and retrieves the original cell afterward. Do not prepublish B or have the parent impersonate Claude.

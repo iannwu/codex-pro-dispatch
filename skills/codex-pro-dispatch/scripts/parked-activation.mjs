@@ -212,12 +212,26 @@ return JSON.stringify([v,a]);
 }
 
 async function residentClosureCheck(directory,saved,audit,c,preclose=false){
-const cancelled=audit.reason==="resident_start_cancelled";
+const cancelled=audit.reason==="resident_start_cancelled",failed=audit.reason==="resident_failed";
 if(saved.resident!==true||saved.leaseMs!==null||saved.expiresAt!==null||
-(!cancelled&&audit.reason!=="resident_stopped")||audit.sessionId!==saved.sessionId||
-!Array.isArray(audit.events)||audit.events.length%2!==0||(cancelled&&audit.events.length!==0))
+(!cancelled&&!failed&&audit.reason!=="resident_stopped")||audit.sessionId!==saved.sessionId||
+!Array.isArray(audit.events)||audit.events.length%2!==0||((cancelled||failed)&&audit.events.length!==0))
 throw Error("Not a clean resident closure");
-const allowed=preclose?["session.json","wake.sock"]:["session.json","transport-audit.json","resident-stop","resident-stop.json"];
+const allowed=preclose?["session.json","wake.sock"]:["session.json","transport-audit.json"];
+let stopRequested=!preclose;
+if(failed){
+// Only a failure that captured no request and holds no delivery is
+// replaceable; every published command below is then proven unobserved and
+// absent from canonical state. Anything else stays collect-only recovery.
+const f=JSON.parse((await privateBytes(directory+"/resident-failure.json",65536)).toString("utf8"));
+if(!f||Object.keys(f).filter(k=>k!=="cleanupStep").sort().join(",")!==
+"at,error,heldDelivery,pendingHelperSession,reason,requestId,sessionId,stopRequested"||
+f.sessionId!==saved.sessionId||f.reason!=="resident_failed"||f.requestId!==null||
+f.heldDelivery!==null||f.pendingHelperSession!==null||typeof f.stopRequested!=="boolean")
+throw Error("Failed residence retained a request, delivery or helper; collect-only recovery required");
+stopRequested=f.stopRequested;allowed.push("resident-failure.json");
+}
+if(stopRequested)allowed.push("resident-stop","resident-stop.json");
 const receipts=[],seen=new Set();
 if(cancelled){
 try{
@@ -315,7 +329,7 @@ throw Error("Unproven resident artifacts; preserve evidence");
 const names=await fs.readdir(directory);
 if(names.length!==allowed.length||names.some(n=>!allowed.includes(n)))
 throw Error("Unproven resident artifacts; preserve evidence");
-if(!preclose){
+if(stopRequested){
 const stop=JSON.parse((await privateBytes(directory+"/resident-stop.json",4096)).toString("utf8"));
 if(stop.sessionId!==saved.sessionId||(await fs.readdir(directory+"/resident-stop")).length)
 throw Error("Resident stop evidence mismatch");
@@ -374,11 +388,12 @@ return {filesystemAccess:true,directory:path,sendAuthorized:false,
 meaning:"Run in the actual Claude session. Does not prove rendezvous permission or native readiness."};
 }
 
-async function packet(broker,parent,worker,closedDirectory,resume,terminal,resident=false,sessionRoot){
+async function packet(broker,parent,worker,closedDirectory,resume,terminal,resident=false,sessionRoot,failed=false){
 if(sessionRoot!==undefined){
 if(!resident)throw Error("Client directory is resident-only");
 await privateDirectory(sessionRoot);
 }
+if(failed&&(!resident||closedDirectory===undefined))throw Error("Failed-resident replacement needs the closed resident directory");
 if(resident&&(broker!==parent||resume!==undefined))throw Error("Resident binding mismatch");
 if(terminal!==undefined){
 terminalExpectation(terminal);
@@ -429,6 +444,10 @@ old.configDir!==trusted.configDir||old.stateDir!==trusted.stateDir||
 old.parent!==parent||old.worker!==(terminal?.oldWorker??worker)||
 closed?.sessionId!==old.sessionId)
 throw Error("Prior session is not a matching closed, unused listener");
+// A resident_failed closure is replaceable only through the explicit
+// failed-resident-packet action, and only when it proves zero sends below.
+const residentClosed=resident&&(["resident_stopped","resident_start_cancelled"].includes(closed.reason)||
+(failed&&closed.reason==="resident_failed"));
 const evidenceSha256={};
 if(recovery!==undefined){
 const command=await privateBytes(join(closedDirectory,"command-1.json"),4096);
@@ -448,7 +467,7 @@ for(const [name,raw] of [
 ])evidenceSha256[name]=createHash("sha256").update(raw).digest("hex");
 if(evidenceSha256["command-1/prompt.txt"]!==recovery.promptSha256)
 throw Error("Closed-session private prompt snapshot differs");
-}else if(resident&&["resident_stopped","resident_start_cancelled"].includes(closed.reason)){
+}else if(residentClosed){
 await residentClosureCheck(closedDirectory,old,closed,trusted);
 }else if(closed.reason!=="idle_expired"||
 !Array.isArray(closed.events)||closed.events.length!==0){
@@ -460,7 +479,7 @@ previous={
 directory:closedDirectory,sessionId:old.sessionId,
 descriptorSha256:createHash("sha256").update(descriptor).digest("hex"),
 auditSha256:createHash("sha256").update(audit).digest("hex"),
-...(resident&&["resident_stopped","resident_start_cancelled"].includes(closed.reason)?{residentClosed:true,unserved:closed.reason==="resident_start_cancelled"}:{}),
+...(residentClosed?{residentClosed:true,unserved:closed.reason==="resident_start_cancelled"}:{}),
 ...(resume===undefined?{}:{queuedResume:resume,evidenceSha256})
 };
 if(terminal!==undefined){
@@ -1289,6 +1308,8 @@ result=await packet(...args.slice(0,3),undefined,undefined,undefined,true,args[3
 else if(action==="closed-packet"&&args.length===4) result=await packet(...args);
 else if(action==="closed-resident-packet"&&[4,5].includes(args.length))
 result=await packet(...args.slice(0,4),undefined,undefined,true,args[4]);
+else if(action==="failed-resident-packet"&&[4,5].includes(args.length))
+result=await packet(...args.slice(0,4),undefined,undefined,true,args[4],true);
 else if(action==="client-preflight"&&args.length===1)
 result=await clientPreflight(args[0]);
 else if(action==="closed-queued-packet"&&args.length===11)
