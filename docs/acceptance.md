@@ -60,6 +60,27 @@ Record native-host results separately from synthetic tests. Nonrenewal does not
 prove host cancellation, kernel-loss cleanup or recovery after a laptop reboot.
 Missing closure evidence remains a blocker, never permission to take over.
 
+### A3. Canonical resident ownership
+
+For ownership candidates, qualify first enrollment from trusted fresh-deployment
+or legacy-quiescence evidence. An empty queue, missing globals or a stale socket
+does not qualify an existing deployment. Record the accepted evidence and exact
+candidate implementation. Do not enroll merely to unblock this test.
+
+- Race replacement against reservation. Exactly one wins; a replaced owner
+  cannot admit, claim, arm or send. Once reserved, replacement stays blocked
+  through the final native cleanup, even after the answer is complete.
+- Verify joined pre-arm failures resume the same request, and joined post-arm
+  failures remain collect-only. Queued requests, partial claims and completed
+  but unpublished answers must survive replacement.
+- Verify uncertain native calls, pending helpers and unconfirmed cleanup retain
+  ownership and their evidence. Only the original joined continuation releases.
+- Run a real Claude roundtrip, collect twice, compare preserved answer hashes,
+  then acknowledge. Verify no foreground navigation or routine progress messages.
+
+Report synthetic and native results separately. These tests do not establish
+automatic startup after a reboot or safe migration of an unfenced legacy owner.
+
 ## B. One-turn roundtrip
 
 Submit:

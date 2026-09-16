@@ -41,7 +41,7 @@ globalThis.runParkedJob = async function runParkedJob(config, requestId) {
   const trace = [];
   let phase = "collect", directory = null, sequence = 0;
   let potentiallyArmed = false, published = false, nativeUsed = false;
-  let pendingCommand = null, result;
+  let pendingCommand = null, helperUncertain = false, result;
 
   function problem(message, detail) {
     const error = Error(message);
@@ -89,8 +89,11 @@ globalThis.runParkedJob = async function runParkedJob(config, requestId) {
   }
 
   async function helper(args) {
-    const command = ["python3", config.helper, ...args].map(quote).join(" ");
+    const owner = config.residentInvocation === undefined ? [] :
+      ["--resident-invocation", JSON.stringify(config.residentInvocation)];
+    const command = ["python3", config.helper, ...owner, ...args].map(quote).join(" ");
     trace.push({ kind: "helper", operation: args.slice(0, 2), at: Date.now() });
+    helperUncertain = true;
     let response = await tools.exec_command({
       cmd: command, login: false, tty: false,
       yield_time_ms: 30000, max_output_tokens: 20000
@@ -113,6 +116,7 @@ globalThis.runParkedJob = async function runParkedJob(config, requestId) {
       }
       pendingCommand = null;
     }
+    helperUncertain = false;
     let value;
     try { value = JSON.parse(output); }
     catch { throw problem("Helper output is not complete JSON", {
@@ -343,7 +347,7 @@ console.log(JSON.stringify({verified:true}));
     }
 
     // Preserve post-arm uncertainty, but never alter a completed receipt.
-    if (potentiallyArmed && !published && pendingCommand === null) {
+    if (potentiallyArmed && !published && !helperUncertain) {
       try {
         const status = await helper(["status", requestId]);
         if (["armed", "submitted", "pending", "ambiguous", "indeterminate"]
@@ -379,7 +383,7 @@ console.log(JSON.stringify({verified:true}));
     result = {
       ...result, request_id: requestId, restoration,
       evidence_directory: directory, evidence_retained: directory !== null,
-      pending_helper_session: pendingCommand, trace
+      pending_helper_session: pendingCommand, helper_quiescent: !helperUncertain, trace
     };
   }
   return result;
@@ -455,8 +459,13 @@ globalThis.runParkedDelivery = async function runParkedDelivery(config, delivery
   };
   const code = "console.log(JSON.stringify(await parkedSocket.finish(" +
     JSON.stringify(delivery.callId) + "," + JSON.stringify(result) + ")));";
-  const transport = await tools.mcp__node_repl__js({
-    code, timeout_ms: 30000, title: "Finish native socket delivery"
-  });
-  return { result, transport };
+  try {
+    const transport = await tools.mcp__node_repl__js({
+      code, timeout_ms: 30000, title: "Finish native socket delivery"
+    });
+    return { result, transport };
+  } catch (error) {
+    // Preserve the already-created result, especially its helper handle.
+    throw Object.assign(Error("Native finish unconfirmed"), {cause: error, result});
+  }
 };

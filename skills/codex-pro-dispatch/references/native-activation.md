@@ -239,161 +239,97 @@ An unused retry ID may be tried after another unobserved timeout, but no attempt
 This does not extend leases, recover a used listener closed with `lease_expired`, or change closed-listener replacement eligibility. `closed-packet` still requires the existing zero-event `idle_expired` proof.
 ## Resident opt-in (candidate)
 
-This section overrides the manual per-request instructions only for an explicitly generated resident packet. The finite workflow below remains the default fallback. Resident mode removes the session-age lease, not the finite pickup, reply or active-observation budgets, the 64-admission ceiling, or any canonical and at-most-once guard.
+This section overrides the manual per-request instructions only for an explicitly generated resident packet. Finite workflows above retain their own eligibility rules and are not a fallback around resident ownership. Resident mode removes the session-age lease, not pickup, reply or active-observation budgets, the 64-admission ceiling, or any at-most-once guard.
 
-### Setup once
+### Setup and replacement
 
-If opening was interrupted before serving, an explicitly authorized cancellation
-may call the installed activation module's `cancelUnstartedResident(globalThis,
-nodeRepl.requestMeta)` in the retained native runtime. Verify the module's physical
-path and reviewed hash first. This accepts only the same task in a later turn,
-an unchanged owner with `used:false`, no held delivery, clean canonical authority,
-and no readiness or observed command. One expired, unqueued command may remain
-as evidence; it is never replayed. The helper closes the old socket with
-`resident_start_cancelled`. Then generate a fresh `closed-resident-packet` and
-execute open and serve in this same turn. Do not advertise readiness before
-serve has started. Used, unknown or post-arm sessions remain ineligible.
+One canonical `resident-owner.json` contains a generation, trusted parent/worker,
+enrollment evidence, and at most one in-flight invocation. It is updated under
+the same lock as claim/arm/receipt mutations. Session files are evidence, not
+replacement permission.
 
-First complete candidate tests, pin/manifest checks, the existing native-capability preflight and the client filesystem preflight below. Obtain authorization for this resident consultation scope before starting service. Use the reviewed candidate root, not an assumed installed version:
+First enrollment is a one-time maintenance operation, not normal startup.
+Ordinary startup returns `blocked: enrollment_required` when no owner exists.
+An authorized operator must establish either a genuinely fresh deployment or
+physical quiescence of ALL legacy executions affecting this canonical authority.
+A new chat, empty queue, absent socket/global, elapsed time or an approval alone
+does not establish that fact. Do not enroll the known unresolved legacy runtime.
 
-```sh
-ACT="$ROOT/skills/codex-pro-dispatch/scripts/parked-activation.mjs"
-HELPER="$ROOT/skills/codex-pro-dispatch/scripts/pro-dispatch"
-```
+Record accepted observations and their sources in a private JSON evidence file:
+`kind` (`fresh_deployment` or `legacy_quiescence`), trusted `parent`, `worker`,
+resolved `config_dir`, `state_dir`, inspected `implementation` revision,
+`observations`, and explicit `authorization`. Keep competing legacy launches
+stopped throughout this maintenance transition. The operator verifies physical
+facts; the helper only validates bindings and hashes, not the truth of a claim.
 
-Set `PARENT` to the actual native task ID and `WORKER` to the configured user-confirmed Pro conversation. Broker and parent must be that same task. Keep packet JSON, descriptors and evidence private.
+After that qualification, the operator runs `pro-dispatch resident enroll` with
+one JSON argument containing `generation:0`, a fresh `owner` identifier,
+trusted `parent` and `worker`, `evidence_file` and `evidence_sha256`. It copies
+the accepted evidence into canonical ownership. It neither opens nor sends.
+Never manufacture evidence to clear this gate, delete the owner record or
+reenroll to reset its generation. Worker reconfiguration/reset/purge while
+enrolled is unsupported in this patch.
 
-With no retained native session, generate:
-
-```sh
-node "$ACT" resident-packet "$PARENT" "$PARENT" "$WORKER"
-```
-
-After a clean resident stop, generate a new packet rather than replaying the old one:
-
-```sh
-node "$ACT" closed-resident-packet "$PARENT" "$PARENT" "$WORKER" "$OLD_DIR"
-```
-
-This requires the retained owning runtime, matching closed socket and binding,
-no held delivery, no unknown command artifacts, and either zero deliveries or
-complete, acknowledged, one-send canonical receipts for every delivery. It
-consumes a new exclusive replacement marker and preserves all old evidence.
-Unacknowledged, pending or uncertain work blocks replacement. Runtime loss is
-not recovered by this command. A new packet does not authorize replaying any
-old request.
-
-For a historical finite session, use the existing terminal proof:
+For both ordinary startup and replacement, after actual Claude's filesystem
+preflight, the six native capability checks and authorization, generate:
 
 ```sh
-node "$ACT" closed-terminal-resident-packet \
- "$PARENT" "$PARENT" "$WORKER" "$OLD_DIR" \
- "$OLD_HELPER" "$OLD_WORKER" "$OLD_SESSION" "$OLD_REQUEST" "$OLD_CALL" \
- "$OLD_CLIENT" "$FINGERPRINT" "$NONCE" "$RAW_SHA" "$SENT_SHA" \
- "$DESCRIPTOR_SHA" "$AUDIT_SHA" \
- "$LATER_REQUEST" "$COMMAND2_SHA" "$PROMPT2_SHA"
+node "$ACT" resident-packet "$PARENT" "$PARENT" "$WORKER" "$CLIENT_ROOT"
 ```
 
-Omit the final three arguments as a group when there is no later unobserved command. All historical identities and hashes must come from inspected private evidence. The old helper path remains historical evidence, not an executable selection. This mode retains the acknowledged one-send proof and the narrow optional ordinal-2 absence proof; it does not resume that later request.
+Resolve ACT and the helper to the same inspected physical candidate/install.
+PARENT is the actual dedicated native task, not this development task.
+CLIENT_ROOT is required, physical, private and shared with the actual client.
 
-Execute the decoded `calls.open` verbatim once through outer `functions.exec`. Preserve its returned directory as `SESSION` and its session ID. Then execute the decoded `calls.serve` verbatim once through another outer `functions.exec`, in the same actual native task/turn. Preserve that serve cell ID. Supply these strings as source, not through `eval` or dynamically reconstructed functions.
+Execute decoded `calls.open` once, verbatim through outer `functions.exec`.
+It compares the captured generation atomically. Its result is `ready`,
+`collect_only`, `busy` or `blocked`. Only the first two permit executing that
+packet's `calls.serve` once, in the same native task/turn. Preserve its cell ID
+and keep that owning execution active. Opening alone does not mean ready.
 
-While serve runs, it discovers request publications, performs the exact gate and receive, invokes the existing runner, and returns to an event wait after verified terminal success. The parent must NOT issue per-request `command-ready`, `receive`, dispatch or delivery-clear calls. Native idle observations last at most 25 seconds and repeat inside the same owning evaluation, without a helper process, model turn, chat read or navigation.
+The owner reserves an invocation before accepting a request, and retains it
+through helper calls, native work, transport completion and cleanup. Replacement
+is refused while that reservation exists. A stale generation cannot claim/arm.
+No timer, answer completion or idle chat releases ownership. Only the original
+final continuation releases after all its operations and cleanup have joined.
+Unknown native work, unknown helper identity, pending helpers and unconfirmed
+cleanup retain the reservation. Do not manually run begin/end to clear a lock.
 
-Each authenticated admission call renews a native 60-second owner-loss detector.
-It never renews itself. If the outer evaluation stops, the detector withdraws
-readiness, closes the socket as `resident_failed`, and preserves failure evidence
-after joining the admission writer. It is disabled once a delivery is accepted:
-slow Pro work keeps its existing observation and collect-only rules. This is a
-failure detector, not a session-age lease, send deadline, or takeover permission.
-The loaded admission module is pinned by the generated open packet.
-An observed stop retains the detector until cleanup finishes. Readiness is
-withdrawn between observations, so a client can receive a safe pre-publication
-"not waiting" refusal during that gap; this is not a sent request or a retry grant.
+Once safely replaceable, the same startup recipe preserves durable request IDs:
+queued or partially prepared work resumes its first-send path; a post-arm or
+completed-but-unpublished receipt is collect-only. Completed answers remain
+collectable without blocking startup or requiring acknowledgement first.
+Original session files remain intact. The resident-only closed/failed/terminal
+packet variants and retained-object cancellation recipe are removed. Finite
+legacy recovery above is unchanged and cannot bypass resident ownership.
 
-Resident service stays in the background: it does not navigate to the owning task
-after observations or completion. Do not forward milestones or routine completion
-messages to a development/coordinator task. The requesting client collects the
-canonical answer; successful deliveries need no separate chat notification.
-Report actionable service failures to the owner without replaying a request.
+### Service and failure
 
-Do not restart a consumed open/serve call. A returned pending/blocked result, failed navigation, unresolved helper or owner mismatch stops service rather than authorizing another send. Preserve held delivery and canonical state. Forced host termination has no proven teardown guarantee.
+Serve handles gates, receive, dispatch and cleanup. Do not issue those operations
+separately while it runs. Idle native observations are bounded to 25 seconds
+inside the same evaluation. A non-self-renewing 60-second detector withdraws
+admission if that evaluation disappears. It is disabled during accepted Pro work
+and is never takeover permission. This is not reboot auto-start or a daemon.
 
-### Failed residence
+The service does not navigate or forward routine messages to development tasks.
+Claude collects the canonical answer. Report actionable failures only.
+Ten minutes remains an observation point, not a send retry or generation limit.
 
-Serve closes its socket as `resident_stopped` only after it observed the
-explicit stop with no failure, no pending helper and no held delivery. Every
-other ending—an exception, an undecodable tool result, a pending or blocked
-delivery, an unresolved helper, a changed owner or turn, a stop request that
-races a failure—closes as `resident_failed` and writes
-`resident-failure.json` (exclusive, synced) beside `session.json` with the
-error name, message, stack, cause, the undecodable tool result when there is
-one, the captured request ID and the held delivery. Serve never publishes the
-stop file itself; an existing client stop request stays as evidence.
+On failure, capture pending-helper identity before decoding transport, attempt
+to join that known execution, stop/join admission, preserve a private failure
+record and close the owned socket. A failed continuation admits no next request.
+Keep the first failure in `resident-failure.json` and final operation identities
+in `resident-failure-final.json`, even when the detector recorded failure first.
+An unresolved helper or native call retains ownership even if the socket closes.
+A fully joined failure may release, but its receipt still determines whether
+recovery is pre-arm or collect-only. Cleanup never resets that receipt.
 
-Failure finalization runs in a fixed order: any unresolved helper execution—
-serve's own or the runner's `pending_helper_session`, captured before the
-transport reply is decoded—is joined once (never raced with another writer);
-the failure summary is persisted; the captured request's canonical receipt is
-inspected with `status` and, when it is still `armed`, `submitted`, `pending`
-or `ambiguous`, moved through the existing locked `indeterminate` transition
-using the failure file as its reason—`complete` and already `indeterminate`
-receipts are preserved, and reconciliation is skipped and reported while a
-helper remains pending; finally the owned socket is closed. The
-`resident_closed` report separates the service outcome from the transport
-audit reason, which is immutable and may already read differently (for
-example `idle_expired`); the reason is reported only once the audit confirms
-it, and an unconfirmed close or audit turns even a clean stop into
-`resident_failed`—in that case the close failure itself is persisted as
-`resident-failure.json` (`cleanupStep: "socket_close"`) unless a primary
-failure record already exists, which is never rewritten. Cleanup problems are
-supplemental to the primary error and never replace it. Cleanup and claim recovery share one ownership proof—same
-parent broker, this invocation's token, the retained descriptor—evaluated
-without the per-turn gate, so a serve claim whose acknowledgment was lost
-still fails closed after a turn change while a duplicate serve, holding no
-token, never closes the running owner.
-
-The runner preserves every native envelope with its operation identity in
-the private evidence directory before decoding; an ambiguous evidence
-acknowledgment is confirmed by reading the file's exact bytes and syncing
-the file and its directory, and if any of that fails it stops pre-arm
-progress or enters post-arm failure handling without repeating any write or
-native operation. Only the two evidenced send
-acknowledgments are accepted: `{"threadId": <bound worker>}` and `{}`; any
-other shape is collect-only. Nothing is resent and `submission_count` is
-never inferred from a send acknowledgment.
-
-A failed residence admits no further request: its held delivery is retained,
-no further admission call is made, and later published commands remain
-unobserved evidence. `closed-resident-packet` refuses a `resident_failed`
-audit, as does canonical occupancy. Recover the affected request through its
-original request ID only: `pro-dispatch status "$RID"`, then collect-only
-observation with one read-only history (see native-request-broker.md), or
-explicitly authorized abandonment. Historical `resident_stopped` audits from
-earlier code are unchanged and, alone, still do not authorize replacement.
-
-One failure class never touched the worker and may be replaced explicitly,
-in the same retained native task, with:
-
-```sh
-node "$ACT" failed-resident-packet "$PARENT" "$PARENT" "$WORKER" "$OLD_DIR"
-```
-
-It accepts only a `resident_failed` audit with zero events whose
-`resident-failure.json` records `requestId: null`, `heldDelivery: null` and
-no pending helper, beside `session.json` and, when `stopRequested` is true,
-the stop pair; every `command-N` publication present must be contiguous,
-well formed, expired, unobserved (no `ready-N.json` or
-`command-observed-N.json`), and proven absent from canonical assignments and
-the queue. It further requires the retained owner (`used: true`, same closed
-socket, binding and descriptor), no held delivery, the same trusted parent
-and worker, clean canonical authority, and no other artifact of any kind.
-Everything else—an incomplete ticket, a fresh deadline, a captured request,
-a stale readiness marker, a foreign file—refuses, and the failed directory
-stays exactly as it was. On success it consumes the same exclusive
-`replacement-open.once.json` marker as a clean replacement before creating
-the fresh listener, and it never replays the unobserved requests; submit them
-again through a live waiter if still wanted.
+Native envelopes and operation identities remain in private evidence before
+decoding. Only the evidenced send acknowledgements `{}` and
+`{"threadId": <bound worker>}` are accepted; acknowledgement is not proof of
+submission. Publication still uses the existing native validator. The final
+`resident_closed` summary reports failure separately from immutable transport
+audit reasons. Forced host termination remains unqualified.
 
 ### Bounded actual-Claude qualification
 
@@ -416,8 +352,8 @@ node "$ACT" client-preflight "$CLIENT_ROOT"
 `CLIENT_ROOT` must already be a physical, owner-only directory legitimately
 accessible to that Claude session. The check creates, reads and removes only
 its own temporary probe. It never queues, arms or sends. The native owner can
-pass this same directory as the optional final argument to `resident-packet`
-or `closed-resident-packet`; the new listener is then created beneath it,
+pass this same directory as the required final argument to `resident-packet`;
+the new listener is then created beneath it,
 instead of an unrelated Codex temporary directory. Keep the directory path
 short enough for the platform's local socket limit.
 

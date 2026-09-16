@@ -105,6 +105,9 @@ class Queue:
     def save(self, record, *, _locked):
         _locked.validate(self.paths)
         core.reservation_guard(self.paths, _locked)
+        if record["state"] in {"claimed", "published", "released"}:
+            from .resident import guard
+            guard(self.paths, _locked, record["request_id"])
         path = self.path(record["request_id"])
         core.atomic_write_json(path, record, _locked=_locked)
 
@@ -320,6 +323,11 @@ class Queue:
             raise core.StateError("Broker requires the live desktop six-capability preflight")
         with self.locked() as locked:
             core.reservation_guard(self.paths, locked)
+            from .resident import guard
+            guard(self.paths, locked, request_id)
+            from .resident import invocation
+            if invocation.get() is not None and invocation.get().get("parent") != parent:
+                raise core.StateError("Resident claim parent mismatch")
             worker = (core.load_worker(self.paths, _locked=locked)
                       if expected_worker_conversation_id is not None else None)
             if worker is not None and worker.conversation_id != expected_worker_conversation_id:
@@ -393,6 +401,8 @@ class Queue:
         self.path(rid)
         core.validate_identifier(parent, field="parent_task_id")
         with self.locked() as locked:
+            from .resident import guard
+            guard(self.paths, locked, rid)
             r = self.load(rid, _locked=locked)
             if r.get("parent_task_id") != parent:
                 raise core.StateError("Release requires the recorded desktop parent")

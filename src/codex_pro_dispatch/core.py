@@ -635,6 +635,9 @@ def _snapshot(function):
 
 def reservation_guard(runtime, token, assignment_id=None, parent=None, claim=None):
     token.validate(runtime)
+    if assignment_id is not None:
+        from .resident import guard
+        guard(runtime, token, assignment_id)
     if os.path.lexists(runtime.state_dir / "native-client"):
         raise StateError("Unsupported native-client storage; preserve it")
     if any("native_client" in value
@@ -666,6 +669,8 @@ def save_worker(
         )
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
+        from .resident import guard
+        guard(runtime, locked, configuration=True)
         current = active_assignment(runtime, _locked=locked)
         if current:
             raise BusyError(
@@ -780,6 +785,13 @@ def _save_assignment(
     _locked,
 ) -> Path:
     _locked.validate(paths or default_paths())
+    from .resident import guard
+    guard(paths or default_paths(), _locked, assignment_id)
+    from .resident import invocation
+    caller = invocation.get()
+    if caller is not None and (value.get("parent_task_id") != caller.get("parent")
+                              or value.get("worker_conversation_id") != caller.get("worker")):
+        raise StateError("Resident receipt identity mismatch")
     path = assignment_path(assignment_id, paths)
     payload = dict(value)
     payload["schema_version"] = SCHEMA_VERSION
@@ -839,6 +851,8 @@ def redact_stored_diagnostics(paths: RuntimePaths | None = None,
                 )
             redacted, changed = _redact_diagnostic_fields(value)
             if changed:
+                from .resident import guard
+                guard(runtime, locked, assignment_id)
                 atomic_write_json(path, redacted, _locked=locked)
                 redacted_count += 1
     return redacted_count
@@ -947,6 +961,8 @@ def prepare_assignment(
 
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
+        from .resident import guard
+        guard(runtime, locked, resolved_id)
         worker = load_worker(runtime, _locked=locked)
         if assignment_path(resolved_id, runtime).exists():
             raise StateError(
@@ -1032,7 +1048,7 @@ def _transition(
     runtime = paths or default_paths()
     validate_status(target)
     with state_lock(runtime, token=_locked) as locked:
-        reservation_guard(runtime, locked)
+        reservation_guard(runtime, locked, assignment_id)
         value = load_assignment(assignment_id, runtime, _locked=locked)
         current = str(value["status"])
         if target != "abandoned":
@@ -1077,7 +1093,7 @@ def mark_submitted(
 ) -> dict[str, Any]:
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
-        reservation_guard(runtime, locked)
+        reservation_guard(runtime, locked, assignment_id)
         value = load_assignment(assignment_id, runtime, _locked=locked)
         _reject_legacy_active_assignment(value, operation="submitted")
         current = str(value.get("status"))
@@ -1254,7 +1270,7 @@ def mark_unusual_activity_403(
     runtime = paths or default_paths()
     allowed = {"armed", "submitted", "pending", "ambiguous", "indeterminate"}
     with state_lock(runtime, token=_locked) as locked:
-        reservation_guard(runtime, locked)
+        reservation_guard(runtime, locked, assignment_id)
         value = load_assignment(assignment_id, runtime, _locked=locked)
         _reject_legacy_active_assignment(value, operation="unusual-activity")
         current = str(value["status"])
@@ -1457,7 +1473,7 @@ def complete_assignment(
     raw = _response_bytes(response)
 
     with state_lock(runtime, token=_locked) as locked:
-        reservation_guard(runtime, locked)
+        reservation_guard(runtime, locked, assignment_id)
         value = load_assignment(assignment_id, runtime, _locked=locked)
         current = str(value["status"])
         _reject_legacy_active_assignment(value, operation="complete")
@@ -1572,6 +1588,8 @@ def reset_worker(
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
+        from .resident import guard
+        guard(runtime, locked, configuration=True)
         if not force:
             current = active_assignment(runtime, _locked=locked)
             if current:
@@ -1596,6 +1614,8 @@ def purge_local_state(
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
+        from .resident import guard
+        guard(runtime, locked, configuration=True)
         if os.path.lexists(runtime.state_dir / "queue"):
             raise StateError("Cannot purge while queue records exist; preserve queue receipts")
         if not force:

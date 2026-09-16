@@ -36,7 +36,7 @@
   },
   "runtime": {
     "skills/codex-pro-dispatch/scripts/parked-client.mjs": "f77698abac3f59ba0da48a39dfe6a4d8e3583f26b8d16b5e58975be2ecb22d27",
-    "skills/codex-pro-dispatch/scripts/parked-runner.js": "781cf78be08efa025efd86e07fa1d43f1e1639f73bd43b291ab15d1441368860",
+    "skills/codex-pro-dispatch/scripts/parked-runner.js": "813160d57afe6cee61f58353a41da4de23f672d0d244561e50e08cb337eb2ab6",
     "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "65b791760427c44ddd5afdf4756e02d73b886cd15dfe3028ed6b0dbbb2135ffc"
   },
   "schema_version": 1,

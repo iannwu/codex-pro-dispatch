@@ -14,9 +14,9 @@ const P="resident-parent",W="resident-pro",J=JSON.stringify;
 const AF=Object.getPrototypeOf(async function(){}).constructor;
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function waitForFile(p){
-for(let i=0;i<2000;i++){
+for(let i=0;i<500;i++){
 try{await fs.lstat(p);return;}catch(e){if(e.code!=="ENOENT")throw e;}
-await new Promise(r=>setImmediate(r));
+await new Promise(r=>setTimeout(r,10));
 }
 throw Error("Missing fixture file: "+p);
 }
@@ -53,7 +53,9 @@ const cli=args=>json("python3",[root+"bin/pro-dispatch",...args]);
 const activate=(args,preload=[])=>json(process.execPath,[...preload,author,...args]);
 t.after(async()=>{
 try{
-await (await import(author)).stopResidentAdmission(g.parkedResident??{});
+await (await import(author)).stopResidentAdmission(g.parkedResident??{}).catch(e=>{
+if(mode!=="beginlostwrite")throw e;assert.equal(e.code,"EEXIST");
+});
 await g.parkedSocket?.close("unit_cleanup");
 for(const child of children)child.kill("SIGTERM");
 await Promise.allSettled([...jobs]);
@@ -71,6 +73,12 @@ events.on("change",check);check();
 });
 }
 await cli(["worker","set","--conversation-id",W,"--confirm-pro","--native-controls-confirmed"]);
+const paths=(await cli(["status","--current"])).paths;
+const qualification=J({kind:"fresh_deployment",parent:P,worker:W,...paths,
+implementation:"unit-fixture",observations:"New isolated test authority, no native host",authorization:"Test harness only"});
+await fs.writeFile(d+"/qualification.json",qualification,{mode:384});
+await cli(["resident","enroll",J({generation:0,owner:"fixture-enrollment",parent:P,worker:W,
+evidence_file:d+"/qualification.json",evidence_sha256:(await import("node:crypto")).createHash("sha256").update(qualification).digest("hex")})]);
 const access=await activate(["client-preflight",d]);
 assert.equal(access.filesystemAccess,true);assert.equal(access.sendAuthorized,false);
 assert(!(await fs.readdir(d)).some(n=>n.startsWith(".pro-access-")));
@@ -103,16 +111,31 @@ const lines=[];
 await new AF("nodeRepl","globalThis","console","parkedSocket","parkedBinding",a.code)(
 {tmpDir:d,requestMeta:meta},g,{log:v=>lines.push(String(v))},
 g.parkedSocket,g.parkedBinding);
+if(mode==="evidenceerror"&&!s.evidenceError&&a.title==="Preserve native evidence"){
+s.evidenceError=true;return {isError:true,content:[{type:"text",text:lines.join("\n")}]};
+}
 return {content:[{type:"text",text:lines.join("\n")}]};
 },
 async exec_command(a){
 // Force a nonterminal observation past the budget, without real hour-long waits.
-if(mode==="pending"&&a.cmd.includes("'queue' 'observe'")){
+if(["pending","recoverypending"].includes(mode)&&a.cmd.includes("'queue' 'observe'")){
 s.tick+=3600001;
-return {exit_code:0,output:J({ok:true,request_id:last.id,parent_task_id:P,
+return {exit_code:0,output:J({ok:true,request_id:last?.id??"job-A",parent_task_id:P,
 worker_conversation_id:W,observation:"pending"})};
 }
 const pending=run("/bin/sh",["-c",a.cmd]);
+if(["beginlost","beginlostwrite","begindrained","beginmalformed"].includes(mode)&&a.cmd.includes("'resident' 'begin'")){
+await pending;
+if(mode==="beginmalformed")return {exit_code:0,output:"not JSON"};
+const id=++serial;sessions.set(id,pending);s.lostSession=id;
+if(mode==="begindrained")s.drainOnce=true;
+if(mode==="beginlostwrite"){
+// The first exclusive evidence write fails; a later independent write can work.
+await fs.mkdir(g.parkedResident.directory+"/resident-failure.json",{mode:448});
+}
+g.parkedResident.admission.expire();await g.parkedResident.admission.failure.catch(()=>{});
+return {session_id:id,output:""};
+}
 if(mode==="helperlost"&&a.cmd.includes("'arm'")){
 // The helper yields, then its host continuation is lost for good.
 const id=++serial;sessions.set(id,pending);s.lostSession=id;
@@ -132,7 +155,10 @@ return result;
 },
 async write_stdin(a){
 assert.equal(a.chars,"");assert(sessions.has(a.session_id));
-if(a.session_id===s.lostSession){s.drains=(s.drains||0)+1;throw Error(s.drains===1?"host lost":"host lost again");}
+if(a.session_id===s.lostSession){
+s.drains=(s.drains||0)+1;
+if(!s.drainOnce||s.drains===1)throw Error(s.drains===1?"host lost":"host lost again");
+}
 if(a.session_id===s.stuckSession){s.drains=(s.drains||0)+1;return {session_id:a.session_id,output:""};}
 const r=await sessions.get(a.session_id);sessions.delete(a.session_id);return r;
 },
@@ -142,7 +168,7 @@ if(mode==="stoprace"&&last)await stop(); // Explicit stop racing the failure bel
 if(mode==="nextqueued"&&last)await publishB(); // B published while A is failing.
 if(mode==="externalclose"&&last)await g.parkedSocket.close("unit_external_close");
 if(["blocked","stoprace","nextqueued","externalclose","blockedclosefail"].includes(mode)&&last)return {isError:true};
-return mcp({schemaVersion:1,thread:{id:W,kind:"chatgpt",status:{type:"idle"}},
+return mcp({schemaVersion:1,thread:{id:W,kind:"chatgpt",status:{type:mode==="busy"&&s.reads===1?"working":"idle"}},
 turns:last?[{id:"turn-"+last.id,items:[
 {id:"turn-"+last.id,type:"userMessage",content:[{type:"text",text:last.prompt}]},
 {id:"answer-"+last.id,type:"agentMessage",text:
@@ -151,7 +177,7 @@ turns:last?[{id:"turn-"+last.id,items:[
 },
 async mcp__codex_app__send_message_to_thread(a){
 assert.equal(a.threadId,W);
-assert.equal(g.parkedResident.admission.deadlineAt,null,"Idle detector must not time out Pro");
+assert.equal(g.parkedResident.admission?.deadlineAt??null,null,"Idle detector must not time out Pro");
 const id=/^\[CODEX_PRO_DISPATCH assignment_id=([^\]]+)\]\n/.exec(a.prompt)?.[1];
 assert(id);last={id,prompt:a.prompt};s.sends.push(id);
 // Retained incident acknowledgment shape, its empty variant, a foreign thread.
@@ -164,7 +190,9 @@ assert.fail("Resident execution must not navigate: "+a.threadId);
 }
 };
 async function open(){
-await new AF("tools","text",p.calls.open)(tools,()=>{});
+let result;
+await new AF("tools","text",p.calls.open)(tools,r=>{result=JSON.parse(r.content[0].text);});
+if(!["ready","collect_only"].includes(result.state))throw Error("Resident "+result.state+": "+result.reason);
 return g.parkedResident.directory;
 }
 const Clock=class extends Date{static now(){return Date.now()+s.tick;}};
@@ -175,8 +203,8 @@ String(n),id,prompt,"unit-client"]);
 const stop=()=>activate(["resident-stop",g.parkedResident.directory]);
 const repeat=id=>json(process.execPath,[scripts+"parked-client.mjs",
 g.parkedResident.directory,"submit",id,prompt,"unit-client"]);
-const reopen=async(action="closed-resident-packet",dir=g.parkedResident.directory)=>{
-p=await activate([action,P,P,W,dir,d]);
+const reopen=async()=>{
+p=await activate(["resident-packet",P,P,W,d]);
 return open();
 };
 // A client publication for ordinal n without waiting on its readiness
@@ -326,12 +354,13 @@ const waiting=residentAdmission(f.g,f.meta,"fixture-owner",1);
 await waitForFile(f.waiting(1));
 await fs.rename(f.waiting(1),d+"/command-1");await f.publish(1,"job-A");
 const next=await waiting;
+await f.cli(["resident","begin",J({...o.credentials,invocation:"fixture-owner",request:"job-A"})]);
 const receiving=residentAdmission(f.g,f.meta,"fixture-owner",1,next);
 const rejected=assert.rejects(receiving,/stopped renewing admission/);
 await waitForFile(d+"/ready-1.json");
 o.admission.expire();await rejected;await o.admission.failure;
 await missing(d+"/wake.sock");
-await assert.rejects(f.reopen("failed-resident-packet"),/Unproven resident artifacts/);
+await assert.rejects(f.reopen(),/busy/);
 await fs.lstat(d+"/command-observed-1.json");
 assert.deepEqual(f.s.sends,[]);
 });
@@ -343,6 +372,7 @@ const waiting=o.activation.residentAdmission(f.g,f.meta,"fixture-owner",1);
 await waitForFile(f.waiting(1));
 await fs.rename(f.waiting(1),d+"/command-1");await f.publish(1,"job-A");
 const next=await waiting;
+await f.cli(["resident","begin",J({...o.credentials,invocation:"fixture-owner",request:"job-A"})]);
 const receiving=o.activation.residentAdmission(f.g,f.meta,"fixture-owner",1,next);
 const rejected=assert.rejects(receiving,/Resident admission stopped/);
 await waitForFile(d+"/ready-1.json");
@@ -396,60 +426,36 @@ await fs.lstat(d+"/resident-failure.json");assert.deepEqual(f.s.sends,[]);
 }finally{release();hook.mock.restore();syncBuiltinESMExports();}
 });
 
-test("interrupted unserved owner cancels and reopens without sending",async t=>{
+
+test("interrupted unserved owner is replaced without a cancellation recipe",async t=>{
 const f=await fixture(t),old=await f.open();
-const {cancelUnstartedResident}=await import(author);
-await assert.rejects(cancelUnstartedResident(f.g,f.meta),/interrupted/);
 f.meta["x-codex-turn-metadata"].turn_id="next-turn";
-assert.equal((await cancelUnstartedResident(f.g,f.meta)).reason,"resident_start_cancelled");
+assert.notEqual(await f.reopen(),old);
 await missing(old+"/wake.sock");
-const fresh=await f.reopen();assert.notEqual(fresh,old);
 const serving=f.serve();await f.idle(1);await f.stop();await serving;
 assert.deepEqual(f.s.sends,[]);
 });
 
-for(const blocker of ["used","held","foreign","ready","queued"])
-test("interrupted recovery rejects "+blocker,async t=>{
-const f=await fixture(t),d=await f.open();
-const {cancelUnstartedResident}=await import(author);
-f.meta["x-codex-turn-metadata"].turn_id="next-turn";
-if(blocker==="used")f.g.parkedResident.used=true;
-if(blocker==="held")f.g.parkedDelivery={requestId:"unknown"};
-if(blocker==="foreign")f.meta.threadId="other-parent";
-if(blocker==="ready")await fs.writeFile(d+"/ready-1.json","{}",{mode:384});
-if(blocker==="queued"){
-await fs.mkdir(d+"/command-1",{mode:448});
-const prompt="Not to send",{createHash}=await import("node:crypto");
-await fs.writeFile(d+"/command-1/prompt.txt",prompt,{mode:384});
-await fs.writeFile(d+"/command-1.json",J({sessionId:f.g.parkedSocket.config.sessionId,
-ordinal:1,requestId:"queued",deadlineAt:1,promptSha256:createHash("sha256").update(prompt).digest("hex")}),{mode:384});
-await f.cli(["queue","submit","--request-id","queued","--prompt-file",d+"/command-1/prompt.txt","--client-session-id","unit-client"]);
-}
-await assert.rejects(cancelUnstartedResident(f.g,f.meta));
-await fs.lstat(d+"/wake.sock");await missing(d+"/transport-audit.json");
+test("old artifacts survive replacement and do not grant send permission",async t=>{
+const f=await fixture(t),old=await f.open();
+await fs.writeFile(old+"/command-1.json","uninterpreted old evidence",{mode:384});
+assert.notEqual(await f.reopen(),old);
+assert.equal(await fs.readFile(old+"/command-1.json","utf8"),"uninterpreted old evidence");
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
 assert.deepEqual(f.s.sends,[]);
 });
 
-test("expired unobserved request remains evidence, never resubmitted",async t=>{
-const f=await fixture(t),d=await f.open();
-const {cancelUnstartedResident}=await import(author),{createHash}=await import("node:crypto");
-const prompt="Cancelled",raw=J({sessionId:f.g.parkedSocket.config.sessionId,
-ordinal:1,requestId:"cancelled",deadlineAt:1,promptSha256:createHash("sha256").update(prompt).digest("hex")});
-await fs.mkdir(d+"/command-1",{mode:448});
-await fs.writeFile(d+"/command-1/prompt.txt",prompt,{mode:384});
-await fs.writeFile(d+"/command-1.json",raw,{mode:384});
-f.meta["x-codex-turn-metadata"].turn_id="next-turn";
-await cancelUnstartedResident(f.g,f.meta);
-assert.notEqual(await f.reopen(),d);
-assert.equal(await fs.readFile(d+"/command-1.json","utf8"),raw);
-assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+test("unfenced retained legacy socket is not enrolled",async t=>{
+const f=await fixture(t);await f.open();
+delete f.g.parkedResident.credentials;
+await assert.rejects(f.reopen(),/Unfenced legacy/);
 assert.deepEqual(f.s.sends,[]);
 });
 
 for(const ids of [[],["job-A","job-B"]])
 test("resident unknown-request cycle: "+ids.join(","),async t=>{
 const f=await fixture(t),d=await f.open();
-await assert.rejects(f.open());
+assert.equal(f.g.parkedResident.used,false);
 const serving=f.serve();await f.idle(1);
 // A duplicate serve is refused and never closes or cleans up the running owner.
 await assert.rejects(f.serve(),/Serve consumed/);
@@ -488,8 +494,8 @@ const second=f.serve();await f.idle(2);
 await f.stop();await second;
 assert.deepEqual(f.s.sends,[]);
 await missing(old+"/wake.sock");
-assert.equal(JSON.parse(await fs.readFile(old+"/replacement-open.once.json","utf8")).previousSessionId,
-JSON.parse(await fs.readFile(old+"/session.json","utf8")).sessionId);
+assert.equal((await f.cli(["resident","inspect"])).owner.generation,3);
+await missing(old+"/replacement-open.once.json");
 });
 
 test("stopped resident preserves and skips multiple expired unobserved commands",async t=>{
@@ -637,7 +643,7 @@ assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
 // No replay: the closed resident refuses clients, and the claimed ticket
 // blocks replacement while staying exactly as it was.
 await assert.rejects(f.start(1,"job-A"),/Existing rendezvous artifact/);
-await assert.rejects(f.reopen());
+assert.notEqual(await f.reopen(),d);
 assert.deepEqual(await fs.readdir(d+"/command-1"),[]);await missing(d+"/command-1.json");
 assert.deepEqual(f.s.sends,[]);
 });
@@ -660,69 +666,17 @@ await missing(old+"/wake.sock");
 return {f,old,failure};
 }
 
-test("failed-resident-packet replaces a zero-send failed residence once, in the same task",async t=>{
+
+test("zero-send failure uses ordinary startup and preserves evidence",async t=>{
 const {f,old,failure}=await failedResidence(t);
 const before=await fs.readFile(old+"/command-1.json");
-// The ordinary replacement and cancellation paths still refuse this closure.
-await assert.rejects(f.reopen(),/not a matching closed/);
-const {cancelUnstartedResident}=await import(author);
-await assert.rejects(cancelUnstartedResident(f.g,f.meta),/Not an interrupted unserved owner/);
-await missing(old+"/replacement-open.once.json");
-const fresh=await f.reopen("failed-resident-packet");
-assert.notEqual(fresh,old);
-// Old evidence is intact and the replacement marker is consumed exactly once.
+const fresh=await f.reopen();assert.notEqual(fresh,old);
 assert.deepEqual(await fs.readFile(old+"/command-1.json"),before);
-assert.deepEqual(JSON.parse(await fs.readFile(old+"/resident-failure.json","utf8")),failure);
-assert.equal(JSON.parse(await fs.readFile(old+"/replacement-open.once.json","utf8")).previousSessionId,failure.sessionId);
-await assert.rejects(f.reopen("failed-resident-packet",old),/Unproven resident artifacts/);
-// The fresh residence serves new work; the unobserved request is never replayed.
+assert.deepEqual(JSON.parse(await fs.readFile(old+"/resident-failure.json")),failure);
 const second=f.serve();await f.idle(2);
-await f.start(1,"job-B");await f.idle(3);
-assert.equal((await f.cli(["queue","collect","job-B"])).state,"published");
-await f.stop();await second;
+await f.start(1,"job-B");await f.idle(3);await f.stop();await second;
 assert.deepEqual(f.s.sends,["job-B"]);
 assert.deepEqual((await f.cli(["queue","status"])).requests.map(r=>r.request_id),["job-B"]);
-});
-
-test("failed-resident-packet refuses any retained request, delivery, event, artifact or authority change",async t=>{
-const {f,old,failure}=await failedResidence(t);
-const failed=()=>f.reopen("failed-resident-packet");
-const failureFile=old+"/resident-failure.json",rewrite=v=>fs.writeFile(failureFile,J(v),{mode:384});
-for(const [name,patch] of [["requestId","job-A"],["heldDelivery",{requestId:"job-A"}],["pendingHelperSession",7]]){
-await rewrite({...failure,[name]:patch});
-await assert.rejects(failed(),/retained a request, delivery or helper/);
-}
-await rewrite({...failure,extra:true});
-await assert.rejects(failed(),/retained a request, delivery or helper/);
-await rewrite(failure);
-for(const name of ["command-observed-1.json","ready-1.json","stray.json"]){
-await fs.writeFile(old+"/"+name,"{}",{mode:384});
-await assert.rejects(failed(),/Unproven resident artifacts/);
-await fs.rm(old+"/"+name);
-}
-// A publication that has not expired is not proven unobservable yet.
-const command=await fs.readFile(old+"/command-1.json");
-await fs.writeFile(old+"/command-1.json",J({...JSON.parse(command),deadlineAt:Date.now()+60000}),{mode:384});
-await assert.rejects(failed(),/Unproven resident artifacts/);
-await fs.writeFile(old+"/command-1.json",command,{mode:384});
-// Retained runtime state and trusted authority must match exactly.
-f.g.parkedDelivery={requestId:"uncertain"};
-await assert.rejects(failed(),/not recoverable/);
-f.g.parkedDelivery=null;
-const owner=f.g.parkedResident;
-f.g.parkedResident={...owner,used:false};
-await assert.rejects(failed(),/Owner exists/);
-f.g.parkedResident=owner;
-const setWorker=(id,expected)=>f.cli(["worker","set","--conversation-id",id,"--expected-conversation-id",expected,"--confirm-pro","--native-controls-confirmed"]);
-await setWorker("other-pro",W);
-await assert.rejects(failed(),/Production worker mismatch/);
-await setWorker(W,"other-pro");
-await assert.rejects(f.activate(["failed-resident-packet","other-task","other-task",W,old,f.d]),/not a matching closed/);
-// The unobserved request entering the canonical queue blocks replacement for good.
-await f.cli(["queue","submit","--request-id","job-A","--prompt-file",f.d+"/prompt.txt","--client-session-id","unit-client"]);
-await assert.rejects(failed(),/entered queue/);
-await missing(old+"/replacement-open.once.json");
-assert.deepEqual(f.s.sends,[]);
 });
 
 test("waiting for client permission creates no request or pickup deadline",async t=>{
@@ -759,19 +713,21 @@ await f.stop();await second;
 assert.deepEqual(f.s.sends,["job-A","job-B"]);
 });
 
-test("unacknowledged answer prevents closed resident replacement",async t=>{
+test("unacknowledged answer survives replacement and stays collectable",async t=>{
 const f=await fixture(t);await f.open();const serving=f.serve();
 await f.idle(1);await f.start(1,"job-A");await f.idle(2);
 await f.stop();await serving;
-await assert.rejects(f.reopen(),/Canonical terminal receipt mismatch/);
+await f.reopen();
+assert.equal((await f.cli(["queue","collect","job-A"])).state,"published");
 assert.deepEqual(f.s.sends,["job-A"]);
 });
 
-test("unexpected command evidence prevents unused resident replacement",async t=>{
+test("uninterpreted old command evidence survives safe replacement",async t=>{
 const f=await fixture(t),d=await f.open(),serving=f.serve();
 await f.idle(1);await f.stop();await serving;
 await fs.writeFile(d+"/command-1.json","{}",{mode:384});
-await assert.rejects(f.reopen(),/Unproven resident artifacts/);
+assert.notEqual(await f.reopen(),d);
+assert.equal(await fs.readFile(d+"/command-1.json","utf8"),"{}");
 await missing(d+"/replacement-open.once.json");
 });
 
@@ -785,223 +741,144 @@ await assert.rejects(f.activate(["client-preflight",f.d+"/alias"]),/owner-only/)
 assert.deepEqual(await fs.readdir(root),[]);
 });
 
-test("held delivery or changed retained owner blocks restart before marker",async t=>{
-const f=await fixture(t),d=await f.open(),serving=f.serve();
-await f.idle(1);await f.stop();await serving;
-f.g.parkedDelivery={requestId:"uncertain"};
-await assert.rejects(f.reopen(),/not recoverable/);
-await missing(d+"/replacement-open.once.json");
+
+test("in-flight canonical reservation blocks replacement, regardless of empty globals",async t=>{
+const f=await fixture(t),d=await f.open(),c=f.g.parkedResident.credentials;
+await f.cli(["resident","begin",J({...c,invocation:"paused-native-execution",request:"job-A"})]);
 f.g.parkedDelivery=null;
-f.g.parkedResident={...f.g.parkedResident,used:false};
-await assert.rejects(f.reopen(),/Owner exists/);
-await missing(d+"/replacement-open.once.json");
+await assert.rejects(f.reopen(),/busy/);
+assert.equal((await f.cli(["resident","inspect"])).owner.generation,c.generation);
+await fs.lstat(d+"/wake.sock");assert.deepEqual(f.s.sends,[]);
 });
 
-// exit_label_matrix: every unresolved outcome fails the residence; only the
-// explicit stop above closes as resident_stopped. Delivery stays held.
-for(const mode of ["pending","blocked","owner","turn","decoder","transport","ackworker","stoprace","externalclose"])
-test("resident fails and retains delivery: "+mode,async t=>{
+for(const mode of ["pending","blocked","owner","turn","decoder","transport","ackworker","stoprace","externalclose","runnerpending","helperlost","blockedclosefail","evidenceerror"])
+test("failure releases only joined work and cannot admit another request: "+mode,async t=>{
 const f=await fixture(t,mode),d=await f.open(),serving=f.serve();
 await f.idle(1);
 const [served]=await Promise.allSettled([serving,f.start(1,"job-A")]);
 assert.equal(served.status,"rejected");
 assert.equal(f.s.waits,1);
-assert.equal(f.g.parkedDelivery?.requestId,"job-A");
-const receipt=f.out.find(v=>v.kind==="runner_receipt");
-if(["pending","blocked","decoder","ackworker","stoprace","externalclose"].includes(mode))
-assert.equal(receipt?.state,mode==="pending"?"pending":"blocked");
-if(mode==="transport")assert.equal(receipt?.state,"published");
-assert(!JSON.stringify(f.out).includes('"payload"'));
-const closed=f.out.find(v=>v.kind==="resident_closed");
-assert.equal(closed.outcome,"resident_failed");
-assert.equal(closed.transportReason,mode==="externalclose"?"unit_external_close":"resident_failed");
-assert.deepEqual(closed.supplemental,[]);
+const state=(await f.cli(["resident","inspect"])).owner;
+const joined=["pending","owner","turn","decoder","transport","ackworker"].includes(mode);
+if(joined){
+assert.equal(state.inflight,null);
+assert.notEqual(await f.reopen(),d);
+assert.equal(f.g.parkedResident.collectOnly,mode!=="transport");
+assert.equal(f.g.parkedResident.recover,mode==="transport"?null:"job-A");
+}else{
+assert.equal(state.inflight.request,"job-A");
+await assert.rejects(f.reopen(),/busy/);
+assert.equal((await f.cli(["resident","inspect"])).owner.generation,state.generation);
+}
 const a=(await f.cli(["status","job-A"])).assignment;
 assert.equal(a.no_resend,true);
-if(mode==="transport"){
-// Exception outside the runner's catch after completion: receipt preserved.
-assert.equal(a.status,"complete");
-assert.deepEqual(closed.reconciliation,{requestId:"job-A",receipt:"complete",transition:null});
-}else{
-// Every unresolved post-arm receipt is reconciled durably to indeterminate,
-// including the pending return with submission_count still zero.
-assert.equal(a.status,"indeterminate");
-assert.equal(a.submission_count,0);
-assert.equal(a.submission_may_have_occurred,true);
-assert.equal(closed.reconciliation.requestId,"job-A");
-assert.equal(closed.reconciliation.receipt,"indeterminate");
-// The runner already reconciled its own catch; the pending return and the
-// guard failures (whose guarded helper could not run) rely on the outer path.
-const outer=["pending","owner","turn"].includes(mode);
-assert.equal(closed.reconciliation.transition,outer?"indeterminate":null);
-if(outer)assert.equal(closed.reconciliation.from,"armed");
-}
-const repeated=await f.repeat("job-A");
-if(mode==="transport")assert.equal(repeated.state,"published");
-else assert.equal(repeated.wake.status,"collect_only");
-await assert.rejects(f.serve());
-await missing(d+"/ready-2.json");await missing(d+"/wake.sock");
-// The first transport close reason is immutable and reported as observed.
-assert.equal(JSON.parse(await fs.readFile(d+"/transport-audit.json","utf8")).reason,closed.transportReason);
-const failure=JSON.parse(await fs.readFile(d+"/resident-failure.json","utf8"));
-assert.equal(failure.requestId,"job-A");
-assert.equal(failure.sessionId,f.g.parkedResident.socket.config.sessionId);
-assert.equal(failure.heldDelivery.requestId,"job-A");
-assert.equal(failure.stopRequested,false);
-assert.equal(typeof failure.error.name,"string");
-assert.equal(typeof failure.error.message,"string");
-assert.equal(typeof failure.error.stack,"string");
-if(mode==="transport"){
-assert.equal(failure.error.message,"Invalid tool result");
-assert.equal(failure.error.detail.content.length,2);
-}
-if(mode==="stoprace")await fs.lstat(d+"/resident-stop.json");
-else await missing(d+"/resident-stop.json");
-// Canonical occupancy refuses first; a resident_failed audit alone never
-// authorizes replacement either.
-await assert.rejects(f.reopen(),/Authority occupied|not a matching closed/);
-await missing(d+"/replacement-open.once.json");
-assert.deepEqual(f.s.sends,["owner","turn"].includes(mode)?[]:["job-A"]);
+assert(["armed","indeterminate","complete"].includes(a.status));
+assert.deepEqual(f.s.sends,["owner","turn","runnerpending","helperlost"].includes(mode)?[]:["job-A"]);
+await missing(d+"/ready-2.json");
+assert(!JSON.stringify(f.out).includes('"payload"'));
+assert.equal(f.out.find(v=>v.kind==="resident_closed").reservation_retained,!joined);
 });
 
-// official_success_variants: the retained incident acknowledgment completes
-// exactly one request through the resident, like the empty variant above.
-test("resident accepts the incident send acknowledgment shape",async t=>{
+test("startup recovery retains finite observation budget and sends nothing",async t=>{
+const f=await fixture(t,"recoverypending");await f.open();
+const c={...f.g.parkedResident.credentials,invocation:"fixture-prior",request:"job-A"};
+await f.cli(["queue","submit","--request-id","job-A","--prompt-file",f.d+"/prompt.txt","--client-session-id","unit-client"]);
+await f.cli(["resident","begin",J(c)]);
+await f.cli(["--resident-invocation",J(c),"queue","claim","--parent-task-id",P,"--native-controls-confirmed","--request-id","job-A"]);
+await f.cli(["--resident-invocation",J(c),"arm","job-A"]);
+await f.cli(["resident","end",J(c)]);await f.reopen();
+await assert.rejects(f.serve(),/Recovery observation ended/);
+assert.deepEqual(f.s.sends,[]);assert.equal(f.s.waits,0);
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight,null);
+assert.equal((await f.cli(["status","job-A"])).assignment.no_resend,true);
+});
+
+test("final failure preserves helper handle after detector wrote first failure",async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+const {recordResidentFailure}=await import(author);
+await recordResidentFailure(o,{reason:"detector",pendingHelperSession:null});
+const before=await fs.readFile(d+"/resident-failure.json");
+await recordResidentFailure(o,{reason:"cleanup",pendingHelperSession:37,helperUncertain:true},true);
+assert.deepEqual(await fs.readFile(d+"/resident-failure.json"),before);
+assert.equal(JSON.parse(await fs.readFile(d+"/resident-failure-final.json")).pendingHelperSession,37);
+});
+
+for(const mode of ["beginlost","beginlostwrite"])
+test("detector expiry during pending begin preserves handle and canonical reservation: "+mode,async t=>{
+const f=await fixture(t,mode),d=await f.open(),serving=f.serve();
+await f.idle(1);
+const results=await Promise.allSettled([serving,f.start(1,"job-A")]);
+assert.equal(results[0].status,"rejected");assert.deepEqual(f.s.sends,[]);
+if(mode==="beginlost")assert.equal(JSON.parse(await fs.readFile(d+"/resident-failure.json")).pendingHelperSession,null);
+const final=JSON.parse(await fs.readFile(d+"/resident-failure-final.json"));
+assert.equal(final.pendingHelperSession,f.s.lostSession);assert.equal(final.helperUncertain,true);
+if(mode==="beginlostwrite")assert.equal(final.firstRecordFailed,true);
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight.request,"job-A");
+await assert.rejects(f.reopen(),/busy/);
+});
+
+for(const mode of ["begindrained","beginmalformed"])
+test("unacknowledged begin never reports absent ownership: "+mode,async t=>{
+const f=await fixture(t,mode);await f.open();const serving=f.serve();await f.idle(1);
+const results=await Promise.allSettled([serving,f.start(1,"job-A")]);
+assert.equal(results[0].status,"rejected");assert.deepEqual(f.s.sends,[]);
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight.request,"job-A");
+assert.equal(f.out.find(v=>v.kind==="resident_closed").reservation_retained,"unknown");
+await assert.rejects(f.reopen(),/busy/);
+});
+
+test("joined pre-arm failure resumes the same request once",async t=>{
+const f=await fixture(t,"busy"),old=await f.open(),first=f.serve();
+await f.idle(1);
+const result=await Promise.allSettled([first,f.start(1,"job-A")]);
+assert.equal(result[0].status,"rejected");assert.deepEqual(f.s.sends,[]);
+assert.equal((await f.cli(["status","job-A"])).assignment.status,"prepared");
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight,null);
+assert.notEqual(await f.reopen(),old);
+assert.equal(f.g.parkedResident.recover,"job-A");
+const second=f.serve();await f.idle(2);await f.stop();await second;
+assert.deepEqual(f.s.sends,["job-A"]);
+assert.equal((await f.cli(["queue","collect","job-A"])).state,"published");
+});
+
+test("resident accepts the incident native acknowledgment",async t=>{
 const f=await fixture(t,"ack"),d=await f.open(),serving=f.serve();
 await f.idle(1);await f.start(1,"job-A");await f.idle(2);
 const collected=await f.cli(["queue","collect","job-A"]);
 assert.equal(collected.state,"published");
-const a=(await f.cli(["status","job-A"])).assignment;
-assert.equal(a.status,"complete");assert.equal(a.submission_count,1);
+assert.equal((await f.cli(["status","job-A"])).assignment.submission_count,1);
 await f.stop();await serving;
 assert.deepEqual(f.s.sends,["job-A"]);
-assert.equal(JSON.parse(await fs.readFile(d+"/transport-audit.json","utf8")).reason,"resident_stopped");
-await missing(d+"/resident-failure.json");
-assert.deepEqual(f.out.find(v=>v.kind==="resident_closed"),
-{kind:"resident_closed",outcome:"resident_stopped",transportReason:"resident_stopped",reconciliation:null,supplemental:[]});
+assert.equal(JSON.parse(await fs.readFile(d+"/transport-audit.json")).reason,"resident_stopped");
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight,null);
 });
 
-// A serve claim that executed but lost its acknowledgment still belongs to
-// this invocation: it fails closed instead of leaving a consumed open owner,
-// even when the turn changed and the old-turn gate would refuse.
 for(const mode of ["claimlost","claimlostturn"])
-test("lost serve-claim acknowledgment recovers ownership and fails closed: "+mode,async t=>{
+test("lost unserved claim can be replaced without transferring a native invocation: "+mode,async t=>{
 const f=await fixture(t,mode),d=await f.open();
 await assert.rejects(f.serve(),/Invalid tool result/);
-assert.equal(f.s.waits,0);
-assert.equal(f.g.parkedResident.used,true);
-await missing(d+"/wake.sock");
-assert.equal(JSON.parse(await fs.readFile(d+"/transport-audit.json","utf8")).reason,"resident_failed");
-const failure=JSON.parse(await fs.readFile(d+"/resident-failure.json","utf8"));
-assert.equal(failure.error.message,"Invalid tool result");
-assert.equal(failure.error.detail.content.length,2);
-assert.equal(failure.requestId,null);
-const closed=f.out.find(v=>v.kind==="resident_closed");
-assert.equal(closed.outcome,"resident_failed");assert.equal(closed.reconciliation,null);
-await assert.rejects(f.serve(),mode==="claimlost"?/Serve consumed/:/turn changed/);
+assert.equal(f.s.waits,0);assert.equal(f.g.parkedResident.used,true);
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight,null);
+assert.notEqual(await f.reopen(),d);
+assert.deepEqual(f.s.sends,[]);
 });
 
-// A duplicate serve whose own claim reply is lost holds no token: it is
-// refused without closing, cleaning up or reporting on the running owner.
-test("duplicate serve with a lost claim reply never closes the running owner",async t=>{
+test("duplicate serve with a lost reply never closes the real owner",async t=>{
 const f=await fixture(t,"dupelost"),d=await f.open(),serving=f.serve();
-await f.idle(1);
-await assert.rejects(f.serve(),/Invalid tool result/);
-assert.equal(f.s.claims,2);
-await missing(d+"/transport-audit.json");await missing(d+"/resident-failure.json");
-assert(!f.out.some(v=>v.kind==="resident_closed"));
-await f.start(1,"job-A");await f.idle(2);
-await f.stop();await serving;
+await f.idle(1);await assert.rejects(f.serve(),/Invalid tool result/);
+await missing(d+"/transport-audit.json");
+await f.start(1,"job-A");await f.idle(2);await f.stop();await serving;
 assert.deepEqual(f.s.sends,["job-A"]);
-assert.equal(JSON.parse(await fs.readFile(d+"/transport-audit.json","utf8")).reason,"resident_stopped");
 });
 
-// The runner's own unresolved helper is captured before the transport reply
-// is decoded, drained once by cleanup, retained in the failure file, and
-// blocks reconciliation while it stays pending.
-test("runner-owned pending helper is captured, drained once and blocks reconciliation",async t=>{
-const f=await fixture(t,"runnerpending"),d=await f.open(),serving=f.serve();
-await f.idle(1);
-const [served]=await Promise.allSettled([serving,f.start(1,"job-A")]);
-assert.equal(served.status,"rejected");
-assert.equal(f.s.drains,2); // one runner poll, one cleanup drain
-assert.deepEqual(f.s.sends,[]);
-const closed=f.out.find(v=>v.kind==="resident_closed");
-assert.equal(closed.outcome,"resident_failed");
-assert.equal(closed.transportReason,"resident_failed");
-assert.deepEqual(closed.reconciliation,{requestId:"job-A",skipped:"helper_pending"});
-assert.deepEqual(closed.supplemental,[{step:"helper_drain",message:"Helper still pending"}]);
-const failure=JSON.parse(await fs.readFile(d+"/resident-failure.json","utf8"));
-assert.equal(failure.pendingHelperSession,f.s.stuckSession);
-assert.equal(failure.requestId,"job-A");
-});
-
-// A clean stop whose socket close or audit confirmation fails is not a clean
-// service outcome; the transport reason is reported only when confirmed.
 for(const mode of ["closefail","auditlost"])
-test("clean stop with an unconfirmed close fails the service: "+mode,async t=>{
+test("unconfirmed close reports failure and never erases evidence: "+mode,async t=>{
 const f=await fixture(t,mode),d=await f.open(),serving=f.serve();
-await f.idle(1);await f.stop();
-await assert.rejects(serving,/Resident cleanup incomplete/);
-const closed=f.out.find(v=>v.kind==="resident_closed");
-assert.equal(closed.outcome,"resident_failed");
-assert.equal(closed.transportReason,null);
-assert.equal(closed.reconciliation,null);
-assert.deepEqual(closed.supplemental.map(v=>v.step),["socket_close"]);
-// The cleanup failure itself is persisted as the residence's failure record.
-const failure=JSON.parse(await fs.readFile(d+"/resident-failure.json","utf8"));
-assert.equal(failure.sessionId,f.g.parkedResident.socket.config.sessionId);
-assert.equal(failure.cleanupStep,"socket_close");
-assert.equal(failure.stopRequested,true);
-assert.equal(failure.requestId,null);assert.equal(failure.heldDelivery,null);
-assert.equal(failure.error.message,"Invalid tool result");
-if(mode==="closefail"){await fs.lstat(d+"/wake.sock");await missing(d+"/transport-audit.json");}
-else assert.equal(JSON.parse(await fs.readFile(d+"/transport-audit.json","utf8")).reason,"resident_stopped");
-// Replacement is refused: no audit exists (closefail) or the failure file
-// contradicts the resident_stopped audit (auditlost). Evidence is preserved.
-await assert.rejects(f.reopen(),mode==="closefail"?/transport-audit\.json/:/Unproven resident artifacts/);
-await fs.lstat(d+"/resident-failure.json");
-await missing(d+"/replacement-open.once.json");
-});
-
-// When the primary failure was already persisted, a later close failure is
-// only supplemental: the record is never rewritten or duplicated.
-test("close failure after a persisted primary failure keeps that record",async t=>{
-const f=await fixture(t,"blockedclosefail"),d=await f.open(),serving=f.serve();
-await f.idle(1);
-const [served]=await Promise.allSettled([serving,f.start(1,"job-A")]);
-assert.equal(served.status,"rejected");
-assert.match(served.reason.message,/Resident delivery unresolved/);
-const closed=f.out.find(v=>v.kind==="resident_closed");
-assert.equal(closed.outcome,"resident_failed");assert.equal(closed.transportReason,null);
-assert.deepEqual(closed.supplemental.map(v=>v.step),["socket_close"]);
-const failure=JSON.parse(await fs.readFile(d+"/resident-failure.json","utf8"));
-assert.equal(failure.cleanupStep,undefined);
-assert.match(failure.error.message,/Resident delivery unresolved/);
-assert.equal(failure.requestId,"job-A");assert.equal(failure.heldDelivery.requestId,"job-A");
-assert.equal((await f.cli(["status","job-A"])).assignment.status,"indeterminate");
-assert.deepEqual(f.s.sends,["job-A"]);
-});
-
-// A helper whose host continuation is lost is joined once, reported, and the
-// primary failure survives the drain failure; no canonical write races it.
-test("lost helper host preserves the primary error and skips racing reconciliation",async t=>{
-const f=await fixture(t,"helperlost"),d=await f.open(),serving=f.serve();
-await f.idle(1);
-const [served]=await Promise.allSettled([serving,f.start(1,"job-A")]);
-assert.equal(served.status,"rejected");
-assert.match(served.reason.message,/Resident delivery unresolved/);
-assert.equal(f.s.drains,2);
+await f.idle(1);await f.stop();await assert.rejects(serving,/Invalid tool result/);
+assert.equal(f.out.find(v=>v.kind==="resident_closed").outcome,"resident_failed");
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight,null);
+await fs.lstat(d+"/session.json");
 assert.deepEqual(f.s.sends,[]);
-const closed=f.out.find(v=>v.kind==="resident_closed");
-assert.equal(closed.outcome,"resident_failed");
-assert.equal(closed.transportReason,"resident_failed");
-assert.deepEqual(closed.supplemental,[{step:"helper_drain",message:"host lost again"}]);
-assert.deepEqual(closed.reconciliation,{requestId:"job-A",skipped:"helper_pending"});
-const failure=JSON.parse(await fs.readFile(d+"/resident-failure.json","utf8"));
-assert.equal(failure.pendingHelperSession,f.s.lostSession);
-assert.match(failure.error.message,/Resident delivery unresolved/);
-await missing(d+"/wake.sock");
 });
 
 // no_next_admission: B is published while A fails. No second wait, readiness,

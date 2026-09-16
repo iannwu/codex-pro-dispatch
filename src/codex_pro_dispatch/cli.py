@@ -91,7 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="State and safety helper for the official-app Codex Pro Dispatch skill.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--resident-invocation", type=json.loads,
+                        help="Trusted runner invocation, not client request data")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    resident = subparsers.add_parser("resident", help="Canonical resident ownership")
+    resident.add_argument("operation", choices=["inspect", "enroll", "start", "check", "begin", "end"])
+    resident.add_argument("credentials", type=json.loads, nargs="?", default={})
 
     queue = subparsers.add_parser("queue", help="Private native request broker queue")
     qs = queue.add_subparsers(dest="queue_command", required=True)
@@ -560,8 +566,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    from .resident import invocation, control
+    token = invocation.set(args.resident_invocation)
     try:
-        payload = run(args)
+        payload = (control(args.operation, args.credentials) if args.command == "resident"
+                   else run(args))
         emit(payload)
         if args.command == "doctor" and not payload.get("ok", False):
             return 1
@@ -583,6 +592,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             stream=sys.stderr,
         )
         return 1
+    finally:
+        invocation.reset(token)
 
 
 if __name__ == "__main__":
