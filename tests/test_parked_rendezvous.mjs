@@ -29,7 +29,7 @@ catch(e){if(e.code!=="ENOENT"&&!(e instanceof SyntaxError))end(e);}
 w.on("error",e=>end(e));void check();
 });
 }
-async function fixture(t,idleMs=5000,resident=false){
+async function fixture(t,idleMs=5000){
 const d=await fs.realpath(await fs.mkdtemp(tmpdir()+"/pro-rendezvous-unit-"));
 const session=d+"/session",home=d+"/authority",helper=root+"bin/pro-dispatch";
 const env={...process.env,CODEX_PRO_DISPATCH_HOME:home};
@@ -56,25 +56,15 @@ await fs.mkdir(session,{mode:448});
 const socket=await openSession(session,{
 helper,configDir:home+"/config",stateDir:home+"/state",
 worker:"fixture-pro",parent:"fixture-parent",
-leaseMs:resident?null:60000,idleMs,replyMs:10000,...(resident?{resident:true}:{})
+leaseMs:60000,idleMs,replyMs:10000
 });
 const prompt=d+"/prompt.txt";
 await fs.writeFile(prompt,"Review exact bytes: café.\n",{mode:384});
 const activate=(...args)=>run(process.execPath,[scripts+"parked-activation.mjs",...args]);
-// A resident client publishes only toward a live resident-next waiter; this
-// fixture drives command-ready directly, so it stands in as that waiter.
-const beats=new Set();
-async function waiting(ordinal){
-if(!resident)return;
-const marker=session+"/waiting-"+ordinal+"."+socket.config.sessionId;
-try{await fs.mkdir(marker,{mode:448});}
-catch(e){if(e.code!=="EEXIST")throw e;}
-beats.add(setInterval(()=>fs.utimes(marker,new Date(),new Date()).catch(()=>{}),1000));
-}
-const start=async(ordinal,rid,file=prompt)=>{await waiting(ordinal);return activate(
-"rendezvous",session,String(ordinal),rid,file,"fixture-client");};
-const retry=async(ordinal,rid,attempt)=>{await waiting(ordinal);return activate(
-"rendezvous-retry",session,String(ordinal),rid,attempt);};
+const start=(ordinal,rid,file=prompt)=>activate(
+"rendezvous",session,String(ordinal),rid,file,"fixture-client");
+const retry=(ordinal,rid,attempt)=>activate(
+"rendezvous-retry",session,String(ordinal),rid,attempt);
 const gate=(ordinal,rid,attempt,preload)=>run(process.execPath,[
 ...(preload?["--require",preload]:[]),scripts+"parked-activation.mjs",
 "command-ready",session,String(ordinal),rid,...(attempt===undefined?[]:[attempt])
@@ -104,7 +94,6 @@ await socket.finish(delivery.callId,answer);
 return answer;
 }
 t.after(async()=>{
-for(const beat of beats)clearInterval(beat);
 await socket.close("unit_finished");
 await Promise.allSettled([...outstanding]);
 await fs.rm(d,{recursive:true});
@@ -149,8 +138,8 @@ assert.deepEqual(audit.events.filter(e=>e.name==="accepted").map(e=>e.requestId)
 ["request-A","request-B"]);
 });
 
-for(const resident of [false,true])test(`oversized prompts do not consume a handoff; same ordinal still works (resident=${resident})`,async t=>{
-const f=await fixture(t,5000,resident);
+test("oversized finite prompts do not consume a handoff; same ordinal still works",async t=>{
+const f=await fixture(t);
 for(const body of ["x".repeat(20000),"😀".repeat(10000)," \n\t"]){
 await fs.writeFile(f.prompt,body,{mode:384});
 const result=await f.start(1,"request-A");

@@ -3,6 +3,9 @@ from contextvars import ContextVar
 import hashlib
 import json
 import os
+import re
+import stat
+import time
 from pathlib import Path
 
 from . import core
@@ -17,10 +20,13 @@ def read(paths, locked):
     if not os.path.lexists(path):
         return None
     v = core.read_json(path)
-    if (set(v) != {"version", "generation", "owner", "parent", "worker", "inflight", "qualification"}
-            or type(v["version"]) is not int or v["version"] != 1
+    keys = {"version", "generation", "owner", "parent", "worker", "inflight", "qualification"}
+    if (type(v.get("version")) is not int or v["version"] not in (1, 2)
+            or set(v) != (keys | {"session"} if v["version"] == 2 else keys)
             or type(v["generation"]) is not int or v["generation"] < 1):
         raise core.StateError("Invalid resident owner record; preserve it")
+    if v.get("session") is not None:
+        validate_session(v["session"])
     if not isinstance(v["qualification"], dict):
         raise core.StateError("Missing resident enrollment evidence")
     for k in ("owner", "parent", "worker"):
@@ -36,6 +42,16 @@ def read(paths, locked):
     return v
 
 
+def validate_session(s):
+    if (not isinstance(s, dict) or set(s) != {"directory", "session_id", "descriptor_sha256"}
+            or not isinstance(s["directory"], str) or not s["directory"].startswith("/")
+            or "\0" in s["directory"]
+            or not isinstance(s["session_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", s["session_id"])
+            or not isinstance(s["descriptor_sha256"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", s["descriptor_sha256"])):
+        raise core.StateError("Invalid canonical session binding")
+
+
 def write(paths, locked, v):
     core.atomic_write_json(paths.state_dir / "resident-owner.json", v, _locked=locked)
 
@@ -47,6 +63,89 @@ def matches(v, credentials):
 
 def operational(v):
     return {k: val for k, val in v.items() if k != "qualification"} if v else None
+
+
+def admit(paths, locked, v, c):
+    """Publish client handoff while start/begin are excluded by the same lock.
+
+    This does not reserve native work or send. After a partial publication,
+    keep every artifact; only the existing owner continuation may proceed.
+    """
+    from .queue import Queue, read_private
+    from .native_storage import Directory, decode
+    bound = v.get("session")
+    if not bound or c.get("session") != bound:
+        raise core.StateError("Resident session binding differs")
+    directory = Path(bound["directory"])
+    raw_descriptor = read_private(directory / "session.json", limit=16384)
+    descriptor = decode(raw_descriptor)
+    helper = Path(__file__).resolve().parents[2] / "skills/codex-pro-dispatch/scripts/pro-dispatch"
+    expected = dict(resident=True, sessionId=bound["session_id"], parent=v["parent"],
+                    worker=v["worker"], configDir=str(paths.config_dir),
+                    stateDir=str(paths.state_dir), helper=str(helper))
+    if (hashlib.sha256(raw_descriptor).hexdigest() != bound["descriptor_sha256"]
+            or any(descriptor.get(k) != val for k, val in expected.items())):
+        raise core.StateError("Session descriptor binding differs")
+    command = c.get("command")
+    if not isinstance(command, str) or len(command.encode()) > 4096:
+        raise core.ConfigurationError("Invalid resident command")
+    record = decode(command.encode())
+    keys = {"sessionId", "ordinal", "requestId", "clientSessionId", "nonce", "deadlineAt",
+            "promptSha256", "pid", "ppid"}
+    if (not isinstance(record, dict) or set(record) != keys
+            or record["sessionId"] != bound["session_id"]
+            or type(record["ordinal"]) is not int or not 1 <= record["ordinal"] <= 64
+            or not isinstance(record["nonce"], str) or not re.fullmatch(r"[a-f0-9]{32}", record["nonce"])
+            or any(type(record[k]) is not int or record[k] < 1 for k in ("pid", "ppid", "deadlineAt"))
+            or type(c.get("retry")) is not bool):
+        raise core.ConfigurationError("Invalid resident command")
+    now = time.time() * 1000
+    if not now < record["deadlineAt"] <= now + descriptor["idleMs"]:
+        raise core.StateError("Command rendezvous expired or invalid")
+    prompt = read_private(Path(c.get("prompt_file", "")))
+    broker = Queue(paths)
+    broker.validate_submission(record["requestId"], prompt, record["clientSessionId"])
+    if hashlib.sha256(prompt).hexdigest() != record["promptSha256"]:
+        raise core.StateError("Prompt changed before admission")
+    if (v["inflight"] is not None or core.active_assignment(paths, _locked=locked)
+            or core.active_cooldown(paths, _locked=locked)
+            or any(r["state"] == "claimed" or r["request_id"] == record["requestId"]
+                   for r in broker.records(_locked=locked))
+            or os.path.lexists(paths.state_dir / "native-client")
+            or os.path.lexists(core.assignment_path(record["requestId"], paths))):
+        raise core.BusyError("Authority occupied; no command-ready signal")
+    ordinal = record["ordinal"]
+    name = f"command-{ordinal}" + ("-retry-" + record["nonce"] if c["retry"] else "")
+    marker = f"waiting-{ordinal}.{bound['session_id']}"
+    with Directory(directory) as folder:
+        names = os.listdir(folder.fd)
+        if any(n in names for n in (name, name + ".json", f"ready-{ordinal}.json",
+                                   f"command-observed-{ordinal}.json", "transport-audit.json")):
+            raise core.StateError("Existing rendezvous artifact; do not reuse")
+        gone = f"Resident is not waiting for ordinal {ordinal}; do not publish"
+        try:
+            info = os.stat(marker, dir_fd=folder.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise core.StateError(gone) from None
+        age = time.time() - info.st_mtime
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
+                or info.st_uid != os.getuid() or not -1 <= age <= 5):
+            raise core.StateError(f"Stale resident readiness for ordinal {ordinal}; do not publish")
+        if os.listdir(directory / marker):
+            raise core.StateError("Conflicting resident readiness")
+        try:
+            os.rename(marker, name, src_dir_fd=folder.fd, dst_dir_fd=folder.fd)
+        except FileNotFoundError:
+            raise core.StateError(gone) from None
+        # From this point, failure leaves a permanent ticket. Never roll back.
+        os.fsync(folder.fd)
+        with Directory(directory / name) as ticket:
+            ticket.write("prompt.txt", prompt, immutable=True)
+            ticket.write("ready.tmp", command.encode(), immutable=True)
+            os.rename("ready.tmp", name + ".json", src_dir_fd=ticket.fd, dst_dir_fd=folder.fd)
+            os.fsync(ticket.fd)
+        os.fsync(folder.fd)
+    return {"ok": True, "published": True, "send_authorized": False}
 
 
 def guard(paths, locked, request=None, *, configuration=False):
@@ -146,14 +245,36 @@ def control(action, credentials, paths=None):
                     return result("blocked", "queued_request_has_receipt")
             if core.active_cooldown(paths, _locked=locked):
                 return result("blocked", "cooldown")
-            v = dict(version=1, generation=c["generation"] + 1, owner=c["owner"],
-                     parent=c["parent"], worker=c["worker"], inflight=None, qualification=qualification)
+            v = dict(version=2, generation=c["generation"] + 1, owner=c["owner"],
+                     parent=c["parent"], worker=c["worker"], inflight=None, session=None, qualification=qualification)
             write(paths, locked, v)
             return result("collect_only" if receipt and receipt["status"] != "prepared"
                           else "ready", "owner_acquired")
         if not matches(v, c):
             raise core.StateError("Resident owner replaced")
         if action == "check":
+            return {"ok": True, "owner": operational(v)}
+        if action == "admit":
+            return admit(paths, locked, v, c)
+        if action == "bind-session":
+            from .queue import read_private
+            if v["version"] != 2 or v["inflight"] is not None or v["session"] is not None:
+                raise core.BusyError("Session binding requires a fresh unreserved owner")
+            s = c.get("session")
+            validate_session(s)
+            directory = Path(s["directory"])
+            if str(directory.resolve(strict=True)) != s["directory"]:
+                raise core.StateError("Physical session directory required")
+            raw = read_private(directory / "session.json", limit=16384)
+            descriptor = json.loads(raw)
+            expected = dict(sessionId=s["session_id"], parent=v["parent"], worker=v["worker"],
+                            configDir=str(paths.config_dir), stateDir=str(paths.state_dir))
+            if (hashlib.sha256(raw).hexdigest() != s["descriptor_sha256"]
+                    or not isinstance(descriptor, dict) or descriptor.get("resident") is not True
+                    or any(descriptor.get(k) != val for k, val in expected.items())):
+                raise core.StateError("Session descriptor binding differs")
+            v["session"] = s
+            write(paths, locked, v)
             return {"ok": True, "owner": operational(v)}
         for k in ("invocation", "request"):
             core.validate_identifier(c.get(k), field=k)

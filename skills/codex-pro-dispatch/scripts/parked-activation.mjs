@@ -242,7 +242,8 @@ await g.parkedResident.socket.close("owner_replaced");
 const directory=await fs.realpath(await fs.mkdtemp(root.replace(/\/$/,"")+"/pro-session-"));
 await fs.chmod(directory,448);
 fresh=await (await import("./parked-socket.mjs")).openSession(directory,trusted);
-await cli(["resident","check",J(credentials)]);
+await cli(["resident","bind-session",J({...credentials,session:{directory,
+session_id:fresh.config.sessionId,descriptor_sha256:createHash("sha256").update(J(fresh.config)).digest("hex")}})]);
 g.parkedSocket=fresh;g.parkedBinding=Object.freeze({broker:trusted.parent,turn});
 g.parkedDelivery=null;
 g.parkedResident={socket:fresh,binding:g.parkedBinding,directory,attempt,used:false,
@@ -821,6 +822,7 @@ return v;
 
 async function rendezvous(directory,ordinal,requestId,promptFile,clientSessionId,resume=false,attempt){
 const c=await rendezvousSession(directory,ordinal,requestId);
+const ownership=c.resident===true?await requireResidentOwnership(c,directory):null;
 const recovery=c.queuedResume;
 if(recovery!==undefined)resumeExpectation(recovery);
 if(resume){
@@ -874,13 +876,13 @@ await absent(directory+"/command-observed-"+ordinal+".json");
 const name="command-"+ordinal+(attempt===undefined?"":"-retry-"+attempt);
 await absent(directory+"/"+name+".json");
 const ticket=directory+"/"+name; // Exclusive attempt marker; never remove to retry.
-// A resident ticket is the claimed readiness of the waiter it publishes toward.
-if(c.resident===true)await claimWaiter(directory,ordinal,c,ticket);
-else await fs.mkdir(ticket,{mode:448});
 const snapshot=ticket+"/prompt.txt";
+if(c.resident!==true){
+await fs.mkdir(ticket,{mode:448});
 if(!resume){
 await fs.writeFile(snapshot,raw,{flag:"wx",mode:384});
 await privateBytes(snapshot,4194304);
+}
 }
 const pickupDeadline=Date.now()+c.idleMs;
 const deadlineAt=c.resident===true?pickupDeadline:Math.min(c.expiresAt,pickupDeadline);
@@ -899,8 +901,14 @@ if(Date.now()>=deadlineAt)throw Error("Command rendezvous expired");
 },Math.max(1,deadlineAt-Date.now()));
 try{
 // Register the native-ready watcher before announcing command readiness.
+if(ownership){
+const {generation,owner,parent,worker,session}=ownership.owner;
+await cli(["resident","admit",J({generation,owner,parent,worker,session,
+command:J(record),prompt_file:promptFile,retry:attempt!==undefined})]);
+}else{
 await fs.writeFile(ticket+"/ready.tmp",J(record),{flag:"wx",mode:384});
 await fs.rename(ticket+"/ready.tmp",directory+"/"+name+".json");
+}
 await waiting.promise;
 await absent(directory+"/transport-audit.json");
 // Every attempt shares one ordinal claim. Readiness alone grants nothing.
@@ -952,15 +960,82 @@ return {stopRequested:true,sessionId:c.sessionId};
 // killed waiter cannot retire; its marker goes stale within WAITER_FRESH_MS.
 const WAITER_FRESH_MS=5000;
 const waiterPath=(directory,ordinal,sessionId)=>directory+"/waiting-"+ordinal+"."+sessionId;
-async function claimWaiter(directory,ordinal,c,ticket){
-const marker=waiterPath(directory,ordinal,c.sessionId);
-const gone=()=>Error("Resident is not waiting for ordinal "+ordinal+"; do not publish");
-let stat;
-try{stat=await fs.lstat(marker);}catch(e){if(e.code!=="ENOENT")throw e;throw gone();}
-if(!stat.isDirectory()||stat.uid!==ownerUid||(stat.mode&511)!==448||Date.now()-stat.mtimeMs>WAITER_FRESH_MS)
-throw Error("Stale resident readiness for ordinal "+ordinal+"; do not publish");
-await absent(ticket);
-try{await fs.rename(marker,ticket);}catch(e){if(e.code!=="ENOENT")throw e;throw gone();}
+const freshWaiter=(stat,now=Date.now())=>stat.isDirectory()&&stat.uid===ownerUid&&
+(stat.mode&511)===448&&now-stat.mtimeMs>=-1000&&now-stat.mtimeMs<=WAITER_FRESH_MS;
+
+async function requireResidentOwnership(c,directory){
+const ownership=await residentOwnership(c,directory);
+if(ownership.reason!=="current_owner")throw Error("Resident unavailable: "+ownership.reason+"; preserve session");
+return ownership;
+}
+
+async function residentOwnership(c,directory){
+if(c.helper!==helper)return {reason:"installed_helper_mismatch"};
+const s=await cli(["status","--current"]),v=await cli(["resident","inspect"]);
+if(s.paths?.config_dir!==c.configDir||s.paths?.state_dir!==c.stateDir||
+s.worker?.conversation_id!==c.worker) return {reason:"canonical_authority_mismatch"};
+const bound=v.owner?.session;
+if(!bound)return {reason:"unbound_owner"};
+if(bound.directory!==directory||bound.session_id!==c.sessionId||
+v.owner.parent!==c.parent||v.owner.worker!==c.worker)
+return {reason:"retired_owner"};
+const raw=await privateBytes(directory+"/session.json",16384);
+if(createHash("sha256").update(raw).digest("hex")!==bound.descriptor_sha256||
+J(JSON.parse(raw.toString("utf8")))!==J(c))return {reason:"descriptor_changed"};
+return {reason:"current_owner",owner:v.owner,status:s};
+}
+
+// A read-only snapshot, never a liveness guarantee or takeover permission.
+// Check explicit owner-provided paths. Do not discover authority by glob/mtime.
+async function residentStatus(directory){
+const base={kind:"resident_status",version:1,directory,maxConcurrentRequests:1,
+admissionObserved:false,sendAuthorized:false,replacementAuthorized:false};
+try{
+await privateDirectory(directory);
+const {loadSession}=await import("./parked-socket.mjs");
+const c=await loadSession(directory);
+if(c.resident!==true||!/^[a-f0-9]{32}$/.test(c.sessionId))throw Error("Not a resident session");
+base.sessionId=c.sessionId;
+const owned=await residentOwnership(c,directory);
+if(owned.reason!=="current_owner")return {...base,state:"unavailable",reason:owned.reason};
+base.generation=owned.owner.generation;
+const names=await fs.readdir(directory);
+if(names.includes("transport-audit.json")){
+const audit=JSON.parse((await privateBytes(directory+"/transport-audit.json",1048576)).toString("utf8"));
+if(audit.sessionId!==c.sessionId||typeof audit.reason!=="string"||!Array.isArray(audit.events)||
+names.includes("wake.sock"))throw Error("Conflicting closure evidence");
+return {...base,state:"closed_audited",reason:"matching_closure_audit"};
+}
+if(names.some(n=>["resident-stop","resident-stop.json","resident-failure.json","resident-failure-final.json"].includes(n)))
+return {...base,state:"unavailable",reason:"stop_or_failure_evidence"};
+if(owned.owner.inflight!==null||owned.status.active_assignment!==null)
+return {...base,state:"busy",reason:"request_or_invocation_reserved"};
+if(owned.status.active_cooldown!==null)return {...base,state:"unavailable",reason:"account_cooldown"};
+const markers=names.filter(n=>/^waiting-/.test(n));
+if(markers.length===0||!names.includes("wake.sock"))
+return {...base,state:"not_waiting",reason:"no_admission_observed"};
+const match=/^waiting-([1-9][0-9]*)\.([a-f0-9]{32})$/.exec(markers[0]);
+if(markers.length!==1||!match||Number(match[1])>64||match[2]!==c.sessionId)
+throw Error("Ambiguous resident readiness");
+const ordinal=Number(match[1]),marker=directory+"/"+markers[0];
+if(!(await fs.lstat(directory+"/wake.sock")).isSocket())throw Error("Invalid socket evidence");
+if(!freshWaiter(await fs.lstat(marker)))return {...base,state:"stale_readiness",reason:"waiter_not_fresh"};
+if((await fs.readdir(marker)).length||names.some(n=>
+n==="command-"+ordinal||n==="ready-"+ordinal+".json"||n==="command-observed-"+ordinal+".json"||
+new RegExp("^command-"+ordinal+"(?:-retry-[a-f0-9]{32})?[.]json$").test(n)))
+throw Error("Consumed or conflicting ordinal evidence");
+// Recheck canonical generation and waiter after observation. Final admission
+// still belongs to rendezvous' atomic claim and the helper's locked guards.
+const after=await residentOwnership(c,directory);
+if(after.reason!=="current_owner"||after.owner.inflight!==null||
+after.status.active_assignment!==null||after.status.active_cooldown!==null||
+!freshWaiter(await fs.lstat(marker)))
+return {...base,state:"not_waiting",reason:"snapshot_changed"};
+return {...base,state:"admission_observed",reason:"current_owner_waiting",ordinal,admissionObserved:true};
+}catch(e){
+return {...base,state:e.code==="ENOENT"?"not_waiting":"malformed_preserve",
+reason:e.code==="ENOENT"?"evidence_missing_or_changed":"evidence_unverifiable"};
+}
 }
 
 async function residentNext(directory,ordinal,signal){
@@ -1206,6 +1281,8 @@ requestId:args[16],commandSha256:args[17],promptSha256:args[18]
 });
 else if(action==="resident-stop"&&args.length===1)
 result=await residentStop(args[0]);
+else if(action==="resident-status"&&args.length===1)
+result=await residentStatus(args[0]);
 else if(action==="ready"&&args.length===2) result=await ready(args[0],Number(args[1]));
 else if(action==="rendezvous"&&args.length===5)
 result=await rendezvous(args[0],Number(args[1]),...args.slice(2));

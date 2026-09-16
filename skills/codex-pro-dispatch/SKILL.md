@@ -36,7 +36,7 @@ For explicit resident setup or clean restart, also read the resident section in
 [native-activation.md](references/native-activation.md). Resolve the physical
 installed paths and complete the actual client's access preflight before opening.
 Resident mode remains opt-in and live qualification is separate from unit tests.
-Never replay a consumed open/serve call to restart a listener.
+Never replay consumed open/serve calls. Check `resident-status`, never race listeners.
 
 ## Repository access through ChatGPT
 

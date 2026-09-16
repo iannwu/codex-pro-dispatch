@@ -243,6 +243,100 @@ c.spawnargs.some(a=>a.includes("'resident-next'"))).length,0);
 assert.deepEqual(f.s.sends,[]);
 });
 
+test("oversized resident prompts preserve the real owner's admission for valid content",async t=>{
+const f=await fixture(t),d=await f.open(),serving=f.serve();await f.idle(1);
+for(const body of ["x".repeat(20000),"😀".repeat(10000)," \n\t"]){
+await fs.writeFile(f.d+"/prompt.txt",body);
+await assert.rejects(f.start(1,"job-A"),/native read limit|Prompt is empty/);
+for(const name of ["command-1","command-1.json","command-observed-1.json","ready-1.json"])
+await missing(d+"/"+name);
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+}
+await fs.writeFile(f.d+"/prompt.txt","valid request");await f.start(1,"job-A");await f.idle(2);
+await f.stop();await serving;assert.deepEqual(f.s.sends,["job-A"]);
+});
+
+test("resident status distinguishes open, waiting, busy and closed without granting authority",async t=>{
+const f=await fixture(t),d=await f.open();
+const status=()=>f.activate(["resident-status",d]);
+const before=(await f.cli(["resident","inspect"])).owner;
+assert.equal((await status()).state,"not_waiting");
+const serving=f.serve();await f.idle(1);
+const waiting=await status();
+assert.equal(waiting.state,"admission_observed");assert.equal(waiting.ordinal,1);
+assert.equal(waiting.maxConcurrentRequests,1);assert.equal(waiting.admissionObserved,true);
+assert.equal(waiting.sendAuthorized,false);assert.equal(waiting.replacementAuthorized,false);
+assert(!JSON.stringify(waiting).includes(f.g.parkedSocket.config.token));
+assert.deepEqual((await f.cli(["resident","inspect"])).owner,before);
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+const c={...f.g.parkedResident.credentials,invocation:"test-status-reservation",request:"job-A"};
+await f.cli(["resident","begin",J(c)]);
+assert.equal((await status()).state,"busy");
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight.request,"job-A");
+await f.cli(["resident","end",J(c)]);
+await f.stop();await serving;
+assert.equal((await status()).state,"closed_audited");
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("retired generation with a socket and fresh marker cannot publish or masquerade as capacity",async t=>{
+const f=await fixture(t),d=await f.open(),c=f.g.parkedResident.credentials;
+await fs.mkdir(f.waiting(1),{mode:448});
+const replacement=(await f.cli(["resident","start",J({...c,owner:"replacement-fixture"})])).owner;
+const other=f.d+"/new-session";await fs.mkdir(other,{mode:448});
+const descriptor={...f.g.parkedSocket.config,sessionId:"a".repeat(32)};
+await fs.writeFile(other+"/session.json",J(descriptor),{mode:384});
+await f.cli(["resident","bind-session",J({...replacement,session:{directory:other,
+session_id:descriptor.sessionId,descriptor_sha256:(await import("node:crypto")).createHash("sha256").update(J(descriptor)).digest("hex")}})]);
+// Copying the current owner's identity into the old folder must not rebind it.
+await fs.writeFile(d+"/session.json",J({...descriptor,residentOwner:replacement}));
+const before=await f.cli(["resident","inspect"]),files=await fs.readdir(d);
+const result=await f.activate(["resident-status",d]);
+assert.equal(result.reason,"retired_owner");assert.equal(result.admissionObserved,false);
+await assert.rejects(f.start(1,"job-A"),/retired_owner/);
+assert.deepEqual(await fs.readdir(d),files);
+assert.deepEqual(await f.cli(["resident","inspect"]),before);
+await fs.lstat(d+"/wake.sock");await fs.lstat(f.waiting(1));
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);
+assert.deepEqual(f.s.sends,[]);
+});
+
+for(const mode of ["legacy","helper","parent","identity","descriptor","symlink","malformed","future","stale","conflict","stopped"])
+test("listener inspection preserves unavailable evidence: "+mode,async t=>{
+const f=await fixture(t),d=await f.open(),path=d+"/session.json";
+const c=JSON.parse(await fs.readFile(path,"utf8"));
+if(mode==="legacy"){
+const path=f.d+"/authority/state/resident-owner.json",v=JSON.parse(await fs.readFile(path));
+delete v.session;v.version=1;await fs.writeFile(path,J(v));
+}
+if(mode==="helper")c.helper+=".other";
+if(mode==="parent")c.parent="different-parent";
+if(mode==="identity")c.sessionId="b".repeat(32);
+if(mode==="descriptor")c.token="b".repeat(48);
+if(["helper","parent","identity","descriptor"].includes(mode))await fs.writeFile(path,J(c));
+if(mode==="malformed")await fs.writeFile(path,"{}");
+if(["future","stale","conflict"].includes(mode)){
+await fs.mkdir(f.waiting(1),{mode:448});
+const time=new Date(Date.now()+(mode==="future"?60000:mode==="stale"?-60000:0));
+await fs.utimes(f.waiting(1),time,time);
+if(mode==="conflict")await fs.writeFile(d+"/command-1.json","{}",{mode:384});
+}
+if(mode==="stopped")await fs.writeFile(d+"/resident-stop.json",J({sessionId:c.sessionId}),{mode:384});
+let input=d;
+if(mode==="symlink"){input=f.d+"/alias";await fs.symlink(d,input);}
+const before=await fs.readFile(path),files=await fs.readdir(d),owner=await f.cli(["resident","inspect"]);
+const result=await f.activate(["resident-status",input]);
+assert.equal(result.admissionObserved,false);assert.equal(result.replacementAuthorized,false);
+assert.equal(result.reason,({legacy:"unbound_owner",helper:"installed_helper_mismatch",
+parent:"retired_owner",identity:"retired_owner",descriptor:"descriptor_changed",future:"waiter_not_fresh",stale:"waiter_not_fresh",
+stopped:"stop_or_failure_evidence"})[mode]??"evidence_unverifiable");
+if(["legacy","helper","parent","identity","descriptor"].includes(mode))
+await assert.rejects(f.start(1,"job-A"),/Resident unavailable/);
+assert.deepEqual(await fs.readFile(path),before);assert.deepEqual(await fs.readdir(d),files);
+assert.deepEqual(await f.cli(["resident","inspect"]),owner);
+assert.deepEqual((await f.cli(["queue","status"])).requests,[]);assert.deepEqual(f.s.sends,[]);
+});
+
 test("bounded idle observations renew only from their owner and abandoned idle closes",async t=>{
 const f=await fixture(t),old=await f.open(),o=f.g.parkedResident;
 o.used=true;o.serveInvocation="fixture-owner";
@@ -570,27 +664,27 @@ test("waiter exit between readiness and publication leaves nothing behind",async
 const f=await fixture(t),old=await f.open(),first=f.serve();
 await f.idle(1);
 const hook=f.d+"/claim-pause.cjs",paused=f.d+"/paused",release=f.d+"/release";
-// Child-only barrier inside the client: after its freshness read, before its claim.
+// Child-only barrier before the helper takes its admission lock and claims.
 await fs.writeFile(hook,`
-const fs=require("node:fs/promises"),{existsSync}=require("node:fs");
-const rename=fs.rename;
-fs.rename=async function(from,to){
-if(from===${J(f.waiting(1))}){
-await fs.writeFile(${J(paused)},"");
+const cp=require("node:child_process"),fs=require("node:fs");
+const execFile=cp.execFile;
+cp.execFile=function(file,args,...rest){
+if(args[1]==="resident"&&args[2]==="admit"){
+fs.writeFileSync(${J(paused)},"");
 const limit=Date.now()+20000;
-while(!existsSync(${J(release)})){
+while(!fs.existsSync(${J(release)})){
 if(Date.now()>limit)throw Error("Fixture barrier timed out");
-await new Promise(r=>setTimeout(r,10));
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
 }
 }
-return rename(from,to);
+return execFile(file,args,...rest);
 };
 require("node:module").syncBuiltinESMExports();
 `);
 const client=assert.rejects(f.activate(["rendezvous",old,"1","job-A",f.d+"/prompt.txt","unit-client"],
-["--require",hook]),/not waiting for ordinal 1; do not publish/);
+["--require",hook]),/Existing rendezvous artifact; do not reuse/);
 for(let i=0;;i++){try{await fs.lstat(paused);break;}catch{if(i>=400)throw Error("Client never paused");await pause(25);}}
-// The waiter returns while the client is paused, so retirement wins the race.
+// Retirement wins. The locked helper sees the closure audit before claiming.
 await f.stop();await first;
 await missing(f.waiting(1));
 await fs.writeFile(release,"");

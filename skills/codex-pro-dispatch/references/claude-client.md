@@ -9,8 +9,14 @@ script's prerequisite prompt, not a successful install. Do not install a
 second runtime or change Claude permission settings.
 
 Use the client workflow in [native-activation.md](native-activation.md), not
-the standalone native owner workflow. Check client preflight and owner-provided
-readiness before publishing. If no ready resident listener is available, say:
+the standalone native owner workflow. After client preflight, check the explicit
+owner-provided session with `node "$ACT" resident-status "$SESSION"` as documented
+there. A socket or folder is not an available worker. This build reports
+`maxConcurrentRequests:1`; two chat threads or session folders do not enable
+concurrent dispatch. Never race listeners, rewrite autosend logic to route around
+`busy`, or use another state home. A busy current owner needs to finish its
+existing request, not another listener. If no current listener is available
+(not merely busy), say:
 
 > No Codex listener is ready. In a Codex desktop task, paste: "Use
 > codex-pro-dispatch to set up a resident listener for my Claude requests.

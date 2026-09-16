@@ -5,8 +5,10 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from codex_pro_dispatch import core, resident
@@ -131,6 +133,153 @@ class ResidentTests(unittest.TestCase):
         with self.assertRaises(core.StateError):
             self.next()
         self.assertEqual(before, path.read_bytes())
+
+    def session_binding(self):
+        directory = self.paths.state_dir.parent / "session"
+        directory.mkdir(mode=0o700)
+        raw = json.dumps(dict(resident=True, sessionId="a" * 32, parent="parent", worker="worker", idleMs=45000,
+                              helper=str(Path(resident.__file__).resolve().parents[2] / "skills/codex-pro-dispatch/scripts/pro-dispatch"),
+                              configDir=str(self.paths.config_dir), stateDir=str(self.paths.state_dir))).encode()
+        path = directory / "session.json"
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return dict(directory=str(directory), session_id="a" * 32,
+                    descriptor_sha256=hashlib.sha256(raw).hexdigest())
+
+    def admission(self):
+        binding = self.session_binding()
+        self.c = self.call("bind-session", {**self.c, "session": binding})["owner"]
+        directory = Path(binding["directory"])
+        marker = directory / ("waiting-1." + binding["session_id"])
+        marker.mkdir(mode=0o700)
+        prompt = directory.parent / "prompt.txt"
+        prompt.write_bytes(b"Answer this")
+        prompt.chmod(0o600)
+        record = dict(sessionId=binding["session_id"], ordinal=1, requestId="request",
+                      clientSessionId="client", nonce="b" * 32, deadlineAt=int(time.time() * 1000) + 45000,
+                      promptSha256=hashlib.sha256(prompt.read_bytes()).hexdigest(), pid=1, ppid=1)
+        credentials = {**self.c, "command": json.dumps(record, separators=(",", ":")),
+                       "prompt_file": str(prompt), "retry": False}
+        return directory, marker, credentials
+
+    def test_replacement_after_client_precheck_before_admission_creates_nothing(self):
+        directory, marker, credentials = self.admission()
+        self.call("check", credentials)  # Advisory client precheck succeeded.
+        before = sorted(directory.iterdir())
+        self.assertEqual(self.next()["state"], "ready")
+        with self.assertRaisesRegex(core.StateError, "owner replaced"):
+            self.call("admit", credentials)
+        self.assertEqual(sorted(directory.iterdir()), before)
+        self.assertTrue(marker.is_dir())
+        self.assertEqual(self.q.status()["requests"], [])
+
+    def test_admission_publication_and_replacement_share_one_transaction(self):
+        directory, marker, credentials = self.admission()
+        reached, release, replacing = threading.Event(), threading.Event(), threading.Event()
+        rename = resident.os.rename
+
+        def pause_claim(source, target, **kwargs):
+            if source == marker.name:
+                reached.set()
+                if not release.wait(5):
+                    raise RuntimeError("Admission barrier timed out")
+            return rename(source, target, **kwargs)
+
+        def replace():
+            replacing.set()
+            result = self.next()
+            self.assertEqual((directory / "command-1.json").read_text(), credentials["command"])
+            self.assertEqual((directory / "command-1/prompt.txt").read_bytes(), b"Answer this")
+            return result
+
+        with patch.object(resident.os, "rename", side_effect=pause_claim):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                admitted = pool.submit(self.call, "admit", credentials)
+                try:
+                    self.assertTrue(reached.wait(5))
+                    replacement = pool.submit(replace)
+                    self.assertTrue(replacing.wait(5))
+                    with self.assertRaises(concurrent.futures.TimeoutError):
+                        replacement.result(timeout=0.1)
+                finally:
+                    release.set()
+                self.assertTrue(admitted.result()["published"])
+                self.assertEqual(replacement.result()["state"], "ready")
+        before = (directory / "command-1.json").read_bytes()
+        with self.assertRaisesRegex(core.StateError, "owner replaced"):
+            self.call("begin", {**self.c, "invocation": "old-native", "request": "request"})
+        with self.assertRaises(core.StateError):
+            self.call("admit", credentials)
+        self.assertEqual((directory / "command-1.json").read_bytes(), before)
+        self.assertEqual(self.q.status()["requests"], [])
+        self.assertFalse(marker.exists())
+
+    def test_admission_rechecks_mutable_inputs_before_ticket(self):
+        directory, marker, credentials = self.admission()
+        before = sorted(directory.iterdir())
+        self.begin()
+        with self.assertRaises(core.BusyError):
+            self.call("admit", credentials)
+        self.call("end")
+        Path(credentials["prompt_file"]).write_bytes(b"Changed after client precheck")
+        with self.assertRaisesRegex(core.StateError, "Prompt changed"):
+            self.call("admit", credentials)
+        self.assertTrue(marker.is_dir())
+        self.assertEqual(sorted(directory.iterdir()), before)
+
+    def test_partial_admission_preserves_ticket_and_never_reuses_it(self):
+        from codex_pro_dispatch.native_storage import Directory
+        directory, marker, credentials = self.admission()
+        with patch.object(Directory, "write", side_effect=OSError("fixture disk failure")):
+            with self.assertRaises(OSError):
+                self.call("admit", credentials)
+        self.assertFalse(marker.exists())
+        self.assertTrue((directory / "command-1").is_dir())
+        self.assertFalse((directory / "command-1.json").exists())
+        with self.assertRaisesRegex(core.StateError, "Existing rendezvous artifact"):
+            self.call("admit", credentials)
+        self.assertEqual(self.q.status()["requests"], [])
+
+    def test_session_bound_once_by_current_unreserved_owner(self):
+        binding = self.session_binding()
+        bound = self.call("bind-session", {**self.c, "session": binding})["owner"]
+        self.assertEqual(bound["session"], binding)
+        before = (self.paths.state_dir / "resident-owner.json").read_bytes()
+        with self.assertRaises(core.BusyError):
+            self.call("bind-session", {**self.c, "session": binding})
+        self.assertEqual((self.paths.state_dir / "resident-owner.json").read_bytes(), before)
+        self.c = self.next()["owner"]
+        self.assertIsNone(self.c["session"])
+        self.begin()
+        with self.assertRaises(core.BusyError):
+            self.call("bind-session", {**self.c, "session": binding})
+
+    def test_session_binding_rejects_wrong_bytes_identity_and_stale_owner(self):
+        binding = self.session_binding()
+        before = (self.paths.state_dir / "resident-owner.json").read_bytes()
+        for field, value in [("descriptor_sha256", "0" * 64), ("session_id", "b" * 32)]:
+            with self.assertRaises(core.StateError):
+                self.call("bind-session", {**self.c, "session": {**binding, field: value}})
+            self.assertEqual((self.paths.state_dir / "resident-owner.json").read_bytes(), before)
+        self.next()
+        with self.assertRaises(core.StateError):
+            self.call("bind-session", {**self.c, "session": binding})
+
+    def test_v1_is_read_without_migration_and_only_unreserved_start_upgrades(self):
+        path = self.paths.state_dir / "resident-owner.json"
+        with core.state_lock(self.paths) as lock:
+            v = core.read_json(path)
+            v["version"] = 1
+            del v["session"]
+            core.atomic_write_json(path, v, _locked=lock)
+        before = path.read_bytes()
+        self.assertEqual(self.call("inspect")["owner"]["version"], 1)
+        self.assertEqual(path.read_bytes(), before)
+        self.begin()
+        self.assertEqual(self.next()["state"], "busy")
+        self.assertEqual(self.call("inspect")["owner"]["version"], 1)
+        self.call("end")
+        self.assertEqual(self.next()["owner"]["version"], 2)
 
     def test_begin_and_replace_race_one_winner(self):
         self.q.submit("request", b"answer this", "client")

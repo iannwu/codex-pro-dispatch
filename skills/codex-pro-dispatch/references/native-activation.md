@@ -244,7 +244,7 @@ This section overrides the manual per-request instructions only for an explicitl
 ### Setup and replacement
 
 One canonical `resident-owner.json` contains a generation, trusted parent/worker,
-enrollment evidence, and at most one in-flight invocation. It is updated under
+enrollment evidence, one session binding, and at most one in-flight invocation. It is updated under
 the same lock as claim/arm/receipt mutations. Session files are evidence, not
 replacement permission.
 
@@ -401,6 +401,44 @@ approval for rendezvous. A successful Auto-mode run proves only that invocation;
 verify the saved rule and its scope before claiming it persists across sessions.
 
 ### Requests
+
+Before preparing a new resident delivery, inspect the exact owner-provided path:
+
+```sh
+node "$ACT" resident-status "$SESSION"
+```
+
+This read-only snapshot checks the canonical owner's bound directory, session ID
+and descriptor hash. Open records that binding once using internal `bind-session`,
+before serve. Do not call it manually to adopt a folder. Startup reads old v1
+owners but writes v2; older resident-owner operations reject v2 rather than
+ignoring its binding. This is not a global two-worker migration fence.
+`admission_observed` includes the currently observed ordinal;
+it is not send permission or a guarantee that rendezvous will win. Rendezvous
+uses internal `resident admit` to recheck the binding, prompt and queue, claim
+the waiter, and publish the handoff under the same canonical lock as replacement.
+If replacement wins first, admission creates nothing. If admission wins, the
+complete handoff precedes replacement; the old owner's later `begin` still fails.
+Partial handoff files are preserved, never rolled back or reused. This operation
+does not queue, arm or send, and requires no extra operator approval or closure proof.
+`busy` means the current authority has work or an invocation reserved. Wait for
+that request's outcome using its existing watcher, not another listener.
+`retired_owner`, `unbound_owner`, `descriptor_changed` or `installed_helper_mismatch` means
+this path cannot be selected for a new delivery with this installed helper.
+Do not retrofit bindings into old descriptors. An older live owner's requests
+must drain through its existing runtime; coordinate an ordinary owner restart
+before switching clients to this candidate. Do not hot-edit its files.
+`not_waiting`, `stale_readiness`
+and `malformed_preserve` do not prove that the owning execution or Pro stopped.
+Keep the evidence and use the documented owner path, never delete a marker or
+release ownership based on this snapshot. All results report
+`sendAuthorized:false` and `replacementAuthorized:false`.
+
+This implementation reports `maxConcurrentRequests:1`. Opening two listeners
+or keeping two Pro chats does not increase capacity. Do not race sessions or
+write a second autosend loop after `Authority occupied`. Shared capacity two
+requires a qualified worker scheduler, not a second owner. No registry or
+capacity migration is included in this listener-inspection patch.
 
 1. Claude creates `PROOF/A.txt` asking for exactly its A token, then runs:
 
