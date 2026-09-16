@@ -304,13 +304,16 @@ o.socket!==globalThis.parkedSocket||JSON.stringify(o.socket.config)!==o.descript
 throw Error("Resident owner changed");\`;
 async function native(code){return value(await host.mcp__node_repl__js({
 code:"{"+identity+code+"}",timeout_ms:60000,title:"Resident owner"}));}
-async function checked(fn,a){
+async function checked(fn,a,readOnly=false){
 await native('if(o.binding!==globalThis.parkedBinding||nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");console.log("{}");');
-try{const r=await fn(a);if(r?.isError===true)nativeUncertain=true;return r;}
-catch(e){nativeUncertain=true;throw e;}
+// A failed history read cannot send or mutate ownership. Still reject it,
+// but let this continuation release after cleanup so recovery stays possible.
+// Sends and REPL calls keep their existing uncertainty guard.
+try{const r=await fn(a);if(!readOnly&&r?.isError===true)nativeUncertain=true;return r;}
+catch(e){if(!readOnly)nativeUncertain=true;throw e;}
 }
 const tools={...host,
-mcp__codex_app__read_thread:a=>checked(x=>host.mcp__codex_app__read_thread(x),a),
+mcp__codex_app__read_thread:a=>checked(x=>host.mcp__codex_app__read_thread(x),a,true),
 mcp__codex_app__send_message_to_thread:a=>checked(x=>host.mcp__codex_app__send_message_to_thread(x),a),
 mcp__node_repl__js:a=>checked(x=>host.mcp__node_repl__js(x),a)};
 ${sources["parked-runner.js"].replace("globalThis.describeFailure =","const describeFailure =")

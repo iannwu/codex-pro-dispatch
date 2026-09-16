@@ -167,6 +167,12 @@ assert.equal(a.threadId,W);s.reads++;
 if(mode==="stoprace"&&last)await stop(); // Explicit stop racing the failure below.
 if(mode==="nextqueued"&&last)await publishB(); // B published while A is failing.
 if(mode==="externalclose"&&last)await g.parkedSocket.close("unit_external_close");
+if(mode==="readthrow"&&last)throw Error("net::ERR_NETWORK_CHANGED");
+if(mode==="readinitial"&&!last)return {isError:true,content:[{type:"text",text:"net::ERR_NETWORK_CHANGED"}]};
+if(mode==="readonce"&&last&&!s.readFailed){
+s.readFailed=true;await stop();
+return {isError:true,content:[{type:"text",text:"net::ERR_NETWORK_CHANGED"}]};
+}
 if(["blocked","stoprace","nextqueued","externalclose","blockedclosefail"].includes(mode)&&last)return {isError:true};
 return mcp({schemaVersion:1,thread:{id:W,kind:"chatgpt",status:{type:mode==="busy"&&s.reads===1?"working":"idle"}},
 turns:last?[{id:"turn-"+last.id,items:[
@@ -180,6 +186,8 @@ assert.equal(a.threadId,W);
 assert.equal(g.parkedResident.admission?.deadlineAt??null,null,"Idle detector must not time out Pro");
 const id=/^\[CODEX_PRO_DISPATCH assignment_id=([^\]]+)\]\n/.exec(a.prompt)?.[1];
 assert(id);last={id,prompt:a.prompt};s.sends.push(id);
+if(mode==="senderror")return {isError:true,content:[{type:"text",text:"net::ERR_NETWORK_CHANGED"}]};
+if(mode==="sendthrow")throw Error("Native send outcome unknown");
 // Retained incident acknowledgment shape, its empty variant, a foreign thread.
 if(mode==="ack")return {content:[{type:"text",text:J({threadId:W})}],isError:false};
 if(mode==="ackworker")return mcp({threadId:"another-thread"});
@@ -845,7 +853,7 @@ assert.equal((await f.cli(["resident","inspect"])).owner.generation,c.generation
 await fs.lstat(d+"/wake.sock");assert.deepEqual(f.s.sends,[]);
 });
 
-for(const mode of ["pending","blocked","owner","turn","decoder","transport","ackworker","stoprace","externalclose","runnerpending","helperlost","blockedclosefail","evidenceerror"])
+for(const mode of ["pending","blocked","readthrow","senderror","sendthrow","owner","turn","decoder","transport","ackworker","stoprace","externalclose","runnerpending","helperlost","blockedclosefail","evidenceerror"])
 test("failure releases only joined work and cannot admit another request: "+mode,async t=>{
 const f=await fixture(t,mode),d=await f.open(),serving=f.serve();
 await f.idle(1);
@@ -853,7 +861,7 @@ const [served]=await Promise.allSettled([serving,f.start(1,"job-A")]);
 assert.equal(served.status,"rejected");
 assert.equal(f.s.waits,1);
 const state=(await f.cli(["resident","inspect"])).owner;
-const joined=["pending","owner","turn","decoder","transport","ackworker"].includes(mode);
+const joined=["pending","blocked","readthrow","stoprace","externalclose","owner","turn","decoder","transport","ackworker"].includes(mode);
 if(joined){
 assert.equal(state.inflight,null);
 assert.notEqual(await f.reopen(),d);
@@ -871,6 +879,39 @@ assert.deepEqual(f.s.sends,["owner","turn","runnerpending","helperlost"].include
 await missing(d+"/ready-2.json");
 assert(!JSON.stringify(f.out).includes('"payload"'));
 assert.equal(f.out.find(v=>v.kind==="resident_closed").reservation_retained,!joined);
+});
+
+test("read failure before arm releases only the runner reservation",async t=>{
+const f=await fixture(t,"readinitial");await f.open();const serving=f.serve();await f.idle(1);
+const [served]=await Promise.allSettled([serving,f.start(1,"job-A")]);
+assert.equal(served.status,"rejected");assert.deepEqual(f.s.sends,[]);
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight,null);
+assert.equal((await f.cli(["status","job-A"])).assignment.status,"prepared");
+await f.reopen();assert.equal(f.g.parkedResident.recover,"job-A");
+assert.equal(f.g.parkedResident.collectOnly,false);
+});
+
+test("network read failure during stop recovers the same answer without resending",async t=>{
+const f=await fixture(t,"readonce"),old=await f.open(),first=f.serve();await f.idle(1);
+const [served]=await Promise.allSettled([first,f.start(1,"job-A")]);
+assert.equal(served.status,"rejected");
+const receipt=(await f.cli(["status","job-A"])).assignment;
+assert.equal(receipt.status,"indeterminate");assert.equal(receipt.no_resend,true);
+assert.equal((await f.cli(["resident","inspect"])).owner.inflight,null);
+const preserved=await fs.readFile(old+"/resident-failure-final.json");
+const failure=JSON.parse(preserved);assert.equal(failure.nativeUncertain,false);
+assert.equal(failure.helperUncertain,false);assert.equal(failure.pendingHelperSession,null);
+await missing(old+"/ready-2.json");await missing(old+"/wake.sock");
+assert.notEqual(await f.reopen(),old);assert.equal(f.g.parkedResident.collectOnly,true);
+assert.equal(f.g.parkedResident.recover,"job-A");
+const second=f.serve();await f.idle(2);await f.stop();await second;
+const a=await f.cli(["queue","collect","job-A"]),b=await f.cli(["queue","collect","job-A"]);
+assert.equal(a.state,"published");assert.deepEqual(a.answer,b.answer);
+const recovered=(await f.cli(["status","job-A"])).assignment;
+assert.equal(recovered.status,"complete");assert.equal(recovered.submission_count,1);
+assert.equal(recovered.wrapped_prompt_sha256,receipt.wrapped_prompt_sha256);
+assert.deepEqual(f.s.sends,["job-A"]);
+assert.deepEqual(await fs.readFile(old+"/resident-failure-final.json"),preserved);
 });
 
 test("startup recovery retains finite observation budget and sends nothing",async t=>{
