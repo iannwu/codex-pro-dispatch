@@ -17,7 +17,7 @@ continuations or a scheduled wake.
 
 ## Contract
 
-Goal: safely delegate one bounded assignment from the exact Codex parent task to a user-confirmed ChatGPT Pro worker, collect the existing result without duplicate submission, independently verify claimed repository work, and restore the exact parent task. Excellent behavior fails closed when native state is ambiguous.
+Goal: safely delegate one bounded assignment from the exact Codex parent task to a user-confirmed ChatGPT worker, collect the existing result without duplicate submission, independently verify claimed repository work, and restore the exact parent task. Excellent behavior fails closed when native state is ambiguous.
 
 Evaluate the workflow on these skill-specific dimensions:
 
@@ -35,8 +35,8 @@ Hard fail if any path permits an automatic resend after arming, accepts a result
 - Do not use ChatGPT Web, Codex Web GPT, ChatGPT Classic, CDP, AppleScript, Accessibility automation, or the clipboard.
 - Never resend automatically after a timeout, app restart, retrieval error, or `thread not loaded` result.
 - Use one configured worker conversation and one unresolved assignment at a time.
-- The user must visibly select Pro in the worker once. Native controls may not expose the selected model, so do not claim machine verification.
-- Chat Pro may use its own GitHub connector when the assignment authorizes repository work. This plugin does not install or authenticate that connector. Before a write assignment, confirm that the worker exposes the required write action for the exact repository and that the starting commit is remotely visible. Read-only access, local-only branches, uncommitted changes, and the parent worktree are insufficient.
+- The user chooses the model and reasoning effort in the worker conversation. Native controls may not expose the selected model, so do not claim machine verification and never pass model or effort parameters to a send.
+- The worker may use its own GitHub connector when the assignment authorizes repository work. This plugin does not install or authenticate that connector. Before a write assignment, confirm that the worker exposes the required write action for the exact repository and that the starting commit is remotely visible. Read-only access, local-only branches, uncommitted changes, and the parent worktree are insufficient.
 - The parent Codex task must have an independent read path and verify every reported branch, commit, file change, and CI result.
 - Restore the exact parent Codex task after collection, including after failures.
 
@@ -108,7 +108,7 @@ The helper's receipt store never retains prompt or response bodies. Temporary fi
 If no worker is configured, read [references/native-protocol.md](native-protocol.md), then:
 
 1. Ask the user to create or select one dedicated Chat conversation.
-2. Ask the user to visibly select Pro in that conversation.
+2. Ask the user to choose the model and reasoning effort in that conversation.
 3. Resolve that conversation's stable ID with native conversation controls.
 4. Save it:
 
@@ -116,11 +116,13 @@ If no worker is configured, read [references/native-protocol.md](native-protocol
 pro-dispatch worker set \
   --conversation-id '<conversation-id>' \
   --label 'Codex Pro Dispatch Worker' \
-  --confirm-pro \
+  --confirm-worker \
   --native-controls-confirmed
 ```
 
-Do not infer Pro selection from the conversation title.
+Do not infer the selected model from the conversation title. `--confirm-pro`
+remains accepted as a legacy alias; a worker already saved with it keeps its
+`user-confirmed-pro` marker and needs no reconfiguration.
 
 ## Normal dispatch
 
@@ -248,7 +250,7 @@ Submission and waiting may occur in the background. Current result collection ca
 
 `pro-dispatch` stores only private configuration and receipts:
 
-- worker conversation ID and user-confirmed Pro status
+- worker conversation ID and its user-confirmation marker
 - assignment ID
 - parent Codex task ID
 - state transitions and timestamps

@@ -61,7 +61,8 @@ class Queue:
                 elif os.path.lexists(path):
                     with Directory(path.absolute()):
                         pass
-            for path in (self.paths.worker_file, *self.paths.assignments_dir.glob("*.json")):
+            for path in (self.paths.worker_file, self.paths.worker_pool_file,
+                         *self.paths.assignments_dir.glob("*.json")):
                 if os.path.lexists(path):
                     check(path)
             yield locked
@@ -96,6 +97,16 @@ class Queue:
                 raise core.StateError("Queue record is missing ownership association")
             if not all(core.IDENTIFIER_PATTERN.fullmatch(record[k]) for k in ("parent_task_id", "worker_conversation_id")):
                 raise core.StateError("Queue ownership identity is invalid")
+            slot_present = "worker_slot" in record
+            generation_present = "owner_generation" in record
+            if slot_present != generation_present:
+                raise core.StateError("Queue slot and owner generation must be paired")
+            if slot_present:
+                if (not isinstance(record["worker_slot"], str)
+                        or not core.IDENTIFIER_PATTERN.fullmatch(record["worker_slot"])
+                        or type(record["owner_generation"]) is not int
+                        or record["owner_generation"] < 0):
+                    raise core.StateError("Invalid queue worker slot association")
         if "native_read" in record and not isinstance(record["native_read"], str):
             raise core.StateError("Invalid staged history record")
         if record["state"] == "published" and (not isinstance(record.get("answer"), dict) or not isinstance(record.get("native_read"), str)):
@@ -105,6 +116,11 @@ class Queue:
     def save(self, record, *, _locked):
         _locked.validate(self.paths)
         core.reservation_guard(self.paths, _locked)
+        from .resident import collector_operation, invocation
+        caller = invocation.get()
+        if (isinstance(caller, dict) and caller.get("collector_only") is True
+                and collector_operation.get() != "observe"):
+            raise core.StateError("Collector-only recovery cannot mutate queue state")
         if record["state"] in {"claimed", "published", "released"}:
             from .resident import guard
             guard(self.paths, _locked, record["request_id"])
@@ -139,18 +155,77 @@ class Queue:
         for key in ("parent_task_id", "worker_conversation_id", "queue_claim_token", "prompt_sha256", "wrapped_prompt_sha256", "result_protocol"):
             if key not in r or receipt.get(key) != r[key]:
                 raise core.StateError("Queue receipt association mismatch")
+        for key in ("worker_slot", "owner_generation"):
+            if key in r and receipt.get(key) != r[key]:
+                raise core.StateError("Queue slot association mismatch")
         if receipt.get("continuation_of"):
             raise core.StateError("Queue cannot bind a continuation receipt")
         return receipt
 
     def metadata(self, r, *, _locked):
-        result = {k: r[k] for k in ("request_id", "state", "created_at", "fingerprint", "client_session_id", "parent_task_id", "worker_conversation_id", "blocked_reason") if k in r}
+        result = {k: r[k] for k in ("request_id", "state", "created_at", "fingerprint", "client_session_id", "parent_task_id", "worker_conversation_id", "worker_slot", "owner_generation", "blocked_reason") if k in r}
         receipt = self.receipt(r, _locked=_locked) if r["state"] not in {"queued", "cancelled"} else None
         result.update(dispatch_status=receipt["status"] if receipt else None,
                       sent_verified=bool(receipt and receipt.get("outbound_prompt_verified")),
                       send_may_have_occurred=bool(receipt and receipt["status"] != "prepared"),
                       send_authorized=False)
         return result
+
+    def _pool_occupancy(self, records, *, _locked):
+        """Validate the union of queue claims and active receipts.
+
+        This returns transient slot data for legacy records without rewriting
+        those records. New claims always persist the explicit slot fields.
+        """
+        if not core.worker_pool_active(self.paths, _locked=_locked):
+            return None
+        pool = core.load_worker_pool(self.paths, _locked=_locked)
+        by_worker = {worker.conversation_id: worker for worker in pool.workers}
+        by_slot = {worker.slot: worker for worker in pool.workers}
+        claims = [record for record in records if record["state"] == "claimed"]
+        used_workers = {}
+        used_slots = {}
+        for record in claims:
+            worker_id = record.get("worker_conversation_id")
+            worker = by_worker.get(worker_id)
+            if worker is None:
+                raise core.StateError("Queue claim worker is not configured")
+            slot_id = record.get("worker_slot", worker.slot)
+            if slot_id != worker.slot or slot_id not in by_slot:
+                raise core.StateError("Queue claim slot does not match configured worker")
+            if slot_id in used_slots or worker_id in used_workers:
+                raise core.StateError("Multiple queue claims share one worker slot")
+            used_slots[slot_id] = record["request_id"]
+            used_workers[worker_id] = record["request_id"]
+        active = core.active_assignments(self.paths, _locked=_locked)
+        active_ids = {record["assignment_id"] for record in active}
+        for assignment in active:
+            worker_id = assignment.get("worker_conversation_id")
+            worker = by_worker.get(worker_id)
+            if worker is None:
+                raise core.StateError("Active receipt worker is not configured")
+            slot_id = assignment.get("worker_slot", worker.slot)
+            if slot_id != worker.slot:
+                raise core.StateError("Active receipt slot does not match configured worker")
+            claim = next((item for item in claims if item["request_id"] == assignment["assignment_id"]), None)
+            if claim is None:
+                raise core.StateError("Active pool receipt has no matching queue claim")
+            if claim.get("worker_conversation_id") != worker_id:
+                raise core.StateError("Active receipt and queue worker differ")
+            if slot_id in used_slots and used_slots[slot_id] != assignment["assignment_id"]:
+                raise core.StateError("Active receipt collides with queue claim slot")
+            used_slots[slot_id] = assignment["assignment_id"]
+            used_workers[worker_id] = assignment["assignment_id"]
+        return {
+            "pool": pool,
+            "by_worker": by_worker,
+            "by_slot": by_slot,
+            "claims": claims,
+            "active": active,
+            "active_ids": active_ids,
+            "used_workers": used_workers,
+            "used_slots": used_slots,
+        }
 
     def validate_submission(self, rid, raw, client_session_id=None):
         """Input checks only: no state writes, admission, or send authority."""
@@ -167,6 +242,12 @@ class Queue:
         return prompt
 
     def submit(self, rid, raw, client_session_id=None):
+        from .resident import invocation
+        if isinstance(invocation.get(), dict) and invocation.get().get("takeover_settlement") is True:
+            raise core.BusyError("settlement_out_of_scope")
+        from .resident import invocation
+        if isinstance(invocation.get(), dict) and invocation.get().get("collector_only") is True:
+            raise core.StateError("Collector-only recovery cannot submit work")
         prompt = self.validate_submission(rid, raw, client_session_id)
         fingerprint = hashlib.sha256(json.dumps([prompt, client_session_id], ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
         with self.locked() as locked:
@@ -226,13 +307,27 @@ class Queue:
                 pass
             else:
                 raise core.StateError("Queued resume requires no dispatch receipt")
-            if core.active_assignment(self.paths, _locked=locked):
+            active = core.active_assignments(self.paths, _locked=locked)
+            pool = core.load_worker_pool(self.paths, _locked=locked) \
+                if core.worker_pool_active(self.paths, _locked=locked) else None
+            if pool is None and active:
                 raise core.BusyError("Another dispatch is unresolved")
+            if pool is not None and any(
+                value.get("worker_conversation_id") == worker_conversation_id
+                for value in active
+            ):
+                raise core.BusyError("The queued-resume worker is unresolved")
             if core.active_cooldown(self.paths, _locked=locked):
                 raise core.CooldownError("Active cooldown blocks queued resume")
-            worker = core.load_worker(self.paths, _locked=locked)
-            if worker.conversation_id != worker_conversation_id:
-                raise core.StateError("Configured worker differs from queued-resume expectation")
+            if pool is None:
+                worker = core.load_worker(self.paths, _locked=locked)
+                if worker.conversation_id != worker_conversation_id:
+                    raise core.StateError("Configured worker differs from queued-resume expectation")
+            else:
+                worker = next((item for item in pool.workers
+                               if item.conversation_id == worker_conversation_id), None)
+                if worker is None:
+                    raise core.StateError("Configured worker differs from queued-resume expectation")
 
             # Decode the selected record strictly before scanning the queue.
             # This keeps ambiguous JSON a configuration failure rather than
@@ -242,7 +337,9 @@ class Queue:
                 raise core.StateError("Existing queued request is required")
             r = core.read_json(selected_path)
             records = self.records(_locked=locked)
-            if any(r["state"] == "claimed" for r in records):
+            if any(r["state"] == "claimed" and (
+                    pool is None or r.get("worker_conversation_id") == worker_conversation_id
+            ) for r in records):
                 raise core.BusyError("Outstanding queue claim blocks queued resume")
             if not any(r["request_id"] == rid for r in records):
                 raise core.StateError("Existing queued request is required")
@@ -281,6 +378,7 @@ class Queue:
                 "raw_prompt_sha256": actual_prompt_hash,
                 "worker_conversation_id": worker.conversation_id,
                 "worker_model_confirmation": worker.model_confirmation,
+                **({"worker_slot": worker.slot} if pool is not None else {}),
                 "assignment_absent": True,
                 "resume_eligible": True,
                 "send_authorized": False,
@@ -291,7 +389,13 @@ class Queue:
             }
 
     def cleanup(self, rid, acknowledge=False):
+        from .resident import invocation
+        if isinstance(invocation.get(), dict) and invocation.get().get("takeover_settlement") is True:
+            raise core.BusyError("settlement_out_of_scope")
         self.path(rid)
+        from .resident import invocation
+        if isinstance(invocation.get(), dict) and invocation.get().get("collector_only") is True:
+            raise core.StateError("Collector-only recovery cannot acknowledge or cancel work")
         with self.locked() as locked:
             r = self.load(rid, _locked=locked)
             if acknowledge:
@@ -311,8 +415,228 @@ class Queue:
             self.clean_temps(rid, _locked=locked)
             return self.metadata(r, _locked=locked)
 
+    def _claim_pool(self, parent, confirmed=False, request_id=None, *,
+                    expected_worker_conversation_id=None):
+        """Claim the oldest request into the first free configured slot."""
+        from . import resident
+        from .resident import invocation
+        if not confirmed:
+            raise core.StateError("Broker requires the live desktop six-capability preflight")
+        with self.locked() as locked:
+            core.reservation_guard(self.paths, locked)
+            records = self.records(_locked=locked)
+            context = self._pool_occupancy(records, _locked=locked)
+            pool = context["pool"]
+            caller = invocation.get()
+            if caller is not None and caller.get("parent") != parent:
+                raise core.StateError("Resident claim parent mismatch")
+            if caller is not None and (caller.get("collector_only") is True or caller.get("takeover_settlement") is True):
+                raise core.StateError("Collector-only recovery cannot claim or send")
+            owner = resident.read(self.paths, locked)
+            if owner is not None and owner.get("version") == 3:
+                if caller is None or not resident.matches(owner, caller):
+                    raise core.StateError("Pool claim requires the current serving resident invocation")
+            elif owner is not None:
+                raise core.StateError("Legacy resident owner cannot claim a pool request")
+
+            def establish_prearm_receipt(record):
+                receipt = self.receipt(record, _locked=locked)
+                if receipt is not None:
+                    return receipt
+                if (not isinstance(caller, dict)
+                        or caller.get("request") != record["request_id"]):
+                    raise core.StateError(
+                        "Receiptless pool claim requires its serving invocation"
+                    )
+                worker = next(
+                    (entry for entry in pool.workers
+                     if entry.slot == record.get("worker_slot")
+                     and entry.conversation_id == record.get("worker_conversation_id")),
+                    None,
+                )
+                if worker is None:
+                    raise core.StateError("Receiptless pool claim worker differs")
+                wrapped = core.wrap_prompt(record["prompt"], record["request_id"])
+                if (core.sha256_text(wrapped) != record.get("wrapped_prompt_sha256")
+                        or core.sha256_text(
+                            core.normalize_newlines(record["prompt"]).strip()
+                        ) != record.get("prompt_sha256")):
+                    raise core.StateError("Receiptless pool claim prompt changed")
+                core.prepare_assignment(
+                    record["prompt"], parent_task_id=parent,
+                    assignment_id=record["request_id"],
+                    queue_claim_token=record["queue_claim_token"], paths=self.paths,
+                    worker_config=worker, worker_slot=worker.slot,
+                    owner_generation=record["owner_generation"], _locked=locked,
+                )
+                record["receipt_established"] = True
+                self.save(record, _locked=locked)
+                return self.receipt(record, _locked=locked)
+
+            target = self.load(request_id, _locked=locked) if request_id is not None else None
+            if owner is not None and owner.get("version") == 3:
+                selected_id = target["request_id"] if target is not None else None
+                for item in owner["slots"]:
+                    if not item.get("request") or item["request"] == selected_id:
+                        continue
+                    worker_id = item["worker_conversation_id"]
+                    slot_id = item["slot"]
+                    if slot_id in context["used_slots"] and context["used_slots"][slot_id] != item["request"]:
+                        raise core.StateError("Resident slot reservation collides with a queue claim")
+                    context["used_slots"][slot_id] = item["request"]
+                    context["used_workers"][worker_id] = item["request"]
+            if target is not None and target["state"] not in {"queued", "claimed"}:
+                raise core.StateError("Requested item is not claimable; collect its existing state")
+            claims = context["claims"]
+            if claims and target is not None and target["state"] == "claimed":
+                ordered_claims = sorted(claims, key=lambda r: (r["created_at"], r["request_id"]))
+                selected_claim = target
+                if selected_claim["parent_task_id"] != parent:
+                    raise core.StateError("Outstanding request belongs to another desktop parent")
+                if (expected_worker_conversation_id is not None and
+                        selected_claim["worker_conversation_id"] != expected_worker_conversation_id):
+                    raise core.StateError("Claimed worker does not match expected session worker")
+                resident.guard(self.paths, locked, selected_claim["request_id"])
+                receipt = establish_prearm_receipt(selected_claim)
+                result = self.metadata(selected_claim, _locked=locked)
+                result.update(
+                    assignment_id=selected_claim["request_id"],
+                    action="arm_then_send_once" if receipt and receipt["status"] == "prepared" else "collect_only",
+                    send_authorized=False,
+                )
+                if receipt and receipt["status"] == "prepared":
+                    wrapped = core.wrap_prompt(selected_claim["prompt"], selected_claim["request_id"])
+                    if core.sha256_text(wrapped) != selected_claim["wrapped_prompt_sha256"]:
+                        raise core.StateError("Prepared prompt reconstruction changed; blocked")
+                    result["wrapped_prompt"] = wrapped
+                return result
+
+            queued = sorted(
+                (record for record in records if record["state"] == "queued"),
+                key=lambda record: (record["created_at"], record["request_id"]),
+            )
+            if not queued:
+                if claims:
+                    selected_claim = sorted(
+                        claims, key=lambda r: (r["created_at"], r["request_id"])
+                    )[0]
+                    if selected_claim["parent_task_id"] != parent:
+                        raise core.StateError("Outstanding request belongs to another desktop parent")
+                    resident.guard(self.paths, locked, selected_claim["request_id"])
+                    receipt = establish_prearm_receipt(selected_claim)
+                    result = self.metadata(selected_claim, _locked=locked)
+                    result.update(assignment_id=selected_claim["request_id"],
+                                  action=("arm_then_send_once"
+                                          if receipt["status"] == "prepared"
+                                          else "collect_only"),
+                                  send_authorized=False)
+                    if receipt["status"] == "prepared":
+                        result["wrapped_prompt"] = core.wrap_prompt(
+                            selected_claim["prompt"], selected_claim["request_id"]
+                        )
+                    return result
+                return {"action": "empty", "send_authorized": False}
+            selected = target if target is not None else queued[0]
+            if selected["state"] != "queued":
+                raise core.StateError("Requested item is not claimable")
+            reserved = None
+            if owner is not None and owner.get("version") == 3 and caller is not None:
+                reserved = next(
+                    (item for item in owner["slots"]
+                     if item.get("request") == selected["request_id"]
+                     and item.get("invocation")
+                     and item["invocation"].get("invocation") == caller.get("invocation")),
+                    None,
+                )
+            if reserved is None and selected["request_id"] != queued[0]["request_id"]:
+                return {
+                    "action": "queued", "state": "queued", "request_id": selected["request_id"],
+                    "reason": "fifo_wait", "send_authorized": False,
+                }
+            if reserved is not None:
+                occupied = context["used_slots"].get(reserved["slot"])
+                occupied_worker = context["used_workers"].get(
+                    reserved["worker_conversation_id"]
+                )
+                if occupied not in {None, selected["request_id"]} or occupied_worker not in {
+                    None, selected["request_id"]
+                }:
+                    available = None
+                else:
+                    available = next(
+                        (worker for worker in pool.workers if worker.slot == reserved["slot"]),
+                        None,
+                    )
+            else:
+                available = next(
+                    (worker for worker in pool.workers
+                     if worker.conversation_id not in context["used_workers"]),
+                    None,
+                )
+            if available is None:
+                return {
+                    "action": "queued", "state": "queued", "request_id": selected["request_id"],
+                    "reason": "no_worker_slot", "send_authorized": False,
+                }
+            if (expected_worker_conversation_id is not None and
+                        available.conversation_id != expected_worker_conversation_id):
+                raise core.StateError("Selected worker does not match expected session worker")
+            if core.active_cooldown(self.paths, _locked=locked):
+                raise core.CooldownError("Native unusual-activity cooldown blocks pool claim")
+            if os.path.lexists(core.assignment_path(selected["request_id"], self.paths)):
+                raise core.StateError("Refusing preexisting dispatch assignment")
+            generation = 0
+            if caller is not None:
+                generation = caller.get("generation", 0)
+                if type(generation) is not int or generation < 1:
+                    raise core.StateError("Pool claim requires a current resident generation")
+            claim = selected
+            claim.update(
+                state="claimed", parent_task_id=parent,
+                worker_conversation_id=available.conversation_id,
+                worker_slot=available.slot,
+                owner_generation=generation,
+                queue_claim_token=secrets.token_hex(32),
+                result_protocol=core.BOUNDED_RESULT_PROTOCOL,
+                prompt_sha256=core.sha256_text(core.normalize_newlines(claim["prompt"]).strip()),
+                wrapped_prompt_sha256=core.sha256_text(core.wrap_prompt(claim["prompt"], claim["request_id"])),
+            )
+            # The resident slot reservation is durable before the queue claim
+            # write. If a later write loses its acknowledgement, the preserved
+            # reservation blocks all replacement and remains collect-only.
+            if caller is not None and resident.read(self.paths, locked) is not None:
+                resident.reserve_slot(
+                    self.paths, locked, available.slot, claim["request_id"],
+                    available.conversation_id, generation,
+                )
+            self.save(claim, _locked=locked)
+            core.prepare_assignment(
+                claim["prompt"], parent_task_id=parent, assignment_id=claim["request_id"],
+                queue_claim_token=claim["queue_claim_token"], paths=self.paths,
+                worker_config=available, worker_slot=available.slot,
+                owner_generation=generation, _locked=locked,
+            )
+            claim["receipt_established"] = True
+            self.save(claim, _locked=locked)
+            receipt = self.receipt(claim, _locked=locked)
+            result = self.metadata(claim, _locked=locked)
+            result.update(
+                assignment_id=claim["request_id"],
+                action="arm_then_send_once" if receipt["status"] == "prepared" else "collect_only",
+                worker_conversation_id=available.conversation_id,
+                worker_slot=available.slot,
+                owner_generation=generation,
+                send_authorized=False,
+            )
+            if receipt["status"] == "prepared":
+                result["wrapped_prompt"] = core.wrap_prompt(claim["prompt"], claim["request_id"])
+            return result
+
     def claim(self, parent, confirmed=False, request_id=None, *,
               expected_worker_conversation_id=None):
+        from .resident import invocation
+        if isinstance(invocation.get(), dict) and invocation.get().get("takeover_settlement") is True:
+            raise core.BusyError("settlement_out_of_scope")
         core.validate_identifier(parent, field="parent_task_id")
         if request_id is not None:
             self.path(request_id)
@@ -321,6 +645,14 @@ class Queue:
                                      field="expected_worker_conversation_id")
         if not confirmed:
             raise core.StateError("Broker requires the live desktop six-capability preflight")
+        from .resident import invocation
+        if isinstance(invocation.get(), dict) and invocation.get().get("collector_only") is True:
+            raise core.StateError("Collector-only recovery cannot claim or send")
+        if core.worker_pool_active(self.paths):
+            return self._claim_pool(
+                parent, confirmed, request_id,
+                expected_worker_conversation_id=expected_worker_conversation_id,
+            )
         with self.locked() as locked:
             core.reservation_guard(self.paths, locked)
             from .resident import guard
@@ -397,10 +729,13 @@ class Queue:
                 result["wrapped_prompt"] = wrapped
             return result
 
-    def release(self, rid, parent):
+    def release(self, rid, parent, *, _locked=None):
         self.path(rid)
+        from .resident import invocation, settlement_scope
+        if isinstance(invocation.get(), dict) and invocation.get().get("collector_only") is True:
+            raise core.StateError("Collector-only recovery cannot release work")
         core.validate_identifier(parent, field="parent_task_id")
-        with self.locked() as locked:
+        with self.locked(_locked=_locked) as locked, settlement_scope("release"):
             from .resident import guard
             guard(self.paths, locked, rid)
             r = self.load(rid, _locked=locked)
@@ -428,6 +763,9 @@ class Queue:
         must pass the existing native-summary and short-envelope validators.
         Publication and interrupted-publication recovery retain core authority.
         """
+        from .resident import invocation
+        if isinstance(invocation.get(), dict) and invocation.get().get("takeover_settlement") is True:
+            raise core.BusyError("settlement_out_of_scope")
         self.path(rid)
         core.validate_identifier(parent, field="parent_task_id")
         if not confirmed:
@@ -438,6 +776,7 @@ class Queue:
             raise core.ConfigurationError("Native history must be bytes within 4 MiB")
 
         with self.locked(create=False) as locked:
+            from . import resident
             r = self.load(rid, _locked=locked)
             if r.get("parent_task_id") != parent:
                 raise core.StateError("Observation requires the recorded desktop parent")
@@ -452,6 +791,10 @@ class Queue:
                 raise core.StateError("Observation requires existing post-arm work")
             if receipt.get("result_protocol") != core.BOUNDED_RESULT_PROTOCOL:
                 raise core.StateError("Observation requires bounded-footer-v1")
+            collector = (isinstance(resident.invocation.get(), dict)
+                         and resident.invocation.get().get("collector_only") is True)
+            if collector:
+                resident.validate_collector_observation(self.paths, locked, rid)
 
             staged = r.get("native_read")
             if staged is not None:
@@ -489,34 +832,45 @@ class Queue:
                     "Queue observer requires a short result; operator resolution required"
                 )
 
-            if receipt.get("outbound_prompt_verified") is not True:
-                # _native_response already validated the complete JSON, unique
-                # matching turn, item ordering, and exact wrapped-prompt hash.
-                # Extract its returned text without normalization/reconstruction.
-                data = json.loads(native_read.decode("utf-8"))
-                turn = next(
-                    item for item in data["turns"]
-                    if item["id"] == association["turn_id"]
-                )
-                sent_prompt = turn["items"][0]["content"][0]["text"]
-                core.mark_submitted(
-                    rid, sent_prompt, self.paths, _locked=locked
-                )
-            elif receipt.get("submission_count") != 1:
-                raise core.StateError("Verified submission count is invalid")
+            mutation = resident.collector_observation() if collector else contextlib.nullcontext()
+            with mutation:
+                if receipt.get("outbound_prompt_verified") is not True:
+                    # _native_response already validated the complete JSON, unique
+                    # matching turn, item ordering, and exact wrapped-prompt hash.
+                    # Extract its returned text without normalization/reconstruction.
+                    data = json.loads(native_read.decode("utf-8"))
+                    turn = next(
+                        item for item in data["turns"]
+                        if item["id"] == association["turn_id"]
+                    )
+                    sent_prompt = turn["items"][0]["content"][0]["text"]
+                    core.mark_submitted(
+                        rid, sent_prompt, self.paths, _locked=locked
+                    )
+                elif receipt.get("submission_count") != 1:
+                    raise core.StateError("Verified submission count is invalid")
 
-            result = self.publish(
-                rid, parent, confirmed=True,
-                native_read=native_read, _locked=locked,
-            )
+                result = self.publish(
+                    rid, parent, confirmed=True,
+                    native_read=native_read, _locked=locked,
+                )
             return dict(result, observation="published", no_resend=True)
 
     def publish(self, rid, parent, confirmed=False, native_read=None, *, _locked=None):
+        from .resident import invocation
+        if isinstance(invocation.get(), dict) and invocation.get().get("takeover_settlement") is True:
+            raise core.BusyError("settlement_out_of_scope")
         self.path(rid)
+        from . import resident
+        caller = resident.invocation.get()
+        if (isinstance(caller, dict) and caller.get("collector_only") is True
+                and resident.collector_operation.get() != "observe"):
+            raise core.StateError("Collector-only recovery cannot publish outside observation")
         core.validate_identifier(parent, field="parent_task_id")
         if not confirmed:
             raise core.StateError("Broker requires the live desktop six-capability preflight")
         with self.locked(_locked=_locked) as locked:
+            resident.guard(self.paths, locked, rid, operation="publish")
             r = self.load(rid, _locked=locked)
             if r.get("parent_task_id") != parent:
                 raise core.StateError("Publication requires the recorded desktop parent")

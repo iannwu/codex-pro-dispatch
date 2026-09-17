@@ -91,6 +91,10 @@ class RuntimePaths:
         return self.config_dir / "worker.json"
 
     @property
+    def worker_pool_file(self) -> Path:
+        return self.config_dir / "worker-pool.json"
+
+    @property
     def assignments_dir(self) -> Path:
         return self.state_dir / "assignments"
 
@@ -108,6 +112,33 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
+class WorkerPoolEntry:
+    """One explicitly configured, stable worker slot."""
+
+    slot: str
+    conversation_id: str
+    label: str
+    model_confirmation: str
+    configured_at: str
+
+    @property
+    def worker(self) -> str:
+        return self.conversation_id
+
+
+@dataclass(frozen=True)
+class WorkerPool:
+    workers: tuple[WorkerPoolEntry, ...]
+    legacy_worker_sha256: str | None
+    file_sha256: str
+
+
+# Both markers record that the user confirmed the intended worker conversation.
+# Neither verifies the model or reasoning effort the user chose there.
+WORKER_CONFIRMATIONS = ("user-confirmed-worker", "user-confirmed-pro")
+
+
+@dataclass(frozen=True)
 class PreparedAssignment:
     assignment_id: str
     worker_conversation_id: str
@@ -115,6 +146,8 @@ class PreparedAssignment:
     receipt_path: Path
     wrapped_prompt: str
     continuation_of: str | None = None
+    worker_slot: str | None = None
+    owner_generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -633,11 +666,11 @@ def _snapshot(function):
     return read
 
 
-def reservation_guard(runtime, token, assignment_id=None, parent=None, claim=None):
+def reservation_guard(runtime, token, assignment_id=None, parent=None, claim=None, operation=None):
     token.validate(runtime)
     if assignment_id is not None:
         from .resident import guard
-        guard(runtime, token, assignment_id)
+        guard(runtime, token, assignment_id, operation=operation)
     if os.path.lexists(runtime.state_dir / "native-client"):
         raise StateError("Unsupported native-client storage; preserve it")
     if any("native_client" in value
@@ -649,7 +682,8 @@ def save_worker(
     conversation_id: str,
     *,
     label: str = "Codex Pro Dispatch Worker",
-    confirm_pro: bool,
+    confirm_pro: bool = False,
+    confirm_worker: bool = False,
     expected_conversation_id: str | None = None,
     paths: RuntimePaths | None = None,
     _locked=None,
@@ -663,12 +697,17 @@ def save_worker(
         raise ConfigurationError("Worker label is empty")
     if len(cleaned_label) > 120:
         raise ConfigurationError("Worker label is too long")
-    if not confirm_pro:
+    if not (confirm_worker or confirm_pro):
         raise ConfigurationError(
-            "The user must visibly select Pro in the worker conversation and confirm it"
+            "The user must confirm this is the intended worker conversation "
+            "(confirm_worker, or the legacy confirm_pro)"
         )
+    # The neutral marker wins for a new record. The legacy flag alone keeps
+    # writing the legacy marker so older binaries can still read the file.
+    confirmation = "user-confirmed-worker" if confirm_worker else "user-confirmed-pro"
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
+        legacy_worker_mutation_guard(runtime)
         from .resident import guard
         guard(runtime, locked, configuration=True)
         current = active_assignment(runtime, _locked=locked)
@@ -707,7 +746,7 @@ def save_worker(
         worker = WorkerConfig(
             conversation_id=conversation_id,
             label=cleaned_label,
-            model_confirmation="user-confirmed-pro",
+            model_confirmation=confirmation,
             configured_at=utc_now(),
         )
         atomic_write_json(
@@ -732,19 +771,21 @@ def load_worker(paths: RuntimePaths | None = None,
     value = read_json(runtime.worker_file)
     if value.get("schema_version") != SCHEMA_VERSION:
         raise ConfigurationError(f"Unsupported worker config schema: {runtime.worker_file}")
-    conversation_id = validate_identifier(
-        str(value.get("conversation_id", "")), field="conversation_id"
-    )
-    label = str(value.get("label", "")).strip()
+    conversation_value = value.get("conversation_id")
+    if not isinstance(conversation_value, str):
+        raise ConfigurationError(f"Worker conversation_id is missing: {runtime.worker_file}")
+    conversation_id = validate_identifier(conversation_value, field="conversation_id")
+    label_value = value.get("label")
+    label = label_value.strip() if isinstance(label_value, str) else ""
     if not label:
         raise ConfigurationError(f"Worker label is missing: {runtime.worker_file}")
-    confirmation = str(value.get("model_confirmation", ""))
-    if confirmation != "user-confirmed-pro":
+    confirmation = value.get("model_confirmation")
+    if not isinstance(confirmation, str) or confirmation not in WORKER_CONFIRMATIONS:
         raise ConfigurationError(
-            "Worker model has not been confirmed as Pro by the user"
+            "Worker conversation has not been confirmed by the user"
         )
-    configured_at = str(value.get("configured_at", ""))
-    if not configured_at:
+    configured_at = value.get("configured_at")
+    if not isinstance(configured_at, str) or not configured_at:
         raise ConfigurationError(f"Worker configured_at is missing: {runtime.worker_file}")
     return WorkerConfig(
         conversation_id=conversation_id,
@@ -752,6 +793,323 @@ def load_worker(paths: RuntimePaths | None = None,
         model_confirmation=confirmation,
         configured_at=configured_at,
     )
+
+
+def _authority_file_bytes(path: Path) -> bytes:
+    try:
+        with Directory(path.parent.absolute()) as directory:
+            return directory.read(path.name, 4 * 1024 * 1024)
+    except FileNotFoundError:
+        raise
+    except (IntegrityError, OSError) as exc:
+        raise ConfigurationError("Private authority file integrity failure") from exc
+
+
+def _sha256_authority_file(path: Path) -> str | None:
+    if not os.path.lexists(path):
+        return None
+    return hashlib.sha256(_authority_file_bytes(path)).hexdigest()
+
+
+def _worker_entry_from_mapping(value: Mapping[str, Any]) -> WorkerPoolEntry:
+    if not isinstance(value, Mapping):
+        raise ConfigurationError("Invalid worker-pool entry")
+    expected = {"slot", "conversation_id", "label", "model_confirmation", "configured_at"}
+    if set(value) != expected:
+        raise ConfigurationError("Invalid worker-pool entry schema")
+    slot_value = value.get("slot")
+    conversation_value = value.get("conversation_id")
+    if not isinstance(slot_value, str) or not isinstance(conversation_value, str):
+        raise ConfigurationError("Worker-pool slot and conversation_id must be strings")
+    slot = validate_identifier(slot_value, field="worker_slot")
+    conversation_id = validate_identifier(conversation_value, field="conversation_id")
+    label_value = value.get("label")
+    label = label_value.strip() if isinstance(label_value, str) else ""
+    if not label or len(label) > 120:
+        raise ConfigurationError("Worker label is missing or too long")
+    confirmation = value.get("model_confirmation")
+    if not isinstance(confirmation, str) or confirmation not in WORKER_CONFIRMATIONS:
+        raise ConfigurationError("Worker conversation has not been confirmed by the user")
+    configured_at = value.get("configured_at")
+    if not isinstance(configured_at, str) or not configured_at:
+        raise ConfigurationError("Worker configured_at is missing")
+    return WorkerPoolEntry(
+        slot=slot,
+        conversation_id=conversation_id,
+        label=label,
+        model_confirmation=confirmation,
+        configured_at=configured_at,
+    )
+
+
+def _pool_from_value(value: Mapping[str, Any], *, file_sha256: str) -> WorkerPool:
+    if set(value) != {"schema_version", "workers", "legacy_worker_sha256"}:
+        raise ConfigurationError("Invalid worker-pool schema")
+    if value.get("schema_version") != 1 or not isinstance(value.get("workers"), list):
+        raise ConfigurationError("Unsupported worker-pool schema")
+    raw_legacy = value.get("legacy_worker_sha256")
+    if raw_legacy is not None and (
+        not isinstance(raw_legacy, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", raw_legacy)
+    ):
+        raise ConfigurationError("Invalid legacy worker configuration hash")
+    if not 1 <= len(value["workers"]) <= 2:
+        raise ConfigurationError("Worker pool must contain one or two workers")
+    workers = tuple(_worker_entry_from_mapping(item) for item in value["workers"])
+    if len({item.slot for item in workers}) != len(workers):
+        raise ConfigurationError("Worker pool contains duplicate slots")
+    if len({item.conversation_id for item in workers}) != len(workers):
+        raise ConfigurationError("Worker pool contains duplicate conversations")
+    return WorkerPool(
+        workers=workers,
+        legacy_worker_sha256=raw_legacy,
+        file_sha256=file_sha256,
+    )
+
+
+def _load_worker_pool_unlocked(runtime: RuntimePaths, *, _locked) -> WorkerPool:
+    _locked.validate(runtime)
+    raw = _authority_file_bytes(runtime.worker_pool_file)
+    try:
+        value = decode(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise ConfigurationError("Invalid worker-pool JSON") from exc
+    if not isinstance(value, dict):
+        raise ConfigurationError("Worker pool must be a JSON object")
+    pool = _pool_from_value(
+        value,
+        file_sha256=hashlib.sha256(raw).hexdigest(),
+    )
+    actual_legacy = _sha256_authority_file(runtime.worker_file)
+    if pool.legacy_worker_sha256 != actual_legacy:
+        raise StateError("Legacy worker configuration hash differs from worker pool")
+    return pool
+
+
+@_snapshot
+def load_worker_pool(paths: RuntimePaths | None = None, *, _locked=None) -> WorkerPool:
+    runtime = paths or default_paths()
+    if not os.path.lexists(runtime.worker_pool_file):
+        raise ConfigurationError(f"Missing worker pool: {runtime.worker_pool_file}")
+    return _load_worker_pool_unlocked(runtime, _locked=_locked)
+
+
+def worker_pool_active(paths: RuntimePaths | None = None, *, _locked=None) -> bool:
+    runtime = paths or default_paths()
+    return os.path.lexists(runtime.worker_pool_file)
+
+
+@_snapshot
+def configured_workers(paths: RuntimePaths | None = None, *, _locked=None) -> tuple[WorkerPoolEntry, ...]:
+    runtime = paths or default_paths()
+    if os.path.lexists(runtime.worker_pool_file):
+        return _load_worker_pool_unlocked(runtime, _locked=_locked).workers
+    worker = load_worker(runtime, _locked=_locked)
+    return (WorkerPoolEntry(
+        slot="worker-1",
+        conversation_id=worker.conversation_id,
+        label=worker.label,
+        model_confirmation=worker.model_confirmation,
+        configured_at=worker.configured_at,
+    ),)
+
+
+def worker_pool_payload(pool: WorkerPool) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "legacy_worker_sha256": pool.legacy_worker_sha256,
+        "file_sha256": pool.file_sha256,
+        "workers": [
+            {
+                "slot": worker.slot,
+                "conversation_id": worker.conversation_id,
+                "label": worker.label,
+                "model_confirmation": worker.model_confirmation,
+                "configured_at": worker.configured_at,
+            }
+            for worker in pool.workers
+        ],
+    }
+
+
+def worker_pool_runtime_status(
+    pool: WorkerPool,
+    paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
+) -> dict[str, Any]:
+    """Return bounded pool readiness without exposing credentials or answers."""
+    runtime = paths or default_paths()
+    if _locked is None:
+        with state_lock(runtime, create=False) as locked:
+            return worker_pool_runtime_status(pool, runtime, _locked=locked)
+    _locked.validate(runtime)
+    from .queue import Queue
+    from . import resident
+
+    configured = {worker.conversation_id: worker.slot for worker in pool.workers}
+    occupied: set[str] = set()
+    for record in Queue(runtime).records(_locked=_locked):
+        if record.get("state") != "claimed":
+            continue
+        worker = record.get("worker_conversation_id")
+        slot = record.get("worker_slot") or configured.get(worker)
+        if worker not in configured or slot != configured[worker]:
+            raise StateError("Pool status found an unbound queue claim")
+        occupied.add(slot)
+    for record in active_assignments(runtime, _locked=_locked):
+        worker = record.get("worker_conversation_id")
+        slot = record.get("worker_slot") or configured.get(worker)
+        if worker not in configured or slot != configured[worker]:
+            raise StateError("Pool status found an unbound active receipt")
+        occupied.add(slot)
+
+    owner = resident.read(runtime, _locked)
+    if owner is None:
+        readiness = "enrollment_required"
+    elif owner.get("version") != 3:
+        readiness = "legacy_owner_requires_explicit_migration"
+    elif any(item["phase"] == "cancel_pending" for item in owner["slots"]):
+        readiness = "takeover_settlement_required"
+    elif (any(item["phase"] == "collect_only" for item in owner["slots"])
+          and not any(item["phase"] == "idle" for item in owner["slots"])):
+        readiness = "collector_only_recovery_required"
+    elif any(item["invocation"] is not None for item in owner["slots"]):
+        readiness = "busy_original_invocation_not_finished"
+    elif owner.get("session") is not None:
+        readiness = "resident_bound_requires_explicit_recovery"
+    else:
+        readiness = "ready_for_explicit_start"
+    return {
+        "collect_only_slots": [item["slot"] for item in (owner or {}).get("slots", [])
+                               if item["phase"] == "collect_only"],
+        "capacity": len(pool.workers),
+        "occupied_slots": [worker.slot for worker in pool.workers
+                            if worker.slot in occupied],
+        "readiness": readiness,
+        "automatic_startup": "unsupported",
+    }
+
+
+def legacy_worker_mutation_guard(runtime: RuntimePaths) -> None:
+    if os.path.lexists(runtime.worker_pool_file):
+        raise StateError(
+            "Worker pool is active; legacy scalar-worker mutation is fenced"
+        )
+
+
+def worker_entry_payload(worker: WorkerPoolEntry) -> dict[str, Any]:
+    return {
+        "slot": worker.slot,
+        "conversation_id": worker.conversation_id,
+        "label": worker.label,
+        "model_confirmation": worker.model_confirmation,
+        "configured_at": worker.configured_at,
+    }
+
+
+def activate_worker_pool(
+    workers: Iterable[Mapping[str, Any]],
+    *,
+    expected_legacy_sha256: str | None,
+    evidence_file: str | Path,
+    evidence_sha256: str,
+    paths: RuntimePaths | None = None,
+    _locked=None,
+) -> WorkerPool:
+    """Explicit maintenance-only pool activation with a write-before-proof fence."""
+    runtime = paths or default_paths()
+    if expected_legacy_sha256 is not None and not re.fullmatch(
+        r"[0-9a-f]{64}", expected_legacy_sha256
+    ):
+        raise ConfigurationError("Expected lowercase legacy worker SHA-256 or null")
+    if not isinstance(evidence_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", evidence_sha256
+    ):
+        raise ConfigurationError("Expected lowercase evidence SHA-256")
+    entries = tuple(_worker_entry_from_mapping(dict(item)) for item in workers)
+    if not 1 <= len(entries) <= 2:
+        raise ConfigurationError("Worker pool must contain one or two workers")
+    if len({item.slot for item in entries}) != len(entries):
+        raise ConfigurationError("Worker pool contains duplicate slots")
+    if len({item.conversation_id for item in entries}) != len(entries):
+        raise ConfigurationError("Worker pool contains duplicate conversations")
+
+    from .native_storage import read_evidence
+    with state_lock(runtime, token=_locked, create=False) as locked:
+        reservation_guard(runtime, locked)
+        if os.path.lexists(runtime.worker_pool_file):
+            raise BusyError("Worker pool is already active; no rewrite is allowed")
+        actual_legacy = _sha256_authority_file(runtime.worker_file)
+        if actual_legacy != expected_legacy_sha256:
+            raise StateError("Expected legacy worker hash differs; activation writes nothing")
+        try:
+            raw_evidence = read_evidence(str(evidence_file))
+        except (IntegrityError, OSError) as exc:
+            raise ConfigurationError("Pool activation evidence integrity rejected") from exc
+        if hashlib.sha256(raw_evidence).hexdigest() != evidence_sha256:
+            raise StateError("Pool activation evidence hash differs")
+        try:
+            proof = json.loads(raw_evidence)
+        except (ValueError, UnicodeError) as exc:
+            raise StateError("Pool activation evidence is not valid JSON") from exc
+        bindings = {
+            "config_dir": str(runtime.config_dir),
+            "state_dir": str(runtime.state_dir),
+        }
+        if (
+            not isinstance(proof, dict)
+            or proof.get("kind") not in {"fresh_deployment", "legacy_quiescence"}
+            or any(proof.get(key) != value for key, value in bindings.items())
+            or proof.get("physical_quiescence") is not True
+            or any(not isinstance(proof.get(key), str) or not proof[key].strip()
+                   for key in ("implementation", "observations", "authorization"))
+        ):
+            raise StateError("Pool activation evidence binding or authorization missing")
+
+        # Only claims still require their worker, including interrupted publication
+        # after receipt completion. Published answers are durable and collectible
+        # without that worker; acknowledged/released records are terminal history.
+        # Active receipts are guarded separately below, regardless of queue state.
+        from .queue import Queue
+        records = Queue(runtime).records(_locked=locked)
+        retained = {entry.conversation_id for entry in entries}
+        for record in records:
+            if record["state"] != "claimed":
+                continue
+            worker = record.get("worker_conversation_id")
+            if worker and worker not in retained:
+                raise StateError("Unresolved queue worker is not retained by pool")
+        for assignment in list_assignments(runtime, _locked=locked):
+            if assignment.get("status") in ACTIVE_STATUSES and (
+                assignment.get("worker_conversation_id") not in retained
+            ):
+                raise StateError("Unresolved receipt worker is not retained by pool")
+        owner_path = runtime.state_dir / "resident-owner.json"
+        if os.path.lexists(owner_path):
+            owner = read_json(owner_path)
+            if owner.get("version") == 3:
+                raise StateError("Schema-3 resident owner requires the worker pool")
+            if owner.get("version") in {1, 2} and (
+                owner.get("inflight") is not None
+                or owner.get("worker") not in retained
+            ):
+                raise BusyError("Legacy resident owner is not physically quiescent")
+            if owner.get("version") not in {1, 2}:
+                raise StateError("Unsupported resident owner; activation writes nothing")
+            if owner.get("session") is not None:
+                from .resident import require_closed_session
+                require_closed_session(runtime, owner, _locked=locked)
+        if os.path.lexists(runtime.state_dir / "native-client"):
+            raise StateError("Unsupported native-client storage; activation writes nothing")
+        payload = {
+            "schema_version": 1,
+            "workers": [worker_entry_payload(entry) for entry in entries],
+            "legacy_worker_sha256": actual_legacy,
+        }
+        atomic_write_json(runtime.worker_pool_file, payload, _locked=locked)
+        raw = _authority_file_bytes(runtime.worker_pool_file)
+        return _pool_from_value(payload, file_sha256=hashlib.sha256(raw).hexdigest())
 
 
 def assignment_path(assignment_id: str, paths: RuntimePaths | None = None) -> Path:
@@ -783,14 +1141,19 @@ def _save_assignment(
     paths: RuntimePaths | None = None,
     *,
     _locked,
+    operation=None,
 ) -> Path:
     _locked.validate(paths or default_paths())
     from .resident import guard
-    guard(paths or default_paths(), _locked, assignment_id)
+    guard(paths or default_paths(), _locked, assignment_id, operation=operation)
     from .resident import invocation
     caller = invocation.get()
-    if caller is not None and (value.get("parent_task_id") != caller.get("parent")
-                              or value.get("worker_conversation_id") != caller.get("worker")):
+    expected_parent = (caller.get("request_parent", caller.get("parent")) if isinstance(caller, dict)
+                       and (caller.get("takeover_settlement") is True or caller.get("collector_only") is True)
+                       else caller.get("parent")) if caller is not None else None
+    if caller is not None and (value.get("parent_task_id") != expected_parent
+                              or (caller.get("worker") is not None
+                                  and value.get("worker_conversation_id") != caller.get("worker"))):
         raise StateError("Resident receipt identity mismatch")
     path = assignment_path(assignment_id, paths)
     payload = dict(value)
@@ -859,13 +1222,50 @@ def redact_stored_diagnostics(paths: RuntimePaths | None = None,
 
 
 @_snapshot
+def active_assignments(paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
+) -> list[dict[str, Any]]:
+    runtime = paths or default_paths()
+    active = [
+        value for value in list_assignments(runtime, _locked=_locked)
+        if value.get("status") in ACTIVE_STATUSES
+    ]
+    if os.path.lexists(runtime.worker_pool_file):
+        pool = _load_worker_pool_unlocked(runtime, _locked=_locked)
+        configured = {worker.conversation_id: worker.slot for worker in pool.workers}
+        seen_workers: set[str] = set()
+        seen_slots: set[str] = set()
+        for index, original in enumerate(active):
+            value = dict(original)
+            worker = value.get("worker_conversation_id")
+            slot = value.get("worker_slot") or configured.get(worker)
+            if worker not in configured or not isinstance(slot, str) or configured[worker] != slot:
+                raise StateError(
+                    "Active pool receipt is not bound to a configured worker slot",
+                    details={"assignment_id": value.get("assignment_id")},
+                )
+            if worker in seen_workers or slot in seen_slots:
+                raise StateError("Multiple active assignments share one worker slot")
+            seen_workers.add(worker)
+            seen_slots.add(slot)
+            active[index] = value
+        if len(active) > len(pool.workers):
+            raise StateError("Active assignment count exceeds worker pool capacity")
+    elif len(active) > 1:
+        raise StateError(
+            "Multiple active assignments exist",
+            details={"assignment_ids": [value.get("assignment_id") for value in active]},
+        )
+    return active
+
+
+@_snapshot
 def active_assignment(paths: RuntimePaths | None = None,
     *,
     _locked=None,
 ) -> dict[str, Any] | None:
-    active = [
-        value for value in list_assignments(paths, _locked=_locked) if value.get("status") in ACTIVE_STATUSES
-    ]
+    active = active_assignments(paths, _locked=_locked)
     if len(active) > 1:
         raise StateError(
             "Multiple active assignments exist",
@@ -952,33 +1352,88 @@ def prepare_assignment(
     assignment_id: str | None = None,
     paths: RuntimePaths | None = None,
     queue_claim_token: str | None = None,
+    worker_config: WorkerConfig | WorkerPoolEntry | None = None,
+    worker_slot: str | None = None,
+    owner_generation: int | None = None,
     _locked=None,
 ) -> PreparedAssignment:
     runtime = paths or default_paths()
     validate_identifier(parent_task_id, field="parent_task_id")
     resolved_id = assignment_id if assignment_id is not None else new_assignment_id()
     validate_identifier(resolved_id, field="assignment_id")
+    if worker_slot is not None:
+        validate_identifier(worker_slot, field="worker_slot")
+    if owner_generation is not None and (
+        type(owner_generation) is not int or owner_generation < 0
+    ):
+        raise ConfigurationError("owner_generation must be a nonnegative integer")
 
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
         from .resident import guard
         guard(runtime, locked, resolved_id)
-        worker = load_worker(runtime, _locked=locked)
-        if assignment_path(resolved_id, runtime).exists():
+        from . import resident
+        caller = resident.invocation.get()
+        if os.path.lexists(runtime.worker_pool_file):
+            pool = _load_worker_pool_unlocked(runtime, _locked=locked)
+            owner = resident.read(runtime, locked)
+            selected = worker_config
+            if selected is None and worker_slot is not None:
+                selected = next((item for item in pool.workers if item.slot == worker_slot), None)
+            if not isinstance(selected, WorkerPoolEntry):
+                raise StateError("Pool assignment requires an explicitly selected worker slot")
+            if selected not in pool.workers:
+                raise StateError("Selected worker is not in the configured pool")
+            if worker_slot is not None and selected.slot != worker_slot:
+                raise StateError("Selected worker slot differs from the pool claim")
+            worker = selected
+            if owner is not None and owner.get("version") == 3:
+                if (not isinstance(caller, dict) or caller.get("collector_only") is True
+                        or (caller.get("takeover_settlement") is True
+                            and resident.settlement_operation.get() != "prepare_cancel")):
+                    raise StateError("Pool assignment requires the serving resident invocation")
+                if (owner_generation != owner["generation"]
+                        and caller.get("takeover_settlement") is not True):
+                    raise StateError("Pool assignment generation differs from the resident owner")
+                if caller.get("slot") not in {None, worker.slot}:
+                    raise StateError("Pool assignment slot differs from the resident invocation")
+            elif owner is not None:
+                raise StateError("Legacy resident owner cannot prepare a pool assignment")
+        else:
+            if worker_config is not None or worker_slot is not None:
+                raise StateError("Worker slots require an active worker pool")
+            worker = load_worker(runtime, _locked=locked)
+        if isinstance(caller, dict) and caller.get("takeover_settlement") is True:
+            from .queue import Queue
+            stored = Queue(runtime).load(resolved_id, _locked=locked)
+            if (resident.settlement_operation.get() != "prepare_cancel"
+                    or parent_task_id != stored.get("parent_task_id")
+                    or prompt != stored.get("prompt")
+                    or queue_claim_token != stored.get("queue_claim_token")
+                    or worker.conversation_id != stored.get("worker_conversation_id")
+                    or worker_slot != stored.get("worker_slot")
+                    or owner_generation != stored.get("owner_generation")):
+                raise BusyError("settlement_out_of_scope")
+        if os.path.lexists(assignment_path(resolved_id, runtime)):
             raise StateError(
                 "Assignment ID already exists; refusing a possible duplicate submission",
                 details={"assignment_id": resolved_id},
             )
-        existing_active = active_assignment(runtime, _locked=locked)
+        existing_active = active_assignments(runtime, _locked=locked)
         if existing_active:
-            _reject_legacy_active_assignment(existing_active, operation="prepare")
-            raise BusyError(
-                "Another dispatch is unresolved",
-                details={
-                    "assignment_id": existing_active.get("assignment_id"),
-                    "status": existing_active.get("status"),
-                },
-            )
+            if not os.path.lexists(runtime.worker_pool_file) or any(
+                value.get("worker_conversation_id") == worker.conversation_id
+                for value in existing_active
+            ) or len(existing_active) >= 2:
+                value = existing_active[0]
+                _reject_legacy_active_assignment(value, operation="prepare")
+                raise BusyError(
+                    "Another dispatch is unresolved",
+                    details={
+                        "assignment_id": value.get("assignment_id"),
+                        "status": value.get("status"),
+                    },
+                )
         cooldown = active_cooldown(runtime, _locked=locked)
         if cooldown:
             raise CooldownError(
@@ -1024,6 +1479,14 @@ def prepare_assignment(
             receipt["continuation_of"] = continuation_of
         if queue_claim_token is not None:
             receipt["queue_claim_token"] = queue_claim_token
+        if isinstance(worker, WorkerPoolEntry):
+            receipt["worker_slot"] = worker.slot
+        if owner_generation is not None:
+            receipt["owner_generation"] = owner_generation
+        if isinstance(caller, dict) and caller.get("takeover_settlement") is True:
+            if any(receipt.get(key) != stored.get(key) for key in (
+                    "prompt_sha256", "wrapped_prompt_sha256", "result_protocol")):
+                raise BusyError("settlement_out_of_scope")
         path = _save_assignment(resolved_id, receipt, runtime, _locked=locked)
 
     return PreparedAssignment(
@@ -1033,6 +1496,8 @@ def prepare_assignment(
         receipt_path=path,
         wrapped_prompt=wrapped,
         continuation_of=continuation_of,
+        worker_slot=worker.slot if isinstance(worker, WorkerPoolEntry) else None,
+        owner_generation=owner_generation,
     )
 
 
@@ -1048,7 +1513,7 @@ def _transition(
     runtime = paths or default_paths()
     validate_status(target)
     with state_lock(runtime, token=_locked) as locked:
-        reservation_guard(runtime, locked, assignment_id)
+        reservation_guard(runtime, locked, assignment_id, operation=target)
         value = load_assignment(assignment_id, runtime, _locked=locked)
         current = str(value["status"])
         if target != "abandoned":
@@ -1059,13 +1524,17 @@ def _transition(
                 details={"assignment_id": assignment_id, "status": current},
             )
         if target == "armed":
+            if os.path.lexists(runtime.worker_pool_file):
+                raise StateError(
+                    "Pool assignments require the slot-specific arm-for-send operation"
+                )
             active_assignment(runtime, _locked=locked)  # Reject multiple unresolved assignments.
             if active_cooldown(runtime, _locked=locked):
                 raise CooldownError("Native unusual-activity cooldown blocks arming")
         value["status"] = target
         if updates:
             value.update(dict(updates))
-        _save_assignment(assignment_id, value, runtime, _locked=locked)
+        _save_assignment(assignment_id, value, runtime, _locked=locked, operation=target)
         return value
 
 
@@ -1084,6 +1553,101 @@ def arm_assignment(
     )
 
 
+def arm_for_send(
+    worker_slot: str,
+    request_id: str,
+    generation: int,
+    invocation_id: str,
+    paths: RuntimePaths | None = None,
+    *,
+    _locked=None,
+) -> dict[str, Any]:
+    """Atomically fence one pool slot and return the exact prompt to send.
+
+    The caller must immediately perform its one native send with the returned
+    bytes. No later admission, worker selection, or release operation is part
+    of this helper's contract.
+    """
+    runtime = paths or default_paths()
+    validate_identifier(worker_slot, field="worker_slot")
+    validate_identifier(request_id, field="request_id")
+    validate_identifier(invocation_id, field="invocation")
+    if type(generation) is not int or generation < 1:
+        raise ConfigurationError("generation must be a positive integer")
+    from .resident import invocation, guard
+    caller = invocation.get()
+    if not isinstance(caller, dict):
+        raise StateError("arm-for-send requires a resident invocation")
+    if caller.get("collector_only") is True or caller.get("takeover_settlement") is True:
+        raise StateError("Collector-only recovery cannot arm or send")
+    if caller.get("invocation") != invocation_id or caller.get("request") != request_id:
+        raise StateError("arm-for-send invocation identity differs")
+    if caller.get("generation") != generation or caller.get("slot") not in {None, worker_slot}:
+        raise StateError("arm-for-send generation or slot differs")
+
+    with state_lock(runtime, token=_locked) as locked:
+        reservation_guard(runtime, locked, request_id, operation="arm")
+        from . import resident
+        owner = resident.read(runtime, locked)
+        marker = resident._recovery_marker(runtime, owner) if owner is not None else None
+        if marker is not None and marker[0] == "current":
+            raise StateError("Collector-only recovery is open; cannot arm or send")
+        pool = _load_worker_pool_unlocked(runtime, _locked=locked)
+        selected = next((item for item in pool.workers if item.slot == worker_slot), None)
+        if selected is None:
+            raise StateError("arm-for-send worker slot is not configured")
+        if caller.get("worker") not in {None, selected.conversation_id}:
+            raise StateError("arm-for-send worker identity differs")
+        guard(runtime, locked, request_id)
+        from .queue import Queue
+        broker = Queue(runtime)
+        record = broker.load(request_id, _locked=locked)
+        if record.get("state") != "claimed":
+            raise StateError("arm-for-send requires the bound queue claim")
+        if (
+            record.get("parent_task_id") != caller.get("parent")
+            or record.get("worker_conversation_id") != selected.conversation_id
+            or record.get("worker_slot") != worker_slot
+        ):
+            raise StateError("arm-for-send queue association differs")
+        claimed_generation = record.get("owner_generation")
+        if type(claimed_generation) is int and claimed_generation > generation:
+            raise StateError("arm-for-send queue generation is newer than the caller")
+        receipt = broker.receipt(record, _locked=locked)
+        if receipt is None or receipt.get("status") != "prepared":
+            raise StateError("arm-for-send requires a prepared receipt")
+        if receipt.get("worker_slot") != worker_slot:
+            raise StateError("arm-for-send receipt association differs")
+        receipt_generation = receipt.get("owner_generation")
+        if type(receipt_generation) is int and receipt_generation > generation:
+            raise StateError("arm-for-send receipt generation is newer than the caller")
+        wrapped = wrap_prompt(record["prompt"], request_id)
+        if sha256_text(wrapped) != record.get("wrapped_prompt_sha256") or \
+                sha256_text(wrapped) != receipt.get("wrapped_prompt_sha256"):
+            raise StateError("arm-for-send wrapped prompt changed")
+        active = active_assignments(runtime, _locked=locked)
+        if not any(value.get("assignment_id") == request_id for value in active):
+            raise StateError("arm-for-send receipt is not active")
+        if active_cooldown(runtime, _locked=locked):
+            raise CooldownError("Native unusual-activity cooldown blocks arming")
+        receipt = dict(receipt)
+        receipt.update({"status": "armed", "armed_at": utc_now(), "no_resend": True})
+        from .resident import mark_running
+        mark_running(
+            runtime, locked, worker_slot, request_id, generation, invocation_id
+        )
+        _save_assignment(request_id, receipt, runtime, _locked=locked)
+        return {
+            "assignment": receipt,
+            "wrapped_prompt": wrapped,
+            "worker_conversation_id": selected.conversation_id,
+            "worker_slot": worker_slot,
+            "owner_generation": generation,
+            "send_authorized": False,
+            "no_resend": True,
+        }
+
+
 def mark_submitted(
     assignment_id: str,
     sent_prompt: str,
@@ -1093,7 +1657,7 @@ def mark_submitted(
 ) -> dict[str, Any]:
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
-        reservation_guard(runtime, locked, assignment_id)
+        reservation_guard(runtime, locked, assignment_id, operation="submitted")
         value = load_assignment(assignment_id, runtime, _locked=locked)
         _reject_legacy_active_assignment(value, operation="submitted")
         current = str(value.get("status"))
@@ -1473,7 +2037,7 @@ def complete_assignment(
     raw = _response_bytes(response)
 
     with state_lock(runtime, token=_locked) as locked:
-        reservation_guard(runtime, locked, assignment_id)
+        reservation_guard(runtime, locked, assignment_id, operation="complete")
         value = load_assignment(assignment_id, runtime, _locked=locked)
         current = str(value["status"])
         _reject_legacy_active_assignment(value, operation="complete")
@@ -1588,6 +2152,7 @@ def reset_worker(
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
+        legacy_worker_mutation_guard(runtime)
         from .resident import guard
         guard(runtime, locked, configuration=True)
         if not force:
@@ -1614,6 +2179,7 @@ def purge_local_state(
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
+        legacy_worker_mutation_guard(runtime)
         from .resident import guard
         guard(runtime, locked, configuration=True)
         if os.path.lexists(runtime.state_dir / "queue"):

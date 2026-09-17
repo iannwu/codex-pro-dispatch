@@ -23,10 +23,22 @@ const dir=await fs.realpath(dirname(fileURLToPath(import.meta.url)));
 // owned by the same user as its private session files.
 const ownerUid=typeof process==="undefined"?(await fs.stat(dir)).uid:process.getuid();
 const helper=join(dir,"pro-dispatch"),J=JSON.stringify;
+// A yielded exec cell is not a daemon. Its native calls belong to this owner
+// turn. Carry the continuation obligation in both the packet and the first
+// serve output, so the owner cannot mistake a startup receipt for completion.
+const residentLifecycle=Object.freeze({
+mode:"active_owner_turn",detachedSupported:false,
+onYield:{tool:"functions.wait",cell_id:"the actual returned serve cell ID",yield_time_ms:60000},
+instruction:"Do not send a final response while serve is running. Share the session path in commentary once, then automatically call functions.wait on the original returned cell ID after every yield, in this same owner turn, until serve completes. Do not ask for periodic confirmation, send routine progress messages, replay serve, or start a replacement. Waiting is execution supervision, not readiness or send authorization.",
+onCompletion:"Verify the original serve outcome and cleanup evidence before final response. On failure preserve the cell ID, session and reservations; never infer permission to resend or replace."
+});
+// Worker gates accept exactly the two user-confirmation markers the helper
+// writes; neither verifies a model. The literals stay inline because several
+// gate functions are serialized into packets and cannot see module scope.
 const pins={
-  "parked-runner.js":"813160d57afe6cee61f58353a41da4de23f672d0d244561e50e08cb337eb2ab6",
-"parked-socket.mjs":"65b791760427c44ddd5afdf4756e02d73b886cd15dfe3028ed6b0dbbb2135ffc",
-"parked-client.mjs":"f77698abac3f59ba0da48a39dfe6a4d8e3583f26b8d16b5e58975be2ecb22d27"
+  "parked-runner.js":"f1ae66955f638262bd5a1d20655eca0fb90813264efebcc133650d3a2d214acc",
+"parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
+"parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
 };
 const sources={};
 for(const [name,hash] of Object.entries(pins)){
@@ -80,7 +92,7 @@ v.assignment_absent!==true||v.send_authorized!==false||
 v.request_id!==r.requestId||v.fingerprint!==r.fingerprint||
 v.client_session_id!==r.clientSessionId||v.raw_prompt_sha256!==r.promptSha256||
 v.worker_conversation_id!==c.worker||
-v.worker_model_confirmation!=="user-confirmed-pro"||
+!["user-confirmed-worker","user-confirmed-pro"].includes(v.worker_model_confirmation)||
 v.paths?.config_dir!==c.configDir||v.paths?.state_dir!==c.stateDir)
 throw Error("Canonical queued-resume proof does not match trusted session");
 }
@@ -193,7 +205,8 @@ if(missingPath)await cli(["status",r.unobserved.requestId],10000,missingPath);
 const s=await cli(["status","--current"],10000),q=await cli(["queue","status"],10000);
 if(s.active_assignment!==null||s.active_cooldown!==null||
 !Array.isArray(q.requests)||q.requests.some(v=>v.state==="claimed")||
-s.worker?.conversation_id!==c.worker||s.worker?.model_confirmation!=="user-confirmed-pro"||
+s.worker?.conversation_id!==c.worker||
+!["user-confirmed-worker","user-confirmed-pro"].includes(s.worker?.model_confirmation)||
 s.paths?.config_dir!==c.configDir||s.paths?.state_dir!==c.stateDir)
 throw Error("Terminal replacement authority mismatch");
 const rows=q.requests.filter(x=>x.request_id===r.requestId);
@@ -229,8 +242,11 @@ throw Error("Unfenced legacy owner requires quiescence proof");
 g.parkedOpenBusy=true;
 let fresh;
 try{
-const acquired=await cli(["resident","start",J({...expected,owner:attempt,
-parent:trusted.parent,worker:trusted.worker})]);
+const startCredentials={...expected,owner:attempt,parent:trusted.parent};
+if(trusted.worker_pool_sha256){
+startCredentials.worker_pool_sha256=trusted.worker_pool_sha256;
+}else startCredentials.worker=trusted.worker;
+const acquired=await cli(["resident","start",J(startCredentials)]);
 if(!["ready","collect_only"].includes(acquired.state))return acquired;
 const credentials=acquired.owner;
 // Replacement already excludes new reservations by the old generation.
@@ -247,20 +263,411 @@ session_id:fresh.config.sessionId,descriptor_sha256:createHash("sha256").update(
 g.parkedSocket=fresh;g.parkedBinding=Object.freeze({broker:trusted.parent,turn});
 g.parkedDelivery=null;
 g.parkedResident={socket:fresh,binding:g.parkedBinding,directory,attempt,used:false,
-descriptor:J(fresh.config),credentials,recover:acquired.request_id,recovery:acquired.request_ids,
-collectOnly:acquired.state==="collect_only",activation:{residentAdmission,stopResidentAdmission,recordResidentFailure}};
+descriptor:J(fresh.config),credentials,recover:acquired.request_id,recovery:acquired.request_ids||[],
+preparedRecovery:acquired.prepared_ids||[],
+recoveryBindings:acquired.recovery_bindings||{},
+collectOnly:acquired.state==="collect_only",activation:{residentAdmission,stopResidentAdmission,recordResidentFailure,waitResidentStop,recordResidentJoined}};
 return {state:acquired.state,directory,sessionId:fresh.config.sessionId,
-credentials,request_id:acquired.request_id,phase:"listener_open_not_yet_waiting"};
+credentials,request_id:acquired.request_id,phase:"listener_open_not_yet_waiting",
+admissionObserved:false,lifecycle:residentLifecycle};
 }catch(e){if(fresh)await fresh.close("open_failed");throw e;}
 finally{g.parkedOpenBusy=false;}
 }
 
+export function poolRecoveryPlan(owner,capacity){
+const collect=Array.isArray(owner?.recovery)?[...owner.recovery]:[];
+const sendable=Array.isArray(owner?.preparedRecovery)?[...owner.preparedRecovery]:[];
+if(collect.some(id=>sendable.includes(id)))
+throw Error("Prepared recovery cannot be collector-only");
+return capacity===undefined?{collect,sendable}:{collect,sendable,capacity};
+}
+
+export async function recoverPoolRequests(plan,hooks){
+let pendingCollect=false;
+if(plan.collect.length){
+await hooks.openCollector();
+try{
+for(const request of plan.collect){
+const result=await hooks.collect(request);
+if(result?.observation==="not_submitted")
+throw Error("Prepared unsent work cannot be recovered collector-only");
+const status=result?.observation||result?.state;
+if(status==="pending"){
+pendingCollect=true;
+continue;
+}
+if(result?.ok!==true||!["published","acknowledged"].includes(status))
+throw Error("Recovery remains collect-only; preserve request");
+await hooks.endCollected(request,result);
+}
+}finally{await hooks.closeCollector();}
+}
+for(const request of plan.sendable){
+const result=await hooks.sendPrepared(request);
+if(result?.observation==="not_submitted")
+throw Error("Prepared recovery did not perform its eligible first send");
+const status=result?.observation||result?.state;
+if(result?.ok===true&&["published","acknowledged"].includes(status))
+await hooks.endPrepared(request,result);
+else if(status!=="pending")
+throw Error("Prepared recovery unresolved; retain invocation");
+}
+if(pendingCollect&&plan.collect.length>=(plan.capacity??1))
+throw Error("Recovery remains collect-only; preserve request");
+}
+
+export async function waitResidentStop(owner){
+const directory=owner?.directory,sessionId=owner?.socket?.config?.sessionId;
+if(typeof directory!=="string"||typeof sessionId!=="string")
+throw Error("Resident stop wait requires the bound session");
+const waiting=waitRecord(directory,"resident-stop.json",v=>{
+if(!v||Object.keys(v).join(",")!=="sessionId"||v.sessionId!==sessionId)
+throw Error("Invalid stop");
+},600000);
+try{
+await waiting.promise;
+return {stopped:true};
+}finally{waiting.cancel();}
+}
+
+function handoffOwner(g,meta,expected){
+const o=g.parkedResident;
+if(!o||meta?.threadId!==o.credentials?.parent||g.parkedSocket!==o.socket||
+g.parkedBinding!==o.binding||!o.used||
+!['generation','owner','parent','worker_pool_sha256'].every(k=>o.credentials[k]===expected[k]))
+throw Error("Native handoff owner identity mismatch");
+return o;
+}
+
+export async function recordResidentJoined(g,meta,attempt){
+const o=handoffOwner(g,meta,g.parkedResident?.credentials??{});
+if(o.attempt!==attempt||typeof o.serveInvocation!=="string"||!o.serveInvocation)
+throw Error("Native serving invocation differs");
+const audit=JSON.parse((await privateBytes(o.directory+"/transport-audit.json",1048576)).toString("utf8"));
+if(audit.sessionId!==o.socket.config.sessionId||audit.reason!=="resident_stopped")
+throw Error("Graceful serving completion required");
+await absent(o.directory+"/wake.sock");
+if((await fs.readdir(o.directory)).some(n=>n.startsWith("waiting-")))throw Error("Waiter still active");
+const joined={generation:o.credentials.generation,owner:o.credentials.owner,parent:o.credentials.parent,
+sessionId:o.socket.config.sessionId,invocation:o.serveInvocation};
+const marker=await fs.open(o.directory+"/resident-joined.json","wx",384);
+try{await marker.writeFile(J(joined));await marker.sync();}finally{await marker.close();}
+const directory=await fs.open(o.directory,"r");
+try{await directory.sync();}finally{await directory.close();}
+o.serveJoined=Object.freeze(joined);
+return {kind:"resident_joined",sessionId:joined.sessionId,sendAuthorized:false};
+}
+
+function joinedServe(code,attempt){
+// Only this continuation can write the barrier, after the whole serving
+// function (including its finally/cleanup) has returned successfully.
+return `// @exec: {"yield_time_ms":1000}
+await (async()=>{\n${code}\n})();
+const joined=await tools.mcp__node_repl__js(${J({code:`console.log(JSON.stringify(await globalThis.parkedResident.activation.recordResidentJoined(globalThis,nodeRepl.requestMeta,${J(attempt)})));`,timeout_ms:60000,title:"Record joined resident execution"})});
+if(joined?.isError===true)throw Error("Native join barrier failed");
+text(joined);`;
+}
+
+export async function verifyHandoffContext(g,meta,expected){
+const o=handoffOwner(g,meta,expected);
+if(!o.serveJoined)throw Error("Original serving function has not joined");
+const raw=await privateBytes(o.directory+"/resident-joined.json",16384);
+if(raw.toString("utf8")!==J(o.serveJoined))throw Error("Native join barrier changed");
+return {parent:o.credentials.parent,sessionId:o.socket.config.sessionId};
+}
+
+export async function commitNativeHandoff(g,meta,expected,target){
+await verifyHandoffContext(g,meta,expected);
+if(target?.schemaVersion!==1||target.thread?.kind!=="codex"||target.thread?.hostId!=="local"||
+target.thread?.id!==expected.new_parent)throw Error("Replacement native task was not verified");
+const o=g.parkedResident;
+// There is deliberately no public CLI commit path. This private bridge runs
+// only after the native gate. It uses the existing Python lock and validator.
+const code=`import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${J(join(dir,"../../../src"))})\nfrom codex_pro_dispatch import core,resident\np=json.load(sys.stdin)\npaths=core.RuntimePaths(Path(p['config']),Path(p['state']))\nprint(json.dumps(resident._handoff_from_native(paths,p['credentials'])))`;
+return await new Promise((resolve,reject)=>{
+const child=execFile("python3",["-c",code],{timeout:30000,maxBuffer:1048576},(error,out,err)=>{
+if(error)return reject(Error(err||"Native handoff commit failed"));
+try{resolve(JSON.parse(out));}catch(e){reject(e);}
+});
+child.stdin.on("error",reject);
+child.stdin.end(J({config:o.socket.config.configDir,state:o.socket.config.stateDir,credentials:expected}));
+});
+}
+
+export function buildHandoffCall(expected,sourceHash){
+if(!/^[a-f0-9]{64}$/.test(sourceHash))throw Error("Pinned native handoff source required");
+const modulePath=join(dir,"parked-activation.mjs");
+const moduleUrl=pathToFileURL(modulePath).href+"?sha256="+sourceHash;
+const header=`const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(modulePath)})!==${J(modulePath)}||crypto.createHash("sha256").update(await fs.readFile(${J(modulePath)})).digest("hex")!==${J(sourceHash)})throw Error("Activation pin changed");
+const a=await import(${J(moduleUrl)});`;
+const native=code=>J({code,timeout_ms:60000,title:"Native listener handoff"});
+return `function value(r){if(r?.isError||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Invalid native handoff result");return JSON.parse(r.content[0].text);}
+value(await tools.mcp__node_repl__js(${native(`{${header}console.log(JSON.stringify(await a.verifyHandoffContext(globalThis,nodeRepl.requestMeta,${J(expected)})));}`)}));
+const target=value(await tools.mcp__codex_app__read_thread({threadId:${J(expected.new_parent)},turnLimit:1,includeOutputs:false}));
+if(target.schemaVersion!==1||target.thread?.id!==${J(expected.new_parent)}||target.thread?.kind!=="codex"||target.thread?.hostId!=="local")throw Error("Replacement native task does not exist locally");
+const checked={schemaVersion:1,thread:{id:target.thread.id,kind:target.thread.kind,hostId:target.thread.hostId}};
+text(value(await tools.mcp__node_repl__js({code:'{'+${J(header)}+'console.log(JSON.stringify(await a.commitNativeHandoff(globalThis,nodeRepl.requestMeta,'+${J(J(expected))}+','+JSON.stringify(checked)+')));}',timeout_ms:60000,title:"Commit native listener handoff"})));`;
+}
+
+async function handoffPacket(newParent){
+if(typeof newParent!=="string"||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(newParent))
+throw Error("Native replacement task ID required");
+const v=(await cli(["resident","inspect"])).owner;
+if(v?.version!==3||v.parent===newParent)throw Error("Different replacement task and schema-3 owner required");
+const expected={generation:v.generation,owner:v.owner,parent:v.parent,worker_pool_sha256:v.worker_pool_sha256,new_parent:newParent};
+const sourceHash=createHash("sha256").update(await fs.readFile(fileURLToPath(import.meta.url))).digest("hex");
+return {kind:"native_handoff_packet",sendAuthorized:false,calls:{handoff:buildHandoffCall(expected,sourceHash)}};
+}
+
+export async function captureTakeoverIdentity(g,meta,expected){
+const replacement=meta?.threadId,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(typeof replacement!=="string"||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(replacement)||
+typeof turn!=="string"||!turn)throw Error("identity_invalid");
+if(replacement===expected?.parent)return {outcome:"already_owner"};
+g.parkedTakeover=Object.freeze({replacement,turn,expected});
+return {replacement_task_id:replacement};
+}
+
+export async function commitNativeTakeover(g,meta,expected,raw,tmpDir){
+const saved=g.parkedTakeover,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(!saved||saved.replacement!==meta?.threadId||saved.turn!==turn||J(saved.expected)!==J(expected))
+throw Error("identity_invalid");
+if(typeof raw!=="string")throw Error("old_owner_unreadable");
+if(typeof tmpDir!=="string"||!tmpDir.startsWith("/"))throw Error("identity_invalid");
+const directory=await fs.mkdtemp(tmpDir.replace(/\/$/,"")+"/pro-takeover-");
+await fs.chmod(directory,448);
+const evidence=join(directory,"owner-read.json");
+const file=await fs.open(evidence,"wx",384);
+try{await file.writeFile(raw,"utf8");await file.sync();}finally{await file.close();}
+const folder=await fs.open(directory,"r");try{await folder.sync();}finally{await folder.close();}
+const code=`import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${J(join(dir,"../../../src"))})\nfrom codex_pro_dispatch import core,resident\np=json.load(sys.stdin)\npaths=core.RuntimePaths(Path(p['config']),Path(p['state']))\nprint(json.dumps(resident._takeover_from_native(paths,p['packet'])))`;
+return await new Promise(resolve=>{
+const child=execFile("python3",["-c",code],{timeout:30000,maxBuffer:1048576},(error,out,err)=>{
+if(error){resolve({ok:false,outcome:"commit_unknown",error:String(err||error.message||error)});return;}
+try{resolve(JSON.parse(out));}catch(e){resolve({ok:false,outcome:"commit_unknown",error:String(e.message||e)});}
+});
+child.stdin.on("error",e=>resolve({ok:false,outcome:"commit_unknown",error:String(e.message||e)}));
+child.stdin.end(J({config:expected.configDir,state:expected.stateDir,packet:{schema_version:1,replacement_task_id:saved.replacement,
+expected:{generation:expected.generation,owner:expected.owner,parent:expected.parent,worker_pool_sha256:expected.worker_pool_sha256},owner_read_text:raw,evidence_path:evidence}}));
+});
+}
+
+export function buildTakeoverCall(expected,sourceHash){
+if(!/^[a-f0-9]{64}$/.test(sourceHash))throw Error("Pinned native takeover source required");
+const modulePath=join(dir,"parked-activation.mjs"),moduleUrl=pathToFileURL(modulePath).href+"?sha256="+sourceHash;
+const header=`const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(modulePath)})!==${J(modulePath)}||crypto.createHash("sha256").update(await fs.readFile(${J(modulePath)})).digest("hex")!==${J(sourceHash)})throw Error("Activation pin changed");
+const a=await import(${J(moduleUrl)});`;
+const native=(code,title)=>J({code,timeout_ms:60000,title});
+return `function value(r){if(r?.isError||r?.content?.length!==1||r.content[0].type!=="text")throw Error("identity_invalid");return JSON.parse(r.content[0].text);}
+try{
+const identity=value(await tools.mcp__node_repl__js(${native(`{${header}console.log(JSON.stringify(await a.captureTakeoverIdentity(globalThis,nodeRepl.requestMeta,${J(expected)})));}`,"Capture takeover identity")}));
+if(identity.outcome==="already_owner"){text(identity);}else{
+const read=await tools.mcp__codex_app__read_thread({threadId:${J(expected.parent)},turnLimit:1,includeOutputs:false});
+if(read?.isError||read?.truncated===true||read?.textTruncated===true||read?.content?.length!==1||read.content[0].type!=="text"||typeof read.content[0].text!=="string")text({ok:false,outcome:"old_owner_unreadable",send_authorized:false});
+else{const raw=read.content[0].text;
+const commitCode='{'+${J(header)}+'console.log(JSON.stringify(await a.commitNativeTakeover(globalThis,nodeRepl.requestMeta,'+${J(J(expected))}+','+JSON.stringify(raw)+',nodeRepl.tmpDir)));}';
+text(value(await tools.mcp__node_repl__js({code:commitCode,timeout_ms:60000,title:"Commit takeover"})));}}}catch(e){if(!String(e?.message||e).includes("identity_invalid"))throw e;text({ok:false,outcome:"identity_invalid",send_authorized:false});}`;
+}
+
+async function takeoverPacket(){
+const status=await cli(["status","--current"]),v=(await cli(["resident","inspect"])).owner;
+if(v?.version!==3)throw Error("Takeover requires a schema-3 resident owner");
+const expected={generation:v.generation,owner:v.owner,parent:v.parent,worker_pool_sha256:v.worker_pool_sha256,
+configDir:status.paths?.config_dir,stateDir:status.paths?.state_dir};
+if(typeof expected.configDir!=="string"||typeof expected.stateDir!=="string")throw Error("Current status lacks canonical paths");
+const sourceHash=createHash("sha256").update(await fs.readFile(fileURLToPath(import.meta.url))).digest("hex");
+return {kind:"native_takeover_packet",sendAuthorized:false,expected,calls:{takeover:buildTakeoverCall(expected,sourceHash)}};
+}
+
+function buildPoolServe(trusted,parent,attempt){
+const base=J(trusted);
+const capacity=Number.isInteger(trusted.maxConcurrentRequests)?trusted.maxConcurrentRequests:
+(Array.isArray(trusted.workers)?trusted.workers.length:1);
+const serve=`// @exec: {"yield_time_ms":1000}
+text(${J({kind:"resident_supervision_required",admissionObserved:false,lifecycle:residentLifecycle})});
+const host=tools;
+{
+function value(r){
+if(r?.isError===true||r?.content?.length!==1||r.content[0].type!=="text")
+throw Object.assign(Error("Invalid tool result"),{detail:r});
+try{return JSON.parse(r.content[0].text);}catch(e){throw Object.assign(Error("Invalid tool result"),{detail:r,cause:e});}
+}
+const quote=v=>"'"+String(v).replace(/'/g,"'\\\\''")+"'";
+let pending=null,failure=null,stopped=false,nativeUncertain=false,helperUncertain=false;
+async function command(args){
+helperUncertain=true;
+let r=await host.exec_command({cmd:["python3",${J(helper)},...args].map(quote).join(" "),login:false,tty:false,yield_time_ms:30000,max_output_tokens:4096}),out="";
+for(;;){out+=r.output||"";if(r.exit_code!==undefined){pending=null;helperUncertain=false;if(r.exit_code!==0)throw Error(out);return JSON.parse(out);}
+if(!Number.isInteger(r.session_id))throw Error("Unresolved helper identity");pending=r.session_id;r=await host.write_stdin({session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096});}
+}
+const identity=\`const o=globalThis.parkedResident;
+if(nodeRepl.requestMeta?.threadId!==${J(parent)}||o?.attempt!==${J(attempt)}||
+o.socket!==globalThis.parkedSocket||JSON.stringify(o.socket.config)!==o.descriptor)
+throw Error("Resident owner changed");\`;
+async function native(code){return value(await host.mcp__node_repl__js({code:"{"+identity+code+"}",timeout_ms:60000,title:"Resident pool owner"}));}
+async function checked(fn,a,readOnly=false){
+await native('if(o.binding!==globalThis.parkedBinding||nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");console.log("{}");');
+try{const r=await fn(a);if(!readOnly&&r?.isError===true)nativeUncertain=true;return r;}catch(e){if(!readOnly)nativeUncertain=true;throw e;}
+}
+const tools={...host,mcp__codex_app__read_thread:a=>checked(x=>host.mcp__codex_app__read_thread(x),a,true),mcp__codex_app__send_message_to_thread:a=>checked(x=>host.mcp__codex_app__send_message_to_thread(x),a),mcp__node_repl__js:a=>checked(x=>host.mcp__node_repl__js(x),a)};
+${sources["parked-runner.js"].replace("globalThis.describeFailure =","const describeFailure =").replace("globalThis.runParkedJob =","const runParkedJob =").replace("globalThis.runParkedDelivery =","const runParkedDelivery =").replace("globalThis.runParkedWorkerPool =","const runParkedWorkerPool =")}
+${poolRecoveryPlan.toString()}
+${recoverPoolRequests.toString()}
+const baseConfig=${base};
+const invocationRoot=Date.now().toString(36)+Math.random().toString(36).slice(2);
+const capacity=${capacity};
+function track(result){pending??=result?.pending_helper_session??null;helperUncertain||=result?.helper_quiescent===false;}
+try{
+const owner=await native(\`if(o.used)throw Error("Serve consumed");
+if(nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");
+o.used=true;o.serveInvocation=\${JSON.stringify(invocationRoot)};
+console.log(JSON.stringify({credentials:o.credentials,recovery:o.recovery,preparedRecovery:o.preparedRecovery,recoveryBindings:o.recoveryBindings,collectOnly:o.collectOnly,sessionId:o.socket.config.sessionId}));\`);
+await recoverPoolRequests(poolRecoveryPlan(owner,capacity),{
+openCollector:()=>command(["resident","collector-open",JSON.stringify({...owner.credentials})]),
+closeCollector:()=>command(["resident","collector-close",JSON.stringify({...owner.credentials,collector_only:true})]),
+async collect(request){
+const binding=owner.recoveryBindings?.[request];
+if(!binding?.prior_parent)throw Error("Missing canonical recovery binding");
+const requestParent=binding.prior_parent;
+const recoveryCredentials={...owner.credentials,invocation:invocationRoot+"-recovery",request,request_parent:requestParent,collector_only:true};
+const result=await runParkedJob({...baseConfig,parent:requestParent,sessionId:owner.sessionId,residentInvocation:recoveryCredentials,preflightConfirmed:true,restoreParent:false,collectOnly:true},request);
+track(result);
+return result;
+},
+endCollected(request,result){
+// worker is the conversation id; slot is the pool slot. Do not swap them.
+return command(["resident","end",JSON.stringify({...owner.credentials,invocation:invocationRoot+"-recovery",request,worker:result.worker_conversation_id,slot:result.worker_slot})]);
+},
+async sendPrepared(request){
+const invocation=invocationRoot+"-prepared-"+request;
+const begun=await command(["resident","begin",JSON.stringify({...owner.credentials,invocation,request})]);
+if(typeof begun?.worker_slot!=="string")throw Error("Prepared begin did not bind a worker slot");
+const credentials={...owner.credentials,invocation,request,slot:begun.worker_slot};
+const result=await runParkedJob({...baseConfig,sessionId:owner.sessionId,residentInvocation:credentials,preflightConfirmed:true,restoreParent:false,collectOnly:false},request);
+track(result);
+return {...result,recoveryCredentials:credentials};
+},
+endPrepared(request,result){
+const terminal=result?.ok===true&&["published","acknowledged"].includes(result.observation||result.state);
+if(terminal&&result.worker_slot&&pending===null&&!helperUncertain&&!nativeUncertain)
+return command(["resident","end",JSON.stringify({...result.recoveryCredentials,worker:result.worker_conversation_id,slot:result.worker_slot})]);
+}
+});
+const inflight=[];
+function occupied(){
+return inflight.filter(job=>job.pending||job.held).length;
+}
+async function runOne(delivery,credentials){
+const completed=await runParkedDelivery({...baseConfig,sessionId:owner.sessionId,residentInvocation:credentials,preflightConfirmed:true,restoreParent:false},delivery);
+track(completed.result);
+const result=completed.result;
+const status=result?.observation||result?.state;
+if(result?.ok===true&&["published","acknowledged"].includes(status)){
+if(result.worker_slot&&pending===null&&!helperUncertain&&!nativeUncertain)
+await command(["resident","end",JSON.stringify({...credentials,worker:result.worker_conversation_id,slot:result.worker_slot})]);
+}else if(result?.ok===true&&status==="pending"){
+// Observation budget ended with work still running. Keep the slot reserved
+// and leave the listener up so a sibling worker can continue.
+}else if(result?.ok===true&&status==="not_submitted")
+throw Error("Admitted pool work remained queued; retain invocation");
+else throw Error("Pool delivery unresolved; retain invocation");
+return completed;
+}
+for(let ordinal=1;ordinal<=64;ordinal++){
+while(occupied()>=capacity){
+const running=inflight.filter(job=>job.pending);
+if(!running.length){
+const halt=await native(\`console.log(JSON.stringify(await o.activation.waitResidentStop(o)));\`);
+if(halt?.stopped){stopped=true;break;}
+throw Error("Pending pool slots remain reserved; retain invocation");
+}
+await Promise.race(running.map(job=>job.done));
+}
+if(stopped)break;
+await command(["resident","check",JSON.stringify(owner.credentials)]);
+let next;
+do{next=await native(\`console.log(JSON.stringify(await o.activation.residentAdmission(globalThis,nodeRepl.requestMeta,
+\${JSON.stringify(invocationRoot)},\${ordinal})));\`);}while(next.pending===true);
+if(next.stopped){stopped=true;break;}
+const invocation=invocationRoot+"-"+ordinal;
+// Begin reserves the slot before receive. parked-client submit runs after
+// ready-N, so the queue record may still be absent here.
+const begun=await command(["resident","begin",JSON.stringify({...owner.credentials,invocation,request:next.command.requestId})]);
+if(typeof begun?.worker_slot!=="string")throw Error("Begin did not bind a worker slot");
+const credentials={...owner.credentials,invocation,request:next.command.requestId,slot:begun.worker_slot};
+const delivery=await native(\`console.log(JSON.stringify(await o.activation.residentAdmission(globalThis,nodeRepl.requestMeta,
+\${JSON.stringify(invocationRoot)},\${ordinal},\${JSON.stringify(next)})));\`);
+if(delivery?.requestId!==credentials.request||delivery.sessionId!==owner.sessionId)throw Error("Admission mismatch");
+await native('globalThis.parkedDelivery=null;console.log("{}");');
+const job={pending:true,held:false};
+job.done=runOne(delivery,credentials).then(completed=>{
+const status=completed?.result?.observation||completed?.result?.state;
+job.pending=false;
+job.held=completed?.result?.ok===true&&status==="pending";
+return completed;
+});
+inflight.push(job);
+}
+await Promise.all(inflight.map(job=>job.done));
+if(!stopped)throw Error("Resident serving limit reached; no request was resent");
+}catch(e){failure=e;}
+finally{
+if(pending!==null)try{const joined=await host.write_stdin({session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096});if(joined.exit_code!==undefined){pending=null;helperUncertain=false;}}catch(e){failure??=e;}
+try{await native(\`try{await o.activation.stopResidentAdmission(o);}finally{try{
+if(\${JSON.stringify(failure!==null)})await o.activation.recordResidentFailure(o,{sessionId:o.socket.config.sessionId,at:Date.now(),reason:"resident_failed",pendingHelperSession:\${JSON.stringify(pending)},nativeUncertain:\${JSON.stringify(nativeUncertain)},helperUncertain:\${JSON.stringify(helperUncertain)},error:\${JSON.stringify(failure===null?null:describeFailure(failure))}},true);
+}finally{await o.socket.close(\${JSON.stringify(stopped&&!failure?"resident_stopped":"resident_failed")});}}console.log(JSON.stringify({closed:true}));\`);}catch(e){failure??=e;}
+if(failure)throw failure;
+}
+}`;
+return joinedServe(serve,attempt);
+}
+
+async function poolResidentPacket(broker,parent,workers,root){
+if(broker!==parent||!validId(broker)||!Array.isArray(workers)||
+workers.length<1||workers.length>2||
+workers.some(worker=>!validId(typeof worker==="string"?worker:worker?.conversation_id)))
+throw Error("One or two trusted worker IDs required");
+if(root===undefined)throw Error("Private client root required");
+await privateDirectory(root);
+const s=await cli(["status","--current"]),ownership=await cli(["resident","inspect"]);
+const configured=s.worker_pool?.workers;
+if(!Array.isArray(configured)||configured.length!==workers.length||
+configured.some((entry,index)=>entry.conversation_id!==
+(typeof workers[index]==="string"?workers[index]:workers[index].conversation_id)))
+throw Error("Production worker pool mismatch");
+if(!configured.every(entry=>["user-confirmed-worker","user-confirmed-pro"].includes(entry.model_confirmation)))
+throw Error("Production worker confirmation mismatch");
+const trusted={helper,configDir:s.paths.config_dir,stateDir:s.paths.state_dir,parent,
+workers:configured.map(entry=>({slot:entry.slot,conversation_id:entry.conversation_id})),
+worker_pool_sha256:s.worker_pool.file_sha256,workerPoolSha256:s.worker_pool.file_sha256,
+resident:true,maxConcurrentRequests:configured.length,
+leaseMs:null,idleMs:45000,replyMs:3900000,maxSnapshots:6,observationMs:50000,activeJobMs:3600000};
+const attempt=randomBytes(16).toString("hex"),expected={generation:ownership.owner?.generation??0,
+worker_pool_sha256:trusted.worker_pool_sha256};
+const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
+const open=`{
+const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
+const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
+console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.requestMeta,${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
+}`;
+return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,workers:configured,
+trusted,pins,openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident pool open"})+"));",
+serve:buildPoolServe(trusted,parent,attempt)}};
+}
+
 async function residentPacket(broker,parent,worker,root){
+if(Array.isArray(worker))return await poolResidentPacket(broker,parent,worker,root);
 if(broker!==parent||![broker,parent,worker].every(validId))throw Error("Trusted owner IDs required");
 if(root===undefined)throw Error("Private client root required");
 await privateDirectory(root);
 const s=await cli(["status","--current"]),ownership=await cli(["resident","inspect"]);
-if(s.worker?.conversation_id!==worker||s.worker?.model_confirmation!=="user-confirmed-pro")
+if(Array.isArray(s.worker_pool?.workers)&&s.worker_pool.workers.length)
+throw Error("Worker pool is active; use the pool resident packet");
+if(s.worker?.conversation_id!==worker||
+!["user-confirmed-worker","user-confirmed-pro"].includes(s.worker?.model_confirmation))
 throw Error("Production worker mismatch");
 const trusted={helper,configDir:s.paths.config_dir,stateDir:s.paths.state_dir,parent,worker,
 resident:true,leaseMs:null,idleMs:45000,replyMs:3900000,maxSnapshots:6,
@@ -276,6 +683,7 @@ console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.req
 ${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
 }`;
 const serve=`// @exec: {"yield_time_ms":1000}
+text(${J({kind:"resident_supervision_required",admissionObserved:false,lifecycle:residentLifecycle})});
 const host=tools;
 {
 function value(r){
@@ -404,7 +812,7 @@ if(failure)throw failure;
 }
 `;
 return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,worker,trusted,pins,
-openAttempt:attempt,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));",serve}};
+openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));",serve:joinedServe(serve,attempt)}};
 }
 
 async function clientPreflight(path){
@@ -432,7 +840,7 @@ if(s.active_assignment!==null||s.active_cooldown!==null||
 !Array.isArray(q.requests)||q.requests.some(r=>r.state==="claimed"))
 throw Error("Authority occupied or unavailable");
 if(s.worker?.conversation_id!==worker||
-s.worker?.model_confirmation!=="user-confirmed-pro")
+!["user-confirmed-worker","user-confirmed-pro"].includes(s.worker?.model_confirmation))
 throw Error("Production worker mismatch");
 for(const key of ["config_dir","state_dir"])
 if(typeof s.paths?.[key]!=="string"||await fs.realpath(s.paths[key])!==s.paths[key])
@@ -699,28 +1107,14 @@ throw Error("Invalid ready ordinal");
 if((await fs.lstat(directory)).uid!==process.getuid()) throw Error("Wrong owner");
 const {loadSession}=await import("./parked-socket.mjs");
 const c=await loadSession(directory);
-return await new Promise((resolve,reject)=>{
-let done=false;
-const watcher=watch(directory,()=>void check());
-const timer=setTimeout(()=>end(Error("Readiness not observed")),25000);
-function end(error,value){
-if(done) return;
-done=true;clearTimeout(timer);watcher.close();
-error?reject(error):resolve(value);
-}
-async function check(){
-if(done) return;
-try{
+return await watchFile(directory,25000,"Readiness not observed",async()=>{
 if(c.resident!==true&&Date.now()>=c.expiresAt) throw Error("Session expired");
 await absent(directory+"/transport-audit.json");
 const v=JSON.parse(await fs.readFile(join(directory,"ready-"+ordinal+".json"),"utf8"));
 if(v.sessionId!==c.sessionId||v.ordinal!==ordinal) throw Error("Wrong readiness");
-end(null,{ready:true,sessionId:c.sessionId,ordinal,
-meaning:"not an admission guarantee"});
-}catch(e){if(e.code!=="ENOENT") end(e);}
-}
-watcher.on("error",e=>end(e));void check();
-});
+return {ready:true,sessionId:c.sessionId,ordinal,
+meaning:"not an admission guarantee"};
+}).promise;
 }
 const validId=v=>typeof v==="string"&&
   /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v);
@@ -759,6 +1153,28 @@ return buffer.subarray(0,used);
 }finally{await h.close();}
 }
 
+function workerId(worker){
+return typeof worker==="string"?worker:worker?.conversation_id;
+}
+function authorityWorkersMatch(s,c){
+if(Array.isArray(c.workers)&&c.workers.length){
+const configured=s.worker_pool?.workers||[];
+return configured.length===c.workers.length&&
+c.workers.every((worker,index)=>configured[index]?.conversation_id===workerId(worker))&&
+configured.every(entry=>["user-confirmed-worker","user-confirmed-pro"].includes(entry.model_confirmation));
+}
+return s.worker?.conversation_id===c.worker&&
+["user-confirmed-worker","user-confirmed-pro"].includes(s.worker?.model_confirmation);
+}
+function authorityOccupied(s,q,c){
+if(s.active_cooldown!==null)return true;
+const capacity=Array.isArray(c.workers)&&c.workers.length?c.workers.length:1;
+const active=Array.isArray(s.active_assignments)?s.active_assignments.length:
+(s.active_assignment?1:0);
+const claimed=Array.isArray(q.requests)?q.requests.filter(r=>r.state==="claimed").length:0;
+return active>=capacity||claimed>=capacity;
+}
+
 async function rendezvousSession(directory,ordinal,requestId){
 if(!Number.isInteger(ordinal)||ordinal<1||ordinal>64||!validId(requestId))
 throw Error("Invalid rendezvous identity");
@@ -774,33 +1190,55 @@ await absent(directory+"/transport-audit.json");
 return c;
 }
 
-function waitRecord(directory,name,validate,ms){
-let cancel;
+export function watchFile(directory,ms,timeoutMessage,inspect,watchDirectory=watch){
+let cancel,retryTimer;
 const promise=new Promise((resolve,reject)=>{
-let done=false;
-const w=watch(directory,()=>void check());
-const timer=setTimeout(()=>end(Error("Rendezvous deadline; do not retry")),ms);
+let done=false,busy=false,again=false,deferred=false;
+const w=watchDirectory(directory,()=>{again=true;deferred=false;void check();});
+const timer=setTimeout(()=>end(Error(timeoutMessage)),ms);
 function end(error,value){
-if(done)return;done=true;clearTimeout(timer);w.close();
+if(done)return;done=true;clearTimeout(timer);clearTimeout(retryTimer);w.close();
 error?reject(error):resolve(value);
 }
 cancel=()=>end(Error("Rendezvous stopped"));
 async function check(){
-if(done)return;
+if(done||busy)return;
+busy=true;
+const eventDriven=again;
+again=false;
+let retry=false;
 try{
-await absent(directory+"/transport-audit.json");
-const value=JSON.parse((await privateBytes(directory+"/"+name,4096)).toString("utf8"));
-validate(value);end(null,value);
+const value=await inspect();
+if(value!==undefined)end(null,value);
 }catch(e){
-// Native ready files are written directly. Await another filesystem event
-// if a read caught their creation/write; never start a timer polling loop.
+// Native ready files are written directly. Recheck a coalesced create/write
+// from the same event (and at most one deferred follow-up). Never start a
+// timer polling loop, and never treat absence as unsent.
 if(e.code!=="ENOENT"&&e.code!=="EAGAIN"&&!(e instanceof SyntaxError))end(e);
+else retry=e.code==="EAGAIN"||e instanceof SyntaxError||eventDriven;
+}finally{
+busy=false;
+if(done)return;
+if(again){deferred=false;void check();return;}
+if(retry&&!deferred){
+deferred=true;
+retryTimer=setTimeout(()=>{retryTimer=undefined;void check();},25);
+}
 }
 }
 w.on("error",e=>end(e));void check();
 });
 promise.catch(()=>{});
 return {promise,cancel:()=>cancel?.()};
+}
+
+function waitRecord(directory,name,validate,ms){
+return watchFile(directory,ms,"Rendezvous deadline; do not retry",async()=>{
+await absent(directory+"/transport-audit.json");
+const value=JSON.parse((await privateBytes(directory+"/"+name,4096)).toString("utf8"));
+validate(value);
+return value;
+});
 }
 
 async function expiredCommand(directory,ordinal,requestId,c,attempt){
@@ -856,9 +1294,8 @@ throw Error("Missing input validation receipt");
 }
 const s=await cli(["status", "--current"]),q=await cli(["queue","status"]);
 if(s.paths?.config_dir!==c.configDir||s.paths?.state_dir!==c.stateDir||
-s.worker?.conversation_id!==c.worker)throw Error("Rendezvous authority mismatch");
-if(s.active_assignment!==null||s.active_cooldown!==null||
-!Array.isArray(q.requests)||q.requests.some(r=>r.state==="claimed"))
+!authorityWorkersMatch(s,c))throw Error("Rendezvous authority mismatch");
+if(authorityOccupied(s,q,c)||!Array.isArray(q.requests))
 throw Error("Authority occupied; no command-ready signal");
 if(resume){
 if(c.helper!==helper)throw Error("Queued-resume helper differs");
@@ -870,7 +1307,9 @@ if(recovery&&!resume){
 const prior=q.requests.find(r=>r.request_id===recovery.requestId);
 if(!prior||!["published","acknowledged"].includes(prior.state)||
 prior.dispatch_status!=="complete"||prior.sent_verified!==true||
-prior.parent_task_id!==c.parent||prior.worker_conversation_id!==c.worker)
+prior.parent_task_id!==c.parent||
+!(Array.isArray(c.workers)?c.workers.some(w=>workerId(w)===prior.worker_conversation_id):
+prior.worker_conversation_id===c.worker))
 throw Error("Complete queued recovery before another request");
 }
 await absent(c.stateDir+"/native-client");
@@ -905,8 +1344,8 @@ if(Date.now()>=deadlineAt)throw Error("Command rendezvous expired");
 try{
 // Register the native-ready watcher before announcing command readiness.
 if(ownership){
-const {generation,owner,parent,worker,session}=ownership.owner;
-await cli(["resident","admit",J({generation,owner,parent,worker,session,
+const {generation,owner,parent,worker,worker_pool_sha256,session}=ownership.owner;
+await cli(["resident","admit",J({generation,owner,parent,worker,worker_pool_sha256,session,
 command:J(record),prompt_file:promptFile,retry:attempt!==undefined})]);
 }else{
 await fs.writeFile(ticket+"/ready.tmp",J(record),{flag:"wx",mode:384});
@@ -975,12 +1414,16 @@ return ownership;
 async function residentOwnership(c,directory){
 if(c.helper!==helper)return {reason:"installed_helper_mismatch"};
 const s=await cli(["status","--current"]),v=await cli(["resident","inspect"]);
+const poolMode=Array.isArray(c.workers);
 if(s.paths?.config_dir!==c.configDir||s.paths?.state_dir!==c.stateDir||
-s.worker?.conversation_id!==c.worker) return {reason:"canonical_authority_mismatch"};
+(poolMode?(s.worker_pool?.file_sha256!==c.worker_pool_sha256||
+!Array.isArray(s.worker_pool?.workers)||s.worker_pool.workers.length!==c.workers.length):
+s.worker?.conversation_id!==c.worker)) return {reason:"canonical_authority_mismatch"};
 const bound=v.owner?.session;
 if(!bound)return {reason:"unbound_owner"};
 if(bound.directory!==directory||bound.session_id!==c.sessionId||
-v.owner.parent!==c.parent||v.owner.worker!==c.worker)
+v.owner.parent!==c.parent||(poolMode?v.owner.worker_pool_sha256!==c.worker_pool_sha256:
+v.owner.worker!==c.worker))
 return {reason:"retired_owner"};
 const raw=await privateBytes(directory+"/session.json",16384);
 if(createHash("sha256").update(raw).digest("hex")!==bound.descriptor_sha256||
@@ -996,8 +1439,10 @@ admissionObserved:false,sendAuthorized:false,replacementAuthorized:false};
 try{
 await privateDirectory(directory);
 const {loadSession}=await import("./parked-socket.mjs");
-const c=await loadSession(directory);
-if(c.resident!==true||!/^[a-f0-9]{32}$/.test(c.sessionId))throw Error("Not a resident session");
+  const c=await loadSession(directory);
+  if(c.resident!==true||!/^[a-f0-9]{32}$/.test(c.sessionId))throw Error("Not a resident session");
+  base.maxConcurrentRequests=c.maxConcurrentRequests||(Array.isArray(c.workers)?c.workers.length:1);
+  if(Array.isArray(c.workers)&&c.workers.length)base.workers=c.workers;
 base.sessionId=c.sessionId;
 const owned=await residentOwnership(c,directory);
 if(owned.reason!=="current_owner")return {...base,state:"unavailable",reason:owned.reason};
@@ -1011,7 +1456,10 @@ return {...base,state:"closed_audited",reason:"matching_closure_audit"};
 }
 if(names.some(n=>["resident-stop","resident-stop.json","resident-failure.json","resident-failure-final.json"].includes(n)))
 return {...base,state:"unavailable",reason:"stop_or_failure_evidence"};
-if(owned.owner.inflight!==null||owned.status.active_assignment!==null)
+const occupied=Array.isArray(base.workers)&&base.workers.length
+  ?(owned.owner.slots||[]).filter(slot=>slot.request!==null).length
+  :(owned.owner.inflight!==null||owned.status.active_assignment!==null?1:0);
+if(occupied>=base.maxConcurrentRequests)
 return {...base,state:"busy",reason:"request_or_invocation_reserved"};
 if(owned.status.active_cooldown!==null)return {...base,state:"unavailable",reason:"account_cooldown"};
 const markers=names.filter(n=>/^waiting-/.test(n));
@@ -1030,9 +1478,11 @@ throw Error("Consumed or conflicting ordinal evidence");
 // Recheck canonical generation and waiter after observation. Final admission
 // still belongs to rendezvous' atomic claim and the helper's locked guards.
 const after=await residentOwnership(c,directory);
-if(after.reason!=="current_owner"||after.owner.inflight!==null||
-after.status.active_assignment!==null||after.status.active_cooldown!==null||
-!freshWaiter(await fs.lstat(marker)))
+const laterOccupied=Array.isArray(base.workers)&&base.workers.length
+  ?(after.owner.slots||[]).filter(slot=>slot.request!==null).length
+  :(after.owner.inflight!==null||after.status.active_assignment!==null?1:0);
+if(after.reason!=="current_owner"||laterOccupied>=base.maxConcurrentRequests||
+after.status.active_cooldown!==null||!freshWaiter(await fs.lstat(marker)))
 return {...base,state:"not_waiting",reason:"snapshot_changed"};
 return {...base,state:"admission_observed",reason:"current_owner_waiting",ordinal,admissionObserved:true};
 }catch(e){
@@ -1056,7 +1506,7 @@ return claimed;
 }
 try{
 choice=await new Promise((resolve,reject)=>{
-let done=false,busy=false,again=false,bound,elapsed=false,outcome;
+let done=false,busy=false,again=false,deferred=false,bound,elapsed=false,outcome;
 const observation=setTimeout(()=>{elapsed=true;again=true;void check();},25000);
 const abort=()=>{
 clearInterval(beat);
@@ -1071,6 +1521,7 @@ w.on("error",e=>end(e));
 signal?.addEventListener("abort",abort,{once:true});
 async function check(){
 if(done||busy)return;busy=true;again=false;
+let torn=false;
 try{
 signal?.throwIfAborted();
 await absent(directory+"/transport-audit.json");
@@ -1101,8 +1552,15 @@ if(v.deadlineAt>Date.now())found.push({v,attempt:match[1]});
 }
 if(found.length>1)throw Error("Ambiguous commands");
 if(found.length)end(null,found[0]);
-}catch(e){end(e);}
-finally{busy=false;settle();if(again&&!done)void check();}
+}catch(e){
+if((e.code==="EAGAIN"||e instanceof SyntaxError)&&!deferred)torn=true;
+else end(e);
+}finally{
+busy=false;settle();
+if(done)return;
+if(again){deferred=false;void check();return;}
+if(torn){deferred=true;setImmediate(()=>void check());}
+}
 }
 if(signal?.aborted)abort();else void check();
 });
@@ -1110,10 +1568,11 @@ if(signal?.aborted)abort();else void check();
 signal?.throwIfAborted();
 if(choice.stopped||choice.pending)return {...choice,sessionId:c.sessionId};
 const s=await cli(["status","--current"],10000),q=await cli(["queue","status"],10000);
+// Same requestId in the queue is a duplicate rendezvous. Pool occupancy
+// already allows sibling queued work; native submit happens after ready-N.
 if(s.paths?.state_dir!==c.stateDir||s.paths?.config_dir!==c.configDir||
-s.worker?.conversation_id!==c.worker||s.worker?.model_confirmation!=="user-confirmed-pro"||
-s.active_assignment!==null||s.active_cooldown!==null||!Array.isArray(q.requests)||
-q.requests.some(r=>r.state==="claimed"||r.request_id===choice.v.requestId))
+!authorityWorkersMatch(s,c)||authorityOccupied(s,q,c)||
+!Array.isArray(q.requests)||q.requests.some(r=>r.request_id===choice.v.requestId))
 throw Error("Authority changed");
 await absent(c.stateDir+"/native-client");
 signal?.throwIfAborted();
@@ -1130,9 +1589,15 @@ meta?.threadId!==o.binding.broker||meta?.["x-codex-turn-metadata"]?.turn_id!==o.
 throw Error("Wrong resident admission owner");
 if(o.credentials){
 const current=await cli(["resident","check",J(o.credentials)]);
-if(next!==undefined&&(current.owner.inflight?.invocation!==invocation||
-current.owner.inflight?.request!==next.command?.requestId))
+if(next!==undefined){
+const slots=current.owner.slots;
+if(Array.isArray(slots)){
+if(!slots.some(slot=>slot.request===next.command?.requestId&&slot.invocation))
 throw Error("Canonical invocation must reserve admission first");
+}else if(current.owner.inflight?.invocation!==invocation||
+current.owner.inflight?.request!==next.command?.requestId)
+throw Error("Canonical invocation must reserve admission first");
+}
 }
 const a=o.admission??={expired:false,timer:null,work:null,controller:null,deadlineAt:null};
 if(a.deadlineAt!==null&&Date.now()>=a.deadlineAt)a.expire();
@@ -1263,7 +1728,10 @@ const [action,...args]=process.argv.slice(2);
 let result;
 if(action==="packet"&&args.length===3) result=await packet(...args);
 else if(action==="resident-packet"&&[3,4].includes(args.length))
-result=await residentPacket(...args);
+result=await residentPacket(args[0],args[1],
+  (args[2].startsWith("[")?JSON.parse(args[2]):args[2]),args[3]);
+else if(action==="resident-pool-packet"&&args.length===4)
+result=await poolResidentPacket(args[0],args[1],JSON.parse(args[2]),args[3]);
 else if(action==="closed-packet"&&args.length===4) result=await packet(...args);
 else if(action==="client-preflight"&&args.length===1)
 result=await clientPreflight(args[0]);
@@ -1284,6 +1752,10 @@ requestId:args[16],commandSha256:args[17],promptSha256:args[18]
 });
 else if(action==="resident-stop"&&args.length===1)
 result=await residentStop(args[0]);
+else if(action==="resident-handoff-packet"&&args.length===1)
+result=await handoffPacket(args[0]);
+else if(action==="resident-takeover-packet"&&args.length===0)
+result=await takeoverPacket();
 else if(action==="resident-status"&&args.length===1)
 result=await residentStatus(args[0]);
 else if(action==="ready"&&args.length===2) result=await ready(args[0],Number(args[1]));

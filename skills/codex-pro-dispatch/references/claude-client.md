@@ -11,19 +11,23 @@ second runtime or change Claude permission settings.
 Use the client workflow in [native-activation.md](native-activation.md), not
 the standalone native owner workflow. After client preflight, check the explicit
 owner-provided session with `node "$ACT" resident-status "$SESSION"` as documented
-there. A socket or folder is not an available worker. This build reports
-`maxConcurrentRequests:1`; two chat threads or session folders do not enable
-concurrent dispatch. Never race listeners, rewrite autosend logic to route around
-`busy`, or use another state home. A busy current owner needs to finish its
-existing request, not another listener. If no current listener is available
+there. A socket or folder is not an available worker. Two chat threads or
+session folders do not enable concurrent dispatch. An explicit worker pool may
+expose two configured conversations on one listener after live qualification;
+that is not implied by unit tests. Never race listeners, rewrite autosend logic
+to route around `busy`, or use another state home. A busy current owner needs
+to finish its existing request, not another listener. If no current listener is available
 (not merely busy), say:
 
 > No Codex listener is ready. In a Codex desktop task, paste: "Use
 > codex-pro-dispatch to set up a resident listener for my Claude requests.
 > Check the installed paths, actual Claude client preflight and canonical
 > ownership first. Follow the documented open/serve or guarded recovery path,
-> keep the owning execution active, and return the session path and exact
-> rendezvous command. Do not send a test request or resend uncertain work."
+> share the session path and exact rendezvous command in commentary, then keep
+> this dedicated owner turn active by automatically waiting on the original
+> serve cell until shutdown. Do not send a final response while it is running.
+> Do not ask for periodic confirmation or send routine progress messages.
+> Do not send a test request or resend uncertain work."
 
 Give any verified client directory/preflight result with that prompt. If
 preflight has not passed, explain that prerequisite first. Do not invent a

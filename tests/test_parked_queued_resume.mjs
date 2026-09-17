@@ -31,16 +31,25 @@ await visit(directory,"");return out;
 }
 function appeared(path){
 return new Promise((resolve,reject)=>{
-let done=false;
-const w=watch(dirname(path),()=>void check());
+let done=false,busy=false,again=false,deferred=false;
+const w=watch(dirname(path),()=>{again=true;void check();});
 const timer=setTimeout(()=>end(Error("Missing unit event: "+path)),10000);
 function end(e,v){
 if(done)return;done=true;clearTimeout(timer);w.close();e?reject(e):resolve(v);
 }
 async function check(){
-if(done)return;
+if(done||busy)return;busy=true;again=false;
+let torn=false;
 try{end(null,JSON.parse(await fs.readFile(path,"utf8")));}
-catch(e){if(e.code!=="ENOENT"&&!(e instanceof SyntaxError))end(e);}
+catch(e){
+if(e.code!=="ENOENT"&&e.code!=="EAGAIN"&&!(e instanceof SyntaxError))end(e);
+else if(e.code==="EAGAIN"||e instanceof SyntaxError)torn=true;
+}finally{
+busy=false;
+if(done)return;
+if(again){deferred=false;void check();return;}
+if(torn&&!deferred){deferred=true;setImmediate(()=>void check());}
+}
 }
 w.on("error",e=>end(e));void check();
 });
@@ -81,7 +90,7 @@ await Promise.allSettled([...pending]);
 await fs.rm(d,{recursive:true});
 });
 await cli(["worker","set","--conversation-id",worker,
-"--confirm-pro","--native-controls-confirmed"]);
+"--confirm-worker","--native-controls-confirmed"]);
 await fs.mkdir(oldDir,{mode:448});
 old=await openSession(oldDir,{helper,configDir:home+"/config",stateDir:home+"/state",
 worker,parent,leaseMs:60000,idleMs:10000,replyMs:30000});

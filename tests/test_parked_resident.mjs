@@ -251,6 +251,37 @@ c.spawnargs.some(a=>a.includes("'resident-next'"))).length,0);
 assert.deepEqual(f.s.sends,[]);
 });
 
+test("supervised original serve survives repeated idle boundaries and accepts its first request once",async t=>{
+const f=await fixture(t),d=await f.open();
+const realTimeout=globalThis.setTimeout;
+const timerMock=t.mock.method(globalThis,"setTimeout",(fn,ms,...args)=>
+realTimeout(fn,ms===25000?30:ms,...args));
+const serving=f.serve();
+try{
+// Exercise more than the incident's 270 seconds worth of idle observations,
+// compressed only at the 25-second idle boundary. Real CLI and socket IO.
+await f.idle(13);
+assert.equal(f.out[0].kind,"resident_supervision_required");
+assert.equal(f.out[0].admissionObserved,false);
+assert.equal(f.out[0].lifecycle.detachedSupported,false);
+assert.equal(f.g.parkedResident.admission.expired,false);
+await missing(d+"/resident-failure.json");await missing(d+"/transport-audit.json");
+assert.equal(f.s.reads,0);assert.deepEqual(f.s.sends,[]);
+timerMock.mock.restore();
+// Wait for the next uncompressed observation before publishing.
+await f.idle(f.s.waits+1);
+await f.start(1,"job-A");
+await waitForFile(f.waiting(2));
+}finally{
+timerMock.mock.restore();await f.stop();await serving;
+}
+assert.deepEqual(f.s.sends,["job-A"]);
+const audit=JSON.parse(await fs.readFile(d+"/transport-audit.json"));
+assert.equal(audit.reason,"resident_stopped");
+assert.deepEqual(audit.events.map(e=>e.name),["accepted","finished"]);
+await missing(d+"/wake.sock");
+});
+
 test("oversized resident prompts preserve the real owner's admission for valid content",async t=>{
 const f=await fixture(t),d=await f.open(),serving=f.serve();await f.idle(1);
 for(const body of ["x".repeat(20000),"😀".repeat(10000)," \n\t"]){

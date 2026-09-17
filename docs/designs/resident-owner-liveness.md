@@ -1,5 +1,27 @@
 # Resident admission belongs to the serving execution
 
+## Active-turn lifecycle correction (2026-09-16)
+
+The Ear9kh incident demonstrated that a detached serve cell is not an owner
+lifetime guarantee: the owner task ended its turn after 270538 ms, renewal
+stopped, and the detector correctly closed the unused listener. Its audit had
+no transport events and the failure had no request ID. A readiness observation
+before turn completion was only a snapshot.
+
+The supported owner now keeps the same turn active until serve closes. Both
+packet variants and the first serve output carry that obligation: announce
+setup in commentary once, automatically `functions.wait` on the original cell
+after each yield, and finalize only after joined cleanup. The client setup
+prompt and qualification procedure require this sequence. No periodic user
+confirmation or manually started request gate is involved.
+
+This is an operational contract using the existing host continuation tool,
+not a platform-enforced prohibition on final responses or a daemon supervisor.
+It cannot survive arbitrary host cancellation. The native detector, readiness
+claim protocol, invocation reservations and post-arm recovery remain intact.
+The earlier qualification below did not prove detached lifetime; active-turn
+and native dispatch qualification must be reported separately.
+
 ## Goal and scope
 
 Claude submits through one resident runner without per-request setup, idle model

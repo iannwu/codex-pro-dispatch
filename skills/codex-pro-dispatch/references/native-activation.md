@@ -220,6 +220,15 @@ already armed Pro operation. These local fixtures do not qualify native Stop,
 crash, suspension, hidden model accounting or continuous availability.
 ## Active-parent requirement and expired unobserved retries
 
+For graceful rotation to a fresh owner task, see
+[listener owner handoff](../../../docs/listener-owner-handoff.md).
+For replacement from a new task, first follow [new-owner-handoff.md](new-owner-handoff.md) and its `resident-takeover-packet` path. The cooperative handoff below is a fallback only when the old task is active.
+
+Only the current native owner may execute the `resident-handoff-packet` after
+joining its graceful stop. Direct credential-only CLI handoff is rejected.
+The native packet checks the current task, the target's existence, and the
+post-join barrier. It preserves request evidence and does not expand recovery.
+
 An open socket does not wake the native Codex parent. For EVERY request, the parent must run the matching `command-ready` waiter and, only after its successful result, execute the existing native `calls.receive` exactly once. Client publication alone cannot complete this sequence. This is not an autonomous desktop service.
 
 For an intact expired original command whose ordinal has neither `ready-N.json` nor `command-observed-N.json`, an explicit retry is available while the same listener's lease remains live:
@@ -285,7 +294,26 @@ Execute decoded `calls.open` once, verbatim through outer `functions.exec`.
 It compares the captured generation atomically. Its result is `ready`,
 `collect_only`, `busy` or `blocked`. Only the first two permit executing that
 packet's `calls.serve` once, in the same native task/turn. Preserve its cell ID
-and keep that owning execution active. Opening alone does not mean ready.
+and follow the packet's `lifecycle` contract. Opening alone does not mean ready;
+`ready` here is the canonical start disposition, not listener availability.
+
+Resident service owns the dedicated Codex turn until shutdown. A yielded
+`functions.exec` cell is not a detached daemon: ending the owner turn can stop
+its native calls even if the cell still appears to run. Give the session path
+and client command in commentary once. Do not send a final response while the
+cell is running. After each yield, automatically call `functions.wait` with
+that actual returned cell ID and `yield_time_ms:60000`, repeating in the same
+turn until completion. This requires no user confirmation, scheduled task,
+routine progress message, or manual reactivation. Waits supervise the original
+execution; they do not poll the worker or publish new requests. Never replay
+open/serve when a wait yields or its result is lost.
+
+The first serve output, `resident_supervision_required`, repeats this contract
+and explicitly does not assert readiness. Clients still require the current
+bound `resident-status` admission observation and atomic rendezvous claim.
+Only finalize after the original cell completes and its cleanup is checked.
+If the host cannot keep this owner turn active, report resident service as
+unavailable on that host; do not advertise indefinite detached availability.
 
 The owner reserves an invocation before accepting a request, and retains it
 through helper calls, native work, transport completion and cleanup. Replacement
@@ -310,6 +338,10 @@ separately while it runs. Idle native observations are bounded to 25 seconds
 inside the same evaluation. A non-self-renewing 60-second detector withdraws
 admission if that evaluation disappears. It is disabled during accepted Pro work
 and is never takeover permission. This is not reboot auto-start or a daemon.
+The wait loop above is the operational continuation mechanism. It cannot
+guarantee survival of host cancellation, app closure, task limits, or kernel
+loss. Never replace it with a self-renewing native timer: that can leave a fresh
+readiness marker without any execution able to dispatch the claimed request.
 
 The service does not navigate or forward routine messages to development tasks.
 Claude collects the canonical answer. Report actionable failures only.
@@ -333,7 +365,7 @@ audit reasons. Forced host termination remains unqualified.
 
 ### Bounded actual-Claude qualification
 
-Authorize actual Claude once to perform the sequence below. The parent only starts open/serve, preserves evidence and retrieves the original cell afterward. Do not prepublish B or have the parent impersonate Claude.
+Authorize actual Claude once to perform the sequence below. The parent starts open/serve, preserves evidence and automatically joins the original cell with bounded `functions.wait` calls throughout qualification. Do not prepublish B or have the parent impersonate Claude.
 
 Use a new private mode-0700 `PROOF` directory, mode-0600 prompt files, fresh request IDs `A` and `B`, a client session ID `CLIENT`, and distinct unpredictable response tokens. Pass the matching candidate paths and returned `SESSION` to Claude.
 
@@ -359,6 +391,25 @@ short enough for the platform's local socket limit.
 
 If this filesystem preflight is denied, stop before opening and report the
 exact denial. A successful preflight does not authorize a send.
+
+#### After Codex restart or laptop reboot
+
+Automatic startup is unsupported. After restarting Codex or the laptop, open a
+Codex task and paste this single owner-side instruction:
+
+> Restore the codex-pro-dispatch listener using the installed skill. Inspect
+> canonical state first. Preserve any armed or indeterminate request as
+> collect-only and never resend it. Use `resident recover-start` only when its
+> schema-3 ownership, canonical eligibility, and bound operator-evidence checks
+> pass; otherwise recovery remains collect-only. Preserve unresolved receipts
+> and evidence. Use the documented fresh-open path only when eligible, and
+> report ready only after a live waiter is observed. Do not submit a test request.
+
+This prompt invokes the existing resident recovery recipe; it does not authorize
+a daemon, polling, automatic startup, a new request, or another send attempt.
+If the installed skill cannot prove the recovery or fresh-open prerequisites,
+it must report the exact blocker instead of altering canonical state. A live
+waiter is required before reporting ready, not before guarded recovery begins.
 
 After it passes, the authorized native owner opens once and starts serve once
 as described above, in the same actual task/turn. Opening alone does not send,
@@ -434,11 +485,21 @@ Keep the evidence and use the documented owner path, never delete a marker or
 release ownership based on this snapshot. All results report
 `sendAuthorized:false` and `replacementAuthorized:false`.
 
-This implementation reports `maxConcurrentRequests:1`. Opening two listeners
-or keeping two Pro chats does not increase capacity. Do not race sessions or
-write a second autosend loop after `Authority occupied`. Shared capacity two
-requires a qualified worker scheduler, not a second owner. No registry or
-capacity migration is included in this listener-inspection patch.
+After explicit `worker-pool activate` maintenance, this candidate can report
+`maxConcurrentRequests` equal to the configured pool size (one or two) for one
+listener. Opening two listeners or keeping two chats still does not raise capacity. Live
+native overlap, app reopen collection, laptop reboot, and legacy migration are
+separate qualification gates; passing fixture tests does not enable them.
+Ordinary reopen is collector-only. Automatic startup remains unsupported.
+Explicit `resident recover-start` after operator physical-quiescence evidence
+fences the old generation. A published `transport-audit.json` remains the
+graceful closure proof and is still required when present. A crash or reboot
+that left no audit is recoverable by that same maintenance action: inspect and
+preserve the bound session, including leftover readiness markers and a stale
+`wake.sock`, refuse a still-listening socket, and keep every possibly-sent
+receipt collect-only. Missing audit, PID, or socket never authorizes a resend.
+Live native overlap, app reopen collection, laptop reboot, and legacy migration
+remain separate qualification gates.
 
 1. Claude creates `PROOF/A.txt` asking for exactly its A token, then runs:
 
@@ -448,7 +509,7 @@ capacity migration is included in this listener-inspection patch.
 
    Preserve the actual returned answer and timestamps. Verify and acknowledge A using the block below.
 
-2. After A's verified answer, wait 180 seconds using one external sleep or equivalent independent elapsed time. Do not call native tools, issue parent gates, collect the serve cell or publish B during this interval. Then Claude independently creates `PROOF/B.txt` with the B token and runs:
+2. After A's verified answer, wait 180 seconds using one external sleep or equivalent independent elapsed time. Continue only the owner's automatic `functions.wait` calls on the original cell. Do not separately call native tools, issue parent gates or publish B during this interval. Then Claude independently creates `PROOF/B.txt` with the B token and runs:
 
    ```sh
    node "$ACT" rendezvous "$SESSION" 2 "$B" "$PROOF/B.txt" "$CLIENT"
@@ -506,7 +567,7 @@ node "$ACT" resident-stop "$SESSION"
 
 This publishes an exclusive stop request; its successful return alone is not proof of closure. Retrieve the original serve cell using `functions.wait`, with each retrieval bounded to 60 seconds. Require serve completion, the matching `transport-audit.json` with `resident_stopped`, and absent `wake.sock`.
 
-The audit must contain exactly A then B accepted/finished pairs; canonical receipts and native traces must show one submission/send each. Confirm unchanged session identity, no third readiness, no idle native reads or parent model interventions, and B completion before the first serve-cell retrieval.
+The audit must contain exactly A then B accepted/finished pairs; canonical receipts and native traces must show one submission/send each. Confirm unchanged session identity, no third readiness, no idle worker reads, no manual parent gates, and automatic same-cell supervision through B completion and shutdown. Preserve wait results to prove the owner turn remained active; cell existence alone is insufficient.
 
 Time-box qualification observations to 25 minutes including the quiet interval. A ten-minute checkpoint is observation, not a generation deadline. If an answer remains unresolved, do not proceed to B or resend. Mark qualification inconclusive, request stop, preserve the owning cell and use the documented collect-only recovery. Stop drains active runner work under its existing budgets; it does not cancel Pro generation or promise immediate shutdown.
 

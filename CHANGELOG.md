@@ -4,13 +4,25 @@ All notable changes to Codex Pro Dispatch are documented here.
 
 ## Unreleased
 
+- Add `worker set --confirm-worker`, which records `user-confirmed-worker`.
+  The user chooses any available model and reasoning effort in the dedicated
+  conversation; the helper still verifies no model. `--confirm-pro` remains a
+  legacy alias, existing `user-confirmed-pro` workers load unchanged, and
+  activation and queued-resume gates accept exactly those two markers.
+- Add an explicit one/two-worker pool, collector-only reopen recovery, and a
+  one-listener scheduler whose capacity matches the configured pool. Prepared,
+  never-armed recovery keeps its first-send path; armed work stays collect-only.
+  Explicit recover-start after physical-quiescence can fence a crash or reboot
+  that left no graceful transport-audit; missing audit is never unsent.
+  Automatic startup stays unsupported. Native overlap, app reopen, laptop reboot,
+  and legacy migration remain live gates.
 - Move resident admission into bounded native calls instead of an independently
   living waiter process. Owner nonrenewal withdraws readiness and closes the
   socket; it does not time out accepted Pro work or authorize a resend.
 - Keep owner-loss detection active across a returned stop until cleanup runs,
   and allow ten seconds for each read-only post-claim authority check.
-- Preserve the existing guarded recovery rules. Forced kernel termination,
-  reboot recovery and automatic startup remain unqualified.
+- Preserve the existing guarded recovery rules. Forced kernel termination
+  and automatic startup remain unqualified. Live reboot remains a native gate.
 
 ## [1.3.0-rc.1] - 2026-09-14
 

@@ -16,15 +16,19 @@ from .core import (
     StateError,
     _parse_result,
     _native_response,
+    activate_worker_pool,
     abandon_assignment,
     active_cooldown,
     active_assignment,
+    active_assignments,
+    arm_for_send,
     arm_assignment,
     complete_assignment,
     default_paths,
     list_assignments,
     load_assignment,
     load_worker,
+    load_worker_pool,
     mark_ambiguous,
     mark_indeterminate,
     mark_unusual_activity_403,
@@ -36,6 +40,8 @@ from .core import (
     recovery_info,
     reset_worker,
     save_worker,
+    worker_pool_payload,
+    worker_pool_runtime_status,
 )
 
 
@@ -96,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     resident = subparsers.add_parser("resident", help="Canonical resident ownership")
-    resident.add_argument("operation", choices=["inspect", "enroll", "start", "check", "bind-session", "admit", "begin", "end"])
+    resident.add_argument("operation", choices=["inspect", "enroll", "start", "check", "bind-session", "admit", "begin", "end", "collector-open", "collector-close", "recover-start", "serve-open", "rollback-check", "handoff", "settle"])
     resident.add_argument("credentials", type=json.loads, nargs="?", default={})
 
     queue = subparsers.add_parser("queue", help="Private native request broker queue")
@@ -138,10 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--parent-task-id", required=True)
         command.add_argument("--native-controls-confirmed", action="store_true")
 
-    worker = subparsers.add_parser("worker", help="Configure the dedicated Chat Pro worker")
+    worker = subparsers.add_parser("worker", help="Configure the dedicated Chat worker conversation")
     worker_sub = worker.add_subparsers(dest="worker_command", required=True)
 
-    worker_set = worker_sub.add_parser("set", help="Save a user-confirmed Pro worker")
+    worker_set = worker_sub.add_parser("set", help="Save the user-confirmed worker conversation")
     worker_set.add_argument("--conversation-id", required=True)
     worker_set.add_argument(
         "--expected-conversation-id",
@@ -149,9 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worker_set.add_argument("--label", default="Codex Pro Dispatch Worker")
     worker_set.add_argument(
+        "--confirm-worker",
+        action="store_true",
+        help="Confirm this is the intended worker conversation; the user chose "
+        "its model and reasoning effort there, and nothing verifies that choice",
+    )
+    worker_set.add_argument(
         "--confirm-pro",
         action="store_true",
-        help="Confirm the user visibly selected Pro in this Chat conversation",
+        help="Legacy alias kept for compatibility; alone it records the older "
+        "user-confirmed-pro marker",
     )
     worker_set.add_argument(
         "--native-controls-confirmed",
@@ -162,6 +175,15 @@ def build_parser() -> argparse.ArgumentParser:
     worker_sub.add_parser("show", help="Show the configured worker")
     worker_reset = worker_sub.add_parser("reset", help="Remove the configured worker")
     worker_reset.add_argument("--force", action="store_true")
+
+    pool = subparsers.add_parser("worker-pool", help="Activate or inspect the explicit one/two-worker pool")
+    pool.add_argument("operation", choices=["activate", "show"])
+    pool.add_argument("--workers-file", help="JSON array of worker entries for explicit activation")
+    pool.add_argument("--expected-legacy-sha256", required=False,
+                      help="Exact SHA-256 of legacy worker.json, or 'none'")
+    pool.add_argument("--evidence-file")
+    pool.add_argument("--evidence-sha256")
+    pool.add_argument("--native-controls-confirmed", action="store_true")
 
     prepare = subparsers.add_parser(
         "prepare", help="Create one at-most-once native-send assignment"
@@ -180,6 +202,14 @@ def build_parser() -> argparse.ArgumentParser:
         "arm", help="Durably prohibit resends immediately before native submission"
     )
     arm.add_argument("assignment_id")
+
+    arm_fence = subparsers.add_parser(
+        "arm-for-send", help="Atomically fence one pool slot and return its exact wrapped prompt"
+    )
+    arm_fence.add_argument("worker_slot")
+    arm_fence.add_argument("request_id")
+    arm_fence.add_argument("--generation", type=int, required=True)
+    arm_fence.add_argument("--invocation", required=True)
 
     submitted = subparsers.add_parser(
         "submitted", help="Verify the native read-back and record one submission"
@@ -347,6 +377,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 args.conversation_id,
                 label=args.label,
                 confirm_pro=args.confirm_pro,
+                confirm_worker=args.confirm_worker,
                 expected_conversation_id=args.expected_conversation_id,
                 paths=paths,
             )
@@ -356,6 +387,61 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             return {"ok": True, "worker": worker_payload(worker), "path": str(paths.worker_file)}
         removed = reset_worker(force=args.force, paths=paths)
         return {"ok": True, "removed": removed, "path": str(paths.worker_file)}
+
+    if args.command == "worker-pool":
+        if args.operation == "show":
+            pool = load_worker_pool(paths)
+            return {
+                "ok": True,
+                "worker_pool": worker_pool_payload(pool),
+                "pool_status": worker_pool_runtime_status(pool, paths),
+                "path": str(paths.worker_pool_file),
+            }
+        if not args.native_controls_confirmed:
+            raise DispatchError(
+                "Worker-pool activation requires the current native host-capability preflight"
+            )
+        if not args.workers_file or not args.evidence_file or not args.evidence_sha256:
+            raise ConfigurationError(
+                "Pool activation requires --workers-file, --evidence-file, and --evidence-sha256"
+            )
+        try:
+            workers = json.loads(Path(args.workers_file).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ConfigurationError("Worker pool input must be a JSON array") from exc
+        if not isinstance(workers, list):
+            raise ConfigurationError("Worker pool input must be a JSON array")
+        legacy_hash = args.expected_legacy_sha256
+        if legacy_hash == "none":
+            legacy_hash = None
+        elif legacy_hash is None:
+            raise ConfigurationError("Pool activation requires --expected-legacy-sha256")
+        pool = activate_worker_pool(
+            workers,
+            expected_legacy_sha256=legacy_hash,
+            evidence_file=args.evidence_file,
+            evidence_sha256=args.evidence_sha256,
+            paths=paths,
+        )
+        return {
+            "ok": True,
+            "worker_pool": {
+                "schema_version": 1,
+                "legacy_worker_sha256": pool.legacy_worker_sha256,
+                "file_sha256": pool.file_sha256,
+                "workers": [
+                    {
+                        "slot": worker.slot,
+                        "conversation_id": worker.conversation_id,
+                        "label": worker.label,
+                        "model_confirmation": worker.model_confirmation,
+                        "configured_at": worker.configured_at,
+                    }
+                    for worker in pool.workers
+                ],
+            },
+            "path": str(paths.worker_pool_file),
+        }
 
     if args.command == "prepare":
         if not args.native_controls_confirmed:
@@ -390,6 +476,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "arm":
         value = arm_assignment(args.assignment_id, paths)
         return {"ok": True, "assignment": value, "no_resend": True}
+
+    if args.command == "arm-for-send":
+        value = arm_for_send(
+            args.worker_slot, args.request_id, args.generation, args.invocation, paths
+        )
+        return {"ok": True, **value}
 
     if args.command == "pending":
         value = mark_pending(args.assignment_id, paths)
@@ -473,10 +565,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # Omit history from the wire, not from integrity/ownership checks.
             try:
                 with state_lock(paths, create=False) as locked:
+                    pool = load_worker_pool(paths, _locked=locked) if paths.worker_pool_file.exists() else None
+                    active_values = active_assignments(paths, _locked=locked)
                     value = {
                         "ok": True,
-                        "worker": worker_payload(load_worker(paths, _locked=locked)),
-                        "active_assignment": active_assignment(paths, _locked=locked),
+                        "worker": (worker_payload(load_worker(paths, _locked=locked))
+                                   if pool is None else None),
+                        "worker_pool": (worker_pool_payload(pool) if pool is not None else None),
+                        "pool_status": (
+                            worker_pool_runtime_status(pool, paths, _locked=locked)
+                            if pool is not None else None
+                        ),
+                        "active_assignment": active_values[0] if len(active_values) == 1 else None,
+                        "active_assignments": active_values,
                         "active_cooldown": active_cooldown(paths, _locked=locked),
                         "paths": {
                             "config_dir": str(paths.config_dir),
@@ -499,10 +600,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             worker = worker_payload(load_worker(paths))
         except DispatchError:
             worker = None
+        try:
+            pool_value = worker_pool_payload(load_worker_pool(paths))
+        except DispatchError:
+            pool_value = None
         return {
             "ok": True,
             "worker": worker,
-            "active_assignment": active_assignment(paths),
+            "active_assignment": (active_assignments(paths)[0]
+                                  if len(active_assignments(paths)) == 1 else None),
+            "active_assignments": active_assignments(paths),
+            "worker_pool": pool_value,
+            "pool_status": (
+                worker_pool_runtime_status(load_worker_pool(paths), paths)
+                if pool_value is not None else None
+            ),
             "active_cooldown": active_cooldown(paths),
             "assignments": list_assignments(paths),
             "paths": {
@@ -519,6 +631,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "active_assignment": None,
             "active_cooldown": None,
             "redacted_diagnostic_receipts": 0,
+            "worker_pool_configured": False,
         }
         try:
             checks["redacted_diagnostic_receipts"] = redact_stored_diagnostics(paths)
@@ -530,15 +643,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         except DispatchError as exc:
             checks["worker_error"] = str(exc)
         try:
-            current = active_assignment(paths)
-            checks["active_assignment"] = current
+            checks["worker_pool"] = worker_pool_payload(load_worker_pool(paths))
+            checks["worker_pool_configured"] = True
+        except DispatchError as exc:
+            checks["worker_pool_error"] = str(exc)
+        try:
+            current = active_assignments(paths)
+            checks["active_assignment"] = current[0] if len(current) == 1 else None
+            checks["active_assignments"] = current
             checks["active_cooldown"] = active_cooldown(paths)
         except DispatchError as exc:
             checks["state_error"] = str(exc)
         checks["local_ok"] = (
             checks["platform"] == "Darwin"
-            and checks["worker_configured"]
-            and "worker_error" not in checks
+            and (checks["worker_configured"] or checks["worker_pool_configured"])
+            and ("worker_error" not in checks or checks["worker_pool_configured"])
             and "state_error" not in checks
         )
         checks["native_controls_confirmed"] = bool(

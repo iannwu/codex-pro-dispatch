@@ -25,15 +25,15 @@ The recovered workflow verifies bounded protocol envelopes in the returned histo
 
 - macOS
 - official combined ChatGPT/Codex desktop app
-- ChatGPT account where the user can visibly choose Pro in a dedicated Chat conversation
+- ChatGPT account with a dedicated Chat conversation where the user chooses the model and reasoning effort
 - Python 3.9 or newer
 - explicit `$codex-pro-dispatch` invocation
 
 ## External connectors and repository visibility
 
-Prompt-only review and research do not require an external connector. Repository mutations require a GitHub connector or tool in the dedicated Pro worker that is authorized for the exact repository and exposes the requested write action. This plugin does not bundle or authenticate that connector.
+Prompt-only review and research do not require an external connector. Repository mutations require a GitHub connector or tool in the dedicated worker conversation that is authorized for the exact repository and exposes the requested write action. This plugin does not bundle or authenticate that connector.
 
-The worker can operate only on repository state visible through its authorized tools. Local-only branches, uncommitted changes, and Codex worktrees are not implicitly shared with the Pro conversation. Push the intended starting commit or provide the necessary context through an approved mechanism before dispatch.
+The worker can operate only on repository state visible through its authorized tools. Local-only branches, uncommitted changes, and Codex worktrees are not implicitly shared with the worker conversation. Push the intended starting commit or provide the necessary context through an approved mechanism before dispatch.
 
 The parent Codex task needs an independent read path to the remote repository so it can verify the reported branch, commit SHA, changed files, tests, and protected refs. A connector's availability does not prove its permissions; verify write mode first on a disposable unprotected branch.
 

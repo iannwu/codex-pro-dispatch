@@ -1,10 +1,10 @@
 {
   "assembly_context": {
-    "__init__.py": "9c0cfa0e4501af630d6f57d764b9659fe857711e5f5a3f09b0e7a12a13e572ac",
-    "cli.py": "79c995b436067ef8ec01630cc4a272f11a4851a134ebe06c9f1f62509e70202c",
-    "core.py": "1be05776685e73fe6f4dea77ca1e6f8b03761a6fdd3776b05b929c18a0ba829a",
+    "__init__.py": "b98189df633c898106e0e0365815fcb670ca3e50ad71329f56c28283cd8ffe4c",
+    "cli.py": "64448a0bffa329ef7a4b1f8dd732f460d2965f20ae5e10cf6820cdf319d9d95e",
+    "core.py": "38f15d0b42bea0410ecf6bb0995f679a7ce97be7184a0825fc365518d1d5a74e",
     "native_storage.py": "87ab304fa2b9e39162b05f09f0285c0b24e8419cd94ffe9584d25221f0a7a144",
-    "queue.py": "71af30b560532cdc6506c4f9ba1d4cd1ff48192a9ee94abb4f6a2a1771334a99"
+    "queue.py": "e8de8892d812026c3fff097f4b9ac97ea9aea8f8841ddac1ea510550aed83d1a"
   },
   "baseline": "860876820ef52e7d3ffc62e626de213b527fe710",
   "reviewed_active_job_update": {
@@ -27,6 +27,22 @@
     },
     "reason": "Explicit evidence-bound first delivery of an untouched queued request; no post-arm retry"
   },
+  "reviewed_model_neutral_update": {
+    "previous_runtime_pins": {
+      "skills/codex-pro-dispatch/scripts/parked-client.mjs": "f77698abac3f59ba0da48a39dfe6a4d8e3583f26b8d16b5e58975be2ecb22d27"
+    },
+    "previous_test_pins": {
+      "tests/test_parked_queued_resume.mjs": "e4f6a7f1d49b536421ce5aa27452ed430a65b9b2fa60e94fba23fe7dacc0be8a"
+    },
+    "reason": "Queued-resume gate accepts the user-confirmed-worker marker alongside legacy user-confirmed-pro; the queued-resume suite now configures its worker with --confirm-worker"
+  },
+  "reviewed_three_feature_update": {
+    "previous_runtime_pins": {
+      "skills/codex-pro-dispatch/scripts/parked-runner.js": "4c2716136b2046b2cc182079652fda587d1ff653a39ffc2786b9706cad4d0059",
+      "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "b2e5d62bc7e27d6c11ade1c629925240e3239cb8896186192b29a18b27f0bc77"
+    },
+    "reason": "One-listener two-slot scheduler, collector-only recovery, and model-neutral pool activation; live overlap remains unqualified"
+  },
   "reviewed_resident_failure_update": {
     "previous_runtime_pins": {
       "skills/codex-pro-dispatch/scripts/parked-runner.js": "e9731cc362f7929cf9993bb256554a2377e089edc780d457ef7306c6de211a44",
@@ -35,9 +51,9 @@
     "reason": "Raw native envelopes preserved with operation identity before decoding; ambiguous evidence writes confirmed by bytes plus file and directory sync or stopped; acknowledgments limited to evidenced variants; outer resident failure reconciles unresolved receipts and drains runner-owned helpers; lost serve-claim ownership recovered by invocation token; unconfirmed close fails the service; failed residence labeled resident_failed; complete receipt publishes without staged history"
   },
   "runtime": {
-    "skills/codex-pro-dispatch/scripts/parked-client.mjs": "f77698abac3f59ba0da48a39dfe6a4d8e3583f26b8d16b5e58975be2ecb22d27",
-    "skills/codex-pro-dispatch/scripts/parked-runner.js": "813160d57afe6cee61f58353a41da4de23f672d0d244561e50e08cb337eb2ab6",
-    "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "65b791760427c44ddd5afdf4756e02d73b886cd15dfe3028ed6b0dbbb2135ffc"
+    "skills/codex-pro-dispatch/scripts/parked-client.mjs": "45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072",
+    "skills/codex-pro-dispatch/scripts/parked-runner.js": "f1ae66955f638262bd5a1d20655eca0fb90813264efebcc133650d3a2d214acc",
+    "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7"
   },
   "schema_version": 1,
   "scope": "Source assembly only; runtime tests and native qualification separate",
@@ -71,8 +87,8 @@
         "expired resume command stops without receive, resubmission or rearming",
         "retained-config mismatch or a recreated socket path defeats closure proof"
       ],
-      "pin_origin": "reviewed closed queued-resume patch; actual local CLI/fs/socket and synthetic native tools",
-      "sha256": "e4f6a7f1d49b536421ce5aa27452ed430a65b9b2fa60e94fba23fe7dacc0be8a"
+      "pin_origin": "reviewed closed queued-resume patch; actual local CLI/fs/socket and synthetic native tools; worker configured with --confirm-worker since the model-neutral update; watch coalescing for load-stable command appearance",
+      "sha256": "cd231ae9af6670bc72b869061c81e505354c8f7b6a4543a9d8e4be8daebf0e61"
     },
     "tests/test_parked_runner.cjs": {
       "cases": [

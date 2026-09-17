@@ -16,15 +16,25 @@ await assert.rejects(fs.lstat(path),e=>e.code==="ENOENT");
 }
 function appeared(path){
 return new Promise((resolve,reject)=>{
-let done=false;
-const w=watch(dirname(path),()=>void check());
+let done=false,busy=false,again=false,deferred=false;
+const w=watch(dirname(path),()=>{again=true;void check();});
 const timer=setTimeout(()=>end(Error("Missing fixture event")),8000);
 function end(e,v){
 if(done)return;done=true;clearTimeout(timer);w.close();e?reject(e):resolve(v);
 }
 async function check(){
+if(done||busy)return;busy=true;again=false;
+let torn=false;
 try{end(null,JSON.parse(await fs.readFile(path,"utf8")));}
-catch(e){if(e.code!=="ENOENT"&&!(e instanceof SyntaxError))end(e);}
+catch(e){
+if(e.code!=="ENOENT"&&e.code!=="EAGAIN"&&!(e instanceof SyntaxError))end(e);
+else if(e.code==="EAGAIN"||e instanceof SyntaxError)torn=true;
+}finally{
+busy=false;
+if(done)return;
+if(again){deferred=false;void check();return;}
+if(torn&&!deferred){deferred=true;setImmediate(()=>void check());}
+}
 }
 w.on("error",e=>end(e));void check();
 });
@@ -177,13 +187,15 @@ assert.equal((await f.cli(["status"])).active_assignment,null);
 });
 
 test("duplicate rendezvous and duplicate gate cannot authorize another receive",async t=>{
-const f=await fixture(t);
+const f=await fixture(t,30000);
 const a=f.start(1,"request-A");
 await appeared(f.session+"/command-1.json");
 assert.notEqual((await f.start(1,"request-A")).code,0);
 assert.equal((await f.gate(1,"request-A")).code,0);
 assert.notEqual((await f.gate(1,"request-A")).code,0);
 const delivery=await f.socket.receive();
+assert.ok(delivery,"gated request must be received");
+assert.equal(delivery.requestId,"request-A");
 await f.complete(delivery);
 assert.equal((await a).code,0);
 assert.equal((await f.cli(["status","request-A"])).assignment.submission_count,1);
