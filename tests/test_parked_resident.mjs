@@ -87,6 +87,14 @@ const prompt=d+"/prompt.txt";await fs.writeFile(prompt,mode==="replacementtext"?
 const tools={
 async mcp__node_repl__js(a){
 s.repls++;
+if(a.title==="Guarded serve-existing claim"){
+s.serveClaims=(s.serveClaims||0)+1;
+if(mode==="servehostempty")return {status:"failed"};
+if(mode==="servehostthrow")throw Error("native host transport failed");
+if(mode==="servehostnull")return null;
+if(mode==="servehostmalformed")return {content:[{type:"text",text:"not JSON"}]};
+if(mode==="servehostfailedreceipt")return {status:"failed",...mcp({claimed:true})};
+}
 if(a.code.includes("activation.residentAdmission(")&&!a.code.includes('"command":')){
 s.waits++;events.emit("change");
 }
@@ -108,13 +116,19 @@ if(mode==="claimlostturn")meta["x-codex-turn-metadata"].turn_id="changed";
 return {content:[{type:"text",text:"{}"},{type:"text",text:"{}"}],isError:false};
 }
 const lines=[];
+try{
 await new AF("nodeRepl","globalThis","console","parkedSocket","parkedBinding",a.code)(
 {tmpDir:d,requestMeta:meta},g,{log:v=>lines.push(String(v))},
 g.parkedSocket,g.parkedBinding);
+}catch(e){
+if(mode!=="servehostguarderror")throw e;
+s.suppressedNativeError=true;return {status:"failed"};
+}
 if(mode==="relaylost"&&a.title==="Serve-existing relay")
 return {isError:true,content:[{type:"text",text:"relay response lost"}]};
 if(mode==="serveclaimlost"&&a.title==="Guarded serve-existing claim")
 return {isError:true,content:[{type:"text",text:"claim response lost"}]};
+if(mode==="servehostemptyafter"&&a.title==="Guarded serve-existing claim")return {status:"failed"};
 if(mode==="evidenceerror"&&!s.evidenceError&&a.title==="Preserve native evidence"){
 s.evidenceError=true;return {isError:true,content:[{type:"text",text:lines.join("\n")}]};
 }
@@ -1153,8 +1167,39 @@ assert.equal(f.g.parkedResident.used,true);
 assert.equal(f.g.parkedResident.serveInvocation,undefined);
 assert.equal(f.g.parkedResident.admission,undefined);
 assert.deepEqual((await fs.readdir(directory)).sort(),["resident-serve-existing.json","session.json","wake.sock"]);
-await assert.rejects(f.serve(p.calls.serve),/proof failed/);
+const token=f.g.parkedResident.serveExistingClaim;
+await assert.rejects(f.serve(p.calls.serve),/claim uncertain/);
+assert.equal(f.g.parkedResident.serveExistingClaim,token);
 assert.deepEqual(await f.cli(["resident","inspect"]),before);
+assert.deepEqual(f.s.sends,[]);
+});
+
+for(const mode of ["servehostempty","servehostthrow","servehostemptyafter","servehostnull","servehostmalformed","servehostfailedreceipt"]){
+test(`compact claim preserves state on host failure: ${mode}`,async t=>{
+const f=await fixture(t,mode),directory=await f.open(),p=await f.recovery();
+const before=await f.cli(["resident","inspect"]);
+await assert.rejects(f.serve(p.calls.serve),/claim uncertain/);
+assert.equal(f.s.serveClaims,1,"wrapper must not retry an uncertain call");
+assert.equal(f.g.parkedResident.used,mode==="servehostemptyafter");
+assert.equal(f.g.parkedResident.admission,undefined);
+assert.equal(f.g.parkedResident.serveInvocation,undefined);
+if(mode==="servehostemptyafter")await fs.lstat(directory+"/resident-serve-existing.json");
+else await missing(directory+"/resident-serve-existing.json");
+assert.deepEqual(await f.cli(["resident","inspect"]),before);
+assert.deepEqual(f.s.sends,[]);
+});
+}
+
+test("compact claim reports changed owner turn as text without consuming a fence",async t=>{
+const f=await fixture(t,"servehostguarderror"),directory=await f.open(),p=await f.recovery();
+assert(Buffer.byteLength(p.calls.serve)<6144);
+assert(!/eval\s*\(|new Function/.test(p.calls.serve));
+f.meta["x-codex-turn-metadata"].turn_id="next-owner-turn";
+await assert.rejects(f.serve(p.calls.serve),/owner turn changed/);
+assert.equal(f.g.parkedResident.used,false);
+assert.equal(f.g.parkedResident.serveExistingClaim,undefined);
+assert.equal(f.s.suppressedNativeError,undefined,"guard error must survive a host that drops thrown errors");
+await missing(directory+"/resident-serve-existing.json");
 assert.deepEqual(f.s.sends,[]);
 });
 

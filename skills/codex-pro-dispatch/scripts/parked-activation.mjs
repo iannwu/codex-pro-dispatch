@@ -497,6 +497,8 @@ return {kind:"native_takeover_packet",sendAuthorized:false,expected,calls:{takeo
 // a lost runtime. Failure after the synchronous fence is permanently consumed.
 export async function claimServeExisting(g,meta,expected,token){
 const o=g.parkedResident;
+if(o?.binding&&meta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)
+throw Error("Serve-existing native proof failed: owner turn changed; preserve session");
 if(!o||!["socket","binding","directory","attempt","used","descriptor","credentials",
 "recover","recovery","preparedRecovery","recoveryBindings","collectOnly","activation"].every(k=>Object.hasOwn(o,k))||
 g.parkedOpenBusy!==false||g.parkedSocket!==o.socket||
@@ -581,16 +583,21 @@ const expected={generation:owner.generation,owner:owner.owner,parent:owner.paren
 session:owner.session};
 const token=randomBytes(16).toString("hex");
 const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
-const code=`{
+const code=`{try{
 const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
 if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
 const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
 console.log(JSON.stringify(await activation.claimServeExisting(globalThis,nodeRepl.requestMeta,${J(expected)},${J(token)})));
-}`;
+}catch(e){console.log(JSON.stringify({claimed:false,error:String(e?.message||e)}));}}`;
 const relayCode=`{const a=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});console.log(JSON.stringify(await a.serveExistingStep(globalThis,nodeRepl.requestMeta,${J(token)},REPLY)));}`;
 const serve=`// @exec: {"yield_time_ms":1000}
-const claim=await tools.mcp__node_repl__js(${J({code,timeout_ms:60000,title:"Guarded serve-existing claim"})});
-if(claim?.isError===true||claim?.content?.length!==1||claim.content[0].type!=="text"||JSON.parse(claim.content[0].text)?.claimed!==true)throw Error("Serve-existing claim uncertain; preserve session");
+let claim;
+try{claim=await tools.mcp__node_repl__js(${J({code,timeout_ms:60000,title:"Guarded serve-existing claim"})});}
+catch{throw Error("Serve-existing claim uncertain: host call failed; preserve session");}
+if(claim?.isError===true||claim?.status==="failed"||claim?.content?.length!==1||claim.content[0].type!=="text")throw Error("Serve-existing claim uncertain: missing or failed host result; preserve session");
+let receipt;
+try{receipt=JSON.parse(claim.content[0].text);}catch{throw Error("Serve-existing claim uncertain: invalid host result; preserve session");}
+if(receipt?.claimed!==true)throw Error("Serve-existing claim rejected or uncertain; preserve session: "+(typeof receipt?.error==="string"?receipt.error:"missing claim receipt"));
 const pending=new Map(),allowed=new Set(["exec_command","write_stdin","mcp__node_repl__js","mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread","mcp__codex_app__navigate_to_codex_page"]);
 let reply=null;
 for(;;){
