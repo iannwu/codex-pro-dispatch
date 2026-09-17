@@ -74,6 +74,14 @@ events.on("change",check);check();
 }
 await cli(["worker","set","--conversation-id",W,"--confirm-pro","--native-controls-confirmed"]);
 const paths=(await cli(["status","--current"])).paths;
+if(mode==="poolturn"){
+const cryptoLocal=await import("node:crypto");
+const hash=raw=>cryptoLocal.createHash("sha256").update(raw).digest("hex");
+const evidence=J({kind:"legacy_quiescence",...paths,implementation:"unit",observations:"isolated",authorization:"test",physical_quiescence:true});
+await fs.writeFile(d+"/pool-evidence.json",evidence,{mode:384});
+await fs.writeFile(d+"/workers.json",J([W,"resident-pro-b"].map((id,i)=>({slot:"slot-"+i,conversation_id:id,label:id,model_confirmation:"user-confirmed-worker",configured_at:"fixture"}))),{mode:384});
+await cli(["worker-pool","activate","--workers-file",d+"/workers.json","--expected-legacy-sha256",hash(await fs.readFile(paths.config_dir+"/worker.json")),"--evidence-file",d+"/pool-evidence.json","--evidence-sha256",hash(evidence),"--native-controls-confirmed"]);
+}
 const qualification=J({kind:"fresh_deployment",parent:P,worker:W,...paths,
 implementation:"unit-fixture",observations:"New isolated test authority, no native host",authorization:"Test harness only"});
 await fs.writeFile(d+"/qualification.json",qualification,{mode:384});
@@ -82,7 +90,7 @@ evidence_file:d+"/qualification.json",evidence_sha256:(await import("node:crypto
 const access=await activate(["client-preflight",d]);
 assert.equal(access.filesystemAccess,true);assert.equal(access.sendAuthorized,false);
 assert(!(await fs.readdir(d)).some(n=>n.startsWith(".pro-access-")));
-let p=await activate(["resident-packet",P,P,W,d]);
+let p=await activate(["resident-packet",P,P,mode==="poolturn"?J([W,"resident-pro-b"]):W,d]);
 const prompt=d+"/prompt.txt";await fs.writeFile(prompt,mode==="replacementtext"?"Literal replacement text: $& $` $\'":"Fixture answer.",{mode:384});
 const tools={
 async mcp__node_repl__js(a){
@@ -170,6 +178,11 @@ const id=++serial;sessions.set(id,pending);s.stuckSession=id;
 return {session_id:id,output:""};
 }
 const result=await pending;
+if(mode==="poolturn"&&a.cmd.includes("'indeterminate'")){
+const reason=/'--reason-file' '([^']+)'/.exec(a.cmd)?.[1];
+if(reason)s.failureEvidence=await fs.readFile(reason,"utf8");
+}
+if(mode==="poolturn"&&a.cmd.includes("'arm-for-send'"))s.armChecksToHold=(s.armChecksToHold||0)+1;
 if(a.cmd.includes("'arm'")){
 if(mode==="turn")meta["x-codex-turn-metadata"].turn_id="changed";
 if(mode==="owner")g.parkedBinding=Object.freeze({...g.parkedBinding});
@@ -186,6 +199,10 @@ if(a.session_id===s.stuckSession){s.drains=(s.drains||0)+1;return {session_id:a.
 const r=await sessions.get(a.session_id);sessions.delete(a.session_id);return r;
 },
 async mcp__codex_app__read_thread(a){
+if(mode==="poolturn"){
+const entry=s.poolSent?.get(a.threadId);
+return mcp({schemaVersion:1,thread:{id:a.threadId,kind:"chatgpt",status:{type:"idle"}},turns:entry?[{id:"turn-"+entry.id,items:[{id:"turn-"+entry.id,type:"userMessage",content:[{type:"text",text:entry.prompt}]},{id:"answer-"+entry.id,type:"agentMessage",text:"[CODEX_PRO_DISPATCH_RESULT assignment_id="+entry.id+"]\nanswer\n[CODEX_PRO_DISPATCH_END assignment_id="+entry.id+"]"}]}]:[]});
+}
 assert.equal(a.threadId,W);s.reads++;
 if(mode==="stoprace"&&last)await stop(); // Explicit stop racing the failure below.
 if(mode==="nextqueued"&&last)await publishB(); // B published while A is failing.
@@ -205,6 +222,10 @@ turns:last?[{id:"turn-"+last.id,items:[
 "[CODEX_PRO_DISPATCH_END assignment_id="+last.id+"]"}]}]:[]});
 },
 async mcp__codex_app__send_message_to_thread(a){
+if(mode==="poolturn"){
+const id=/^\[CODEX_PRO_DISPATCH assignment_id=([^\]]+)\]\n/.exec(a.prompt)?.[1];assert(id);
+s.poolSent??=new Map();assert(!s.poolSent.has(a.threadId));s.poolSent.set(a.threadId,{id,prompt:a.prompt});s.sends.push(id);return mcp({});
+}
 assert.equal(a.threadId,W);
 assert.equal(g.parkedResident.admission?.deadlineAt??null,null,"Idle detector must not time out Pro");
 const id=/^\[CODEX_PRO_DISPATCH assignment_id=([^\]]+)\]\n/.exec(a.prompt)?.[1];
@@ -252,7 +273,7 @@ pid:process.pid,ppid:process.ppid}),{mode:384});
 }
 const publishB=()=>publish(2,"job-B");
 const waiting=n=>g.parkedResident.directory+"/waiting-"+n+"."+g.parkedResident.socket.config.sessionId;
-return {g,meta,s,out,cli,open,serve,start,stop,repeat,reopen,activate,d,children,waiting,publish,
+return {g,meta,s,out,cli,open,serve,start,stop,repeat,reopen,activate,d,children,waiting,publish,tools,
 recovery:()=>activate(["resident-serve-existing-packet",g.parkedResident.directory]),
 // Idle means resident-next N is executing and has proven it is waiting.
 idle:async n=>{
@@ -1236,6 +1257,91 @@ f.meta["x-codex-turn-metadata"].turn_id="later-owner-turn";
 const p=await f.recovery(),serving=f.serve(p.calls.serve);
 await f.idle(1);assert(f.s.repls>3);
 await f.stop();await serving;assert.deepEqual(f.s.sends,[]);
+});
+
+for(const scenario of ["retained","legacy queued","canonical changed","missing legacy call"])
+test("two armed pool calls across turn end: "+scenario,async t=>{
+const f=await fixture(t,"poolturn");await f.open();
+const a=await import(author),o=f.g.parkedResident;
+const current=(await f.cli(["resident","inspect"])).owner;
+const expected={generation:current.generation,owner:current.owner,parent:current.parent,
+worker_pool_sha256:current.worker_pool_sha256,session:current.session};
+await a.claimServeExisting(f.g,f.meta,expected,"original-relay");
+let token="original-relay",step=await a.serveExistingStep(f.g,f.meta,token,null);
+const pending=new Map(),held=[];
+const clientA=waitForFile(f.waiting(1)).then(()=>f.start(1,"job-A"));
+const clientB=waitForFile(f.waiting(2)).then(()=>f.start(2,"job-B"));
+clientA.catch(()=>{});clientB.catch(()=>{});
+// Execute the real serving loop/CLI against an isolated authority, substituting
+// only native ChatGPT responses. Lose the outer driver at the two owner checks.
+async function tick(hold){
+for(const call of step.calls){
+if(hold&&f.s.armChecksToHold&&call.tool==="mcp__node_repl__js"&&
+call.args.code.endsWith('console.log("{}");}')){
+f.s.armChecksToHold--;a.claimRelayCall(f.g,f.meta,token,call.id);held.push(call);continue;
+}
+const claimed=a.claimRelayCall(f.g,f.meta,token,call.id);
+pending.set(call.id,f.tools[claimed.tool](claimed.args).then(value=>({id:call.id,value}),e=>({id:call.id,error:e.message})));
+}
+if(held.length===2&&hold)return;
+assert(pending.size,"serving loop unexpectedly stalled");
+const reply=await Promise.race(pending.values());pending.delete(reply.id);
+step=await a.serveExistingStep(f.g,f.meta,token,reply);
+f.out.push(...step.outputs);
+if(step.error)throw Error(step.error+" "+f.s.failureEvidence+" "+J(f.out));
+}
+for(let i=0;i<250&&held.length<2;i++)await tick(true);
+assert.equal(held.length,2);assert.equal(pending.size,0);
+const before=await f.cli(["resident","inspect"]);
+for(const rid of ["job-A","job-B"]){const receipt=(await f.cli(["status",rid])).assignment;assert.equal(receipt.status,"armed");assert.equal(receipt.submission_count,0);}
+assert.deepEqual(f.s.sends,[]);
+const invocation=o.serveInvocation,relay=o.serveExistingRelay,running=relay.running;
+const originalBinding=o.binding;
+f.meta["x-codex-turn-metadata"].turn_id="later-turn";
+await assert.rejects(a.serveExistingStep(f.g,f.meta,token,{id:held[0].id,value:mcp({})}),/identity changed/);
+if(scenario==="canonical changed"){
+expected.generation++;o.credentials.generation++;
+await assert.rejects(a.continueServeExisting(f.g,f.meta,expected,"blocked"),/owner replaced/);
+assert.equal(relay.continuing,"blocked");assert.equal(o.binding,originalBinding);
+assert.deepEqual(await f.cli(["resident","inspect"]),before);assert.deepEqual(f.s.sends,[]);
+return;
+}
+if(scenario.includes("legacy")){
+for(const call of relay.pending.values()){delete call.request;delete call.dispatched;}
+relay.calls=scenario==="legacy queued"?[...held]:[];
+if(scenario==="missing legacy call"){
+await assert.rejects(a.continueServeExisting(f.g,f.meta,expected,"blocked"),/collect-only recovery required/);
+assert.equal(o.binding,originalBinding);assert.deepEqual(f.s.sends,[]);return;
+}
+}
+// Native identity and exact pending-call guards must reject without consuming
+// the continuation claim or mutating canonical request evidence.
+for(const [object,key,value] of [[f.meta,"threadId","foreign"],[o.credentials,"generation",999],
+[o,"socket",{}],[o,"failureRecord",{}],[relay,"done",true]]){
+const original=object[key];object[key]=value;
+await assert.rejects(a.continueServeExisting(f.g,f.meta,expected,"invalid"),/proof failed/);
+if(original===undefined)delete object[key];else object[key]=original;
+assert.equal(relay.continuing,undefined);
+}
+const request=scenario==="legacy queued"?relay.calls[0]:relay.pending.get(held[0].id).request;
+const tool=request.tool;request.tool="mcp__codex_app__send_message_to_thread";
+await assert.rejects(a.continueServeExisting(f.g,f.meta,expected,"lost-send"),/collect-only recovery required/);
+request.tool=tool;
+assert.deepEqual(await a.continueServeExisting(f.g,f.meta,expected,"continued-relay"),{claimed:true,continued:true});
+assert.equal(o.serveInvocation,invocation);assert.equal(o.serveExistingRelay,relay);assert.equal(relay.running,running);
+assert.deepEqual(await f.cli(["resident","inspect"]),before);
+await assert.rejects(a.continueServeExisting(f.g,f.meta,expected,"duplicate"),/proof failed/);
+await assert.rejects(a.continueServeExisting(f.g,{threadId:P,"x-codex-turn-metadata":{turn_id:originalBinding.turn}},expected,"old-driver"),/proof failed/);
+assert.throws(()=>a.claimRelayCall(f.g,{threadId:P,"x-codex-turn-metadata":{turn_id:originalBinding.turn}},token,held[0].id),/identity changed/);
+await assert.rejects(a.serveExistingStep(f.g,f.meta,token,{id:held[0].id,value:mcp({})}),/identity changed/);
+token="continued-relay";step=await a.serveExistingStep(f.g,f.meta,token,null);
+await f.stop();
+for(let i=0;i<300&&!step.done;i++)await tick(false);
+assert(step.done);await Promise.all([clientA,clientB]);
+assert.deepEqual(f.s.sends.sort(),["job-A","job-B"]);
+for(const rid of ["job-A","job-B"]){const receipt=(await f.cli(["status",rid])).assignment;assert.equal(receipt.submission_count,1);assert.equal(receipt.status,"complete");}
+assert.equal(relay.pending.size,0);
+assert.throws(()=>a.claimRelayCall(f.g,f.meta,token,held[0].id),/consumed or unknown/);
 });
 
 test("first relay identity rejection preserves its exact diagnostic",async t=>{

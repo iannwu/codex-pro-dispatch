@@ -1,5 +1,24 @@
 # Trusted native activation
 
+## Retained post-arm continuation after a turn ends
+
+For an explicitly requested later-turn continuation in the same owner task,
+generate `resident-continue-armed-packet SESSION` with the installed
+`parked-activation.mjs`, then execute its decoded `calls.serve` verbatim in
+outer `functions.exec`. Keep supervising that original cell after every yield.
+The packet checks the exact canonical parent, owner, generation, session and
+pool, and requires one or two armed reservations belonging to the retained
+serving invocation. It resumes the original promises only when every outstanding
+call is the exact read-only native owner check. It fences the previous driver
+and consumes each subsequent host call before dispatch; it never repeats open,
+rendezvous, arm, or a consumed send. An older retained relay qualifies only if
+all missing call metadata is still available in its never-emitted call queue.
+Missing runtime, changed ownership, a lost send result, or any other outstanding
+call remains blocked and collect-only. A zero submission count alone never
+authorizes sending. This command changes no durable request or owner state.
+
+## Finite activation
+
 Read the broker reference; require production ownership, native preflight,
 trusted BROKER/PARENT IDs and canonical authority. Generate:
 
