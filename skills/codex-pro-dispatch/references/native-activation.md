@@ -310,9 +310,10 @@ No generated serving source is evaluated. Each emitted host call is settled once
 A missing or changed installed module fails closed before the claim.
 
 Execute only the returned `calls.serve`, once, verbatim through outer
-`functions.exec` in the original native owner task and turn. This packet has no
-open action. It retains the original socket object, descriptor and turn binding;
-it never reopens, rebinds, takes ownership, changes workers or replays a request.
+`functions.exec` in the original native owner task. This packet has no open
+action. It retains the original socket object and descriptor. After the claim
+succeeds it may bind a later trusted turn of that same task; it never takes
+ownership from another task, changes workers or replays a request.
 The updated activation module and helper must resolve to the same physical
 installation as the retained descriptor. Do not mix candidate and installed paths.
 
@@ -327,12 +328,35 @@ unknown session artifact rejects recovery. It creates one exclusive durable
 Concurrent, duplicate, missing, malformed or uncertain evidence fails closed.
 A lost claim reply consumes recovery too. Preserve the claim and native state;
 never delete evidence, reset `used`, reconstruct the socket, change the turn
-binding, regenerate ordinary startup as a workaround, or retry an attempted
-serve. A lost native runtime or a new owner turn is ineligible.
+binding manually, regenerate ordinary startup as a workaround, or retry an
+attempted serve. A lost native runtime or a foreign owner task is ineligible.
+
+### Explicit replacement of consumed but unused serving
+
+If a serve-existing claim was consumed but serving never started, the same
+canonical owner task may explicitly generate:
+
+```sh
+node "$ACT" resident-replace-unused-packet "$SESSION_DIRECTORY"
+```
+
+Execute `calls.replace` once through outer `functions.exec`. Eligibility requires
+the retained native object/socket, exact canonical owner/generation/session,
+durable consume marker, idle slots, no active assignment/cooldown, and an exact
+inventory of descriptor, socket and consume marker. Admission, readiness,
+commands, request evidence, audit, failure, a started relay or unknown artifacts
+reject replacement. A synchronous native fence blocks any delayed serving call.
+An exclusive `resident-unused-replacement.json` is durably written before the
+canonical session is detached. Original evidence is never deleted or rewritten.
+Normal socket close then adds its closure audit. Only an explicit successful
+`replaced:true` receipt permits generating an ordinary resident packet to open
+a fresh session in that task. Follow its normal open/serve lifecycle.
+Uncertain output, partial writes or closure failure stop the workflow. Never
+retry replacement or treat missing readiness as proof of eligibility.
 
 If packet generation succeeded but its output was truncated or lost, and no
 `calls.serve` invocation occurred, rerun the same recovery command for the same
-session in the original owner task and turn, then discard the earlier packet.
+session in the original owner task, then discard the earlier packet.
 Generation is read-only and creates no claim. Claim absence alone is insufficient:
 any attempted or uncertain execution remains consumed by the native fence.
 A lost relay reply is also terminal for that attempt; never replay relay calls.

@@ -36,3 +36,22 @@ sending requests, foreign tasks and malformed turn identities are rejected,
 and lost results cannot claim again from another turn. Live recovery is not
 performed by this patch. Never replay a possibly consumed claim to obtain
 diagnostics.
+
+## First relay call follow-up
+
+An isolated native host probe imported the same file in two calls. Its
+module-local counter returned 1 both times, confirming imports are not cached
+across native calls as they are in the Node test harness. The claim's module
+WeakMap therefore disappeared before the first relay step. Relay state now
+lives on the retained native resident object, with the same token, socket,
+binding and task/turn checks. Tests import a fresh activation module for each
+host call and run claim, relay, waiter and stop without sending requests.
+Relay rejection details are returned as JSON instead of escaping the host.
+
+Explicit unused-session replacement is a separate one-time operation. It
+requires a consumed native fence and durable marker, no started relay or serving
+invocation, and the exact unused inventory. It fences the native object, writes
+an exclusive marker under the canonical lock, detaches the session, and closes
+the original socket. A successful receipt permits normal fresh open; uncertainty
+permits neither replay nor automatic open. It retains all original durable
+evidence and never repairs a session that accepted work.

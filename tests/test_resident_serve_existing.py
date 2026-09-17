@@ -34,6 +34,71 @@ class ServeExistingTests(unittest.TestCase):
         return {str(p): p.read_bytes() for root in [self.paths.state_dir, self.paths.config_dir]
                 for p in root.rglob('*') if p.is_file()}
 
+    def replace(self, credentials):
+        return resident.control('replace-unused-serving', credentials, self.paths)
+
+    def test_unused_replacement_preserves_consume_and_owner_and_is_exclusive(self):
+        _, c, directory = self.pristine()
+        self.claim(c)
+        marker = (directory / 'resident-serve-existing.json').read_bytes()
+        before = resident.control('inspect', {}, self.paths)['owner']
+        def attempt(_):
+            try:
+                return self.replace(c)['replaced']
+            except core.StateError:
+                return False
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            self.assertEqual(list(pool.map(attempt, range(8))).count(True), 1)
+        self.assertEqual((directory / 'resident-serve-existing.json').read_bytes(), marker)
+        self.assertTrue((directory / 'resident-unused-replacement.json').exists())
+        after = resident.control('inspect', {}, self.paths)['owner']
+        self.assertEqual(after, {**before, 'session': None})
+
+    def test_unused_replacement_rejects_extra_evidence_and_wrong_identity(self):
+        _, c, directory = self.pristine()
+        self.claim(c)
+        before = self.snapshot()
+        for name in ['waiting-1', 'ready-1.json', 'command-1.json',
+                     'transport-audit.json', 'resident-failure.json',
+                     'resident-unused-replacement.json', 'unknown']:
+            path = directory / name
+            path.write_bytes(b'preserve')
+            with self.subTest(name=name), self.assertRaises(core.StateError):
+                self.replace(c)
+            self.assertEqual(path.read_bytes(), b'preserve')
+            self.assertEqual(self.snapshot(), before)
+            path.unlink()  # Isolated test fixture only.
+        for key, value in [('generation', c['generation']+1), ('owner', 'other'),
+                           ('parent', 'other'), ('session', {})]:
+            with self.subTest(key=key), self.assertRaises(core.StateError):
+                self.replace({**c, key: value})
+        for function, value in [('active_assignments', ['active']), ('active_cooldown', {'active': True})]:
+            with patch.object(core, function, return_value=value), self.assertRaises(core.BusyError):
+                self.replace(c)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unused_replacement_requires_exact_durable_consume_marker(self):
+        _, c, directory = self.pristine()
+        with self.assertRaises(FileNotFoundError):
+            self.replace(c)
+        self.claim(c)
+        (directory / 'resident-serve-existing.json').write_bytes(b'{}')
+        with self.assertRaises(core.StateError):
+            self.replace(c)
+        self.assertFalse((directory / 'resident-unused-replacement.json').exists())
+
+    def test_unused_replacement_uncertain_marker_write_never_detaches_or_retries(self):
+        _, c, directory = self.pristine()
+        self.claim(c)
+        before = self.snapshot()
+        with patch.object(resident.os, 'fsync', side_effect=OSError('uncertain durability')):
+            with self.assertRaises(OSError):
+                self.replace(c)
+        self.assertTrue((directory / 'resident-unused-replacement.json').exists())
+        with self.assertRaises(core.StateError):
+            self.replace(c)
+        self.assertEqual(self.snapshot(), before)
+
     def test_success_preserves_canonical_and_request_bytes_and_consumes_forever(self):
         _, c, directory = self.pristine()
         Queue(self.paths).submit('unrelated-queued', b'preserve me', 'client')

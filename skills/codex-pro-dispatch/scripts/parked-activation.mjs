@@ -506,6 +506,7 @@ meta?.threadId!==expected.parent||o.binding?.broker!==expected.parent||
 typeof turn!=="string"||!turn||
 typeof o.binding.turn!=="string"||!o.binding.turn||
 o.used!==false||o.serveInvocation!==undefined||o.serveExistingClaim!==undefined||
+o.serveExistingRelay!==undefined||o.unusedReplacement!==undefined||
 o.admission!==undefined||o.failureRecord!==undefined||o.failureFinalRecord!==undefined||
 o.serveJoined!==undefined||o.collectOnly!==false||o.recover!=null||
 !Array.isArray(o.recovery)||o.recovery.length||
@@ -535,16 +536,49 @@ throw Error("Serve-existing native proof changed; preserve claim");
 // The original frozen binding is never mutated; all subsequent calls must
 // match the new turn, and a lost reply still leaves this claim consumed.
 if(turn!==binding.turn)o.binding=g.parkedBinding=Object.freeze({broker:expected.parent,turn});
-serveExistingRelays.set(o,{token,binding:o.binding,socket:o.socket,expected,started:false});
+o.serveExistingRelay={token,binding:o.binding,socket:o.socket,expected,started:false};
 return {claimed:true};
 }
 
-// A retained claim owns one module continuation. Replies settle each emitted
+// A retained claim owns one continuation on the native object. Module imports
+// may be fresh on every host call. Replies settle each emitted
 // host call once. Lost/duplicate replies cannot restart or recreate that loop.
-const serveExistingRelays=new WeakMap();
+export async function replaceUnusedServing(g,meta,expected,token){
+const o=g.parkedResident,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(!o||meta?.threadId!==expected.parent||o.binding?.broker!==expected.parent||
+!["socket","binding","directory","attempt","used","descriptor","credentials","recover","recovery","preparedRecovery","recoveryBindings","collectOnly","activation"].every(k=>Object.hasOwn(o,k))||
+typeof turn!=="string"||!turn||g.parkedBinding!==o.binding||
+g.parkedSocket!==o.socket||g.parkedOpenBusy!==false||g.parkedDelivery!==null||
+o.used!==true||typeof o.serveExistingClaim!=="string"||!o.serveExistingClaim||
+o.unusedReplacement!==undefined||o.serveInvocation!==undefined||
+o.admission!==undefined||o.failureRecord!==undefined||o.failureFinalRecord!==undefined||
+o.serveJoined!==undefined||o.collectOnly!==false||o.recover!=null||
+!Array.isArray(o.recovery)||o.recovery.length||!Array.isArray(o.preparedRecovery)||o.preparedRecovery.length||
+!o.recoveryBindings||typeof o.recoveryBindings!=="object"||Array.isArray(o.recoveryBindings)||Object.keys(o.recoveryBindings).length||
+(o.serveExistingRelay!==undefined&&(!o.serveExistingRelay||o.serveExistingRelay.started!==false||
+o.serveExistingRelay.token!==o.serveExistingClaim||o.serveExistingRelay.socket!==o.socket||o.serveExistingRelay.binding!==o.binding))||
+typeof o.socket?.close!=="function"||typeof o.socket?.receive!=="function"||
+J(o.socket.config)!==o.descriptor||o.directory!==expected.session.directory||
+o.socket.config.sessionId!==expected.session.session_id||o.attempt!==expected.owner||
+!["generation","owner","parent",...(expected.worker_pool_sha256?["worker_pool_sha256"]:["worker"])].every(k=>o.credentials?.[k]===expected[k])||
+createHash("sha256").update(o.descriptor).digest("hex")!==expected.session.descriptor_sha256)
+throw Error("Unused replacement native proof failed; preserve session");
+const socket=o.socket,binding=o.binding;
+// Synchronous permanent fence also rejects a delayed original serve body.
+o.unusedReplacement=token;o.serveInvocation="unused-replacement:"+token;
+const result=await cli(["resident","replace-unused-serving",J(expected)]);
+if(result?.replaced!==true||g.parkedResident!==o||g.parkedSocket!==socket||
+o.socket!==socket||g.parkedBinding!==binding||o.binding!==binding||
+meta?.threadId!==expected.parent||meta?.["x-codex-turn-metadata"]?.turn_id!==turn)
+throw Error("Unused replacement result uncertain; preserve evidence");
+await socket.close("unused_serving_replaced");
+return {replaced:true,sendAuthorized:false};
+}
+
 export async function serveExistingStep(g,meta,token,reply){
-const o=g.parkedResident,r=serveExistingRelays.get(o);
+const o=g.parkedResident,r=o?.serveExistingRelay;
 if(!r||r.token!==token||o.serveExistingClaim!==token||o.used!==true||
+o.unusedReplacement!==undefined||
 g.parkedSocket!==r.socket||o.socket!==r.socket||g.parkedBinding!==r.binding||o.binding!==r.binding||
 meta?.threadId!==r.expected.parent||meta?.["x-codex-turn-metadata"]?.turn_id!==r.binding.turn)
 throw Error("Serve-existing relay identity changed; preserve claim");
@@ -573,7 +607,7 @@ await new Promise(resolve=>setImmediate(resolve));
 return {calls:r.calls.splice(0),outputs:r.outputs.splice(0),done:r.done,error:r.error??null};
 }
 
-async function serveExistingPacket(directory){
+async function serveExistingPacket(directory,replaceUnused=false){
 await privateDirectory(directory);
 const current=await cli(["resident","inspect"]),owner=current.owner;
 if(!owner?.session||owner.session.directory!==directory)
@@ -591,9 +625,15 @@ const code=`{try{
 const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
 if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
 const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
-console.log(JSON.stringify(await activation.claimServeExisting(globalThis,nodeRepl.requestMeta,${J(expected)},${J(token)})));
+console.log(JSON.stringify(await activation.${replaceUnused?"replaceUnusedServing":"claimServeExisting"}(globalThis,nodeRepl.requestMeta,${J(expected)},${J(token)})));
 }catch(e){console.log(JSON.stringify({claimed:false,error:String(e?.message||e)}));}}`;
-const relayCode=`{const a=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});console.log(JSON.stringify(await a.serveExistingStep(globalThis,nodeRepl.requestMeta,${J(token)},REPLY)));}`;
+if(replaceUnused)return {kind:"native_unused_replacement_packet",session:owner.session,generation:owner.generation,calls:{replace:`
+const raw=await tools.mcp__node_repl__js(${J({code,timeout_ms:60000,title:"Replace consumed unused serving session"})});
+if(raw?.isError===true||raw?.status==="failed"||raw?.content?.length!==1||raw.content[0].type!=="text")throw Error("Unused replacement uncertain; preserve evidence");
+const value=JSON.parse(raw.content[0].text);
+if(value?.replaced!==true)throw Error("Unused replacement rejected or uncertain: "+(value?.error||"missing receipt"));
+text(value);`}};
+const relayCode=`{try{const a=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});console.log(JSON.stringify(await a.serveExistingStep(globalThis,nodeRepl.requestMeta,${J(token)},REPLY)));}catch(e){console.log(JSON.stringify({calls:[],outputs:[],done:false,error:String(e?.message||e)}));}}`;
 const serve=`// @exec: {"yield_time_ms":1000}
 let claim;
 try{claim=await tools.mcp__node_repl__js(${J({code,timeout_ms:60000,title:"Guarded serve-existing claim"})});}
@@ -606,7 +646,7 @@ const pending=new Map(),allowed=new Set(["exec_command","write_stdin","mcp__node
 let reply=null;
 for(;;){
 const raw=await tools.mcp__node_repl__js({code:${J(relayCode)}.replace("REPLY",()=>JSON.stringify(reply)),timeout_ms:60000,title:"Serve-existing relay"});
-if(raw?.isError===true||raw?.content?.length!==1||raw.content[0].type!=="text")throw Error("Serve-existing relay uncertain; preserve session");
+if(raw?.isError===true||raw?.status==="failed"||raw?.content?.length!==1||raw.content[0].type!=="text")throw Error("Serve-existing relay uncertain; preserve session");
 const step=JSON.parse(raw.content[0].text);
 for(const output of step.outputs)text(output);
 if(step.error)throw Error(step.error);
@@ -1631,6 +1671,8 @@ requestId:args[16],commandSha256:args[17],promptSha256:args[18]
 });
 else if(action==="resident-serve-existing-packet"&&args.length===1)
 result=await serveExistingPacket(args[0]);
+else if(action==="resident-replace-unused-packet"&&args.length===1)
+result=await serveExistingPacket(args[0],true);
 else if(action==="resident-stop"&&args.length===1)
 result=await residentStop(args[0]);
 else if(action==="resident-handoff-packet"&&args.length===1)

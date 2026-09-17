@@ -87,6 +87,10 @@ const prompt=d+"/prompt.txt";await fs.writeFile(prompt,mode==="replacementtext"?
 const tools={
 async mcp__node_repl__js(a){
 s.repls++;
+// Native REPL creates a fresh imported module per call, while native globals
+// survive. Ordinary Node import caching hid the module-local WeakMap bug.
+if(mode==="freshmodules")a={...a,code:a.code.replace(/parked-activation\.mjs\?sha256=[a-f0-9]+/g,m=>m+"&cell="+s.repls)};
+if(mode==="relayidentity"&&a.title==="Serve-existing relay")meta.threadId="foreign-task";
 if(a.title==="Guarded serve-existing claim"){
 s.serveClaims=(s.serveClaims||0)+1;
 if(mode==="servehostempty")return {status:"failed"};
@@ -129,6 +133,7 @@ return {isError:true,content:[{type:"text",text:"relay response lost"}]};
 if(mode==="serveclaimlost"&&a.title==="Guarded serve-existing claim")
 return {isError:true,content:[{type:"text",text:"claim response lost"}]};
 if(mode==="servehostemptyafter"&&a.title==="Guarded serve-existing claim")return {status:"failed"};
+if(mode==="replacementlost"&&a.title==="Replace consumed unused serving session")return {status:"failed"};
 if(mode==="evidenceerror"&&!s.evidenceError&&a.title==="Preserve native evidence"){
 s.evidenceError=true;return {isError:true,content:[{type:"text",text:lines.join("\n")}]};
 }
@@ -1128,6 +1133,7 @@ const cases=[
 [o,"descriptor","{}"],
 [o,"used",true],[o,"used",undefined],
 [o,"serveInvocation","uncertain"],[o,"serveExistingClaim","uncertain"],
+[o,"serveExistingRelay",{}],[o,"unusedReplacement","uncertain"],
 [o,"admission",{}],[o,"failureRecord",Promise.resolve()],
 [o,"failureFinalRecord",Promise.resolve()],[o,"serveJoined",{}],
 [o,"collectOnly",true],[o,"recovery",["job-old"]],
@@ -1221,6 +1227,69 @@ assert.deepEqual(await f.cli(["resident","inspect"]),before);
 await fs.lstat(directory+"/resident-serve-existing.json");
 await assert.rejects(f.serve(p.calls.serve),/proof failed/);
 await f.stop();await serving;
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("compact relay survives fresh module imports on every native host call",async t=>{
+const f=await fixture(t,"freshmodules");await f.open();
+f.meta["x-codex-turn-metadata"].turn_id="later-owner-turn";
+const p=await f.recovery(),serving=f.serve(p.calls.serve);
+await f.idle(1);assert(f.s.repls>3);
+await f.stop();await serving;assert.deepEqual(f.s.sends,[]);
+});
+
+test("first relay identity rejection preserves its exact diagnostic",async t=>{
+const f=await fixture(t,"relayidentity");await f.open();const p=await f.recovery();
+await assert.rejects(f.serve(p.calls.serve),/Serve-existing relay identity changed; preserve claim/);
+assert.equal(f.g.parkedResident.used,true);
+assert.equal(f.g.parkedResident.admission,undefined);
+assert.deepEqual(f.s.sends,[]);
+});
+
+for(const mode of ["ok","legacyrelay","replacementlost"]){
+test(`unused consumed replacement preserves evidence and never replays: ${mode}`,async t=>{
+const f=await fixture(t,mode),directory=await f.open();
+const owner=(await f.cli(["resident","inspect"])).owner;
+const expected={generation:owner.generation,owner:owner.owner,parent:owner.parent,
+worker:owner.worker,session:owner.session};
+const activation=await import(author);
+await activation.claimServeExisting(f.g,f.meta,expected,"consumed-unused");
+if(mode==="legacyrelay")delete f.g.parkedResident.serveExistingRelay;
+const evidence=await fs.readFile(directory+"/resident-serve-existing.json");
+const descriptor=await fs.readFile(directory+"/session.json");
+const packet=await f.activate(["resident-replace-unused-packet",directory]);
+if(mode==="replacementlost")await assert.rejects(f.serve(packet.calls.replace),/replacement uncertain/);
+else await f.serve(packet.calls.replace);
+assert.deepEqual(await fs.readFile(directory+"/resident-serve-existing.json"),evidence);
+assert.deepEqual(await fs.readFile(directory+"/session.json"),descriptor);
+await fs.lstat(directory+"/resident-unused-replacement.json");
+await assert.rejects(f.serve(packet.calls.replace),/proof failed|uncertain/);
+await assert.rejects(activation.serveExistingStep(f.g,f.meta,"consumed-unused",null),/identity changed/);
+if(mode!=="replacementlost"){
+const fresh=await f.reopen();assert.notEqual(fresh,directory);
+const p=await f.recovery(),serving=f.serve(p.calls.serve);
+await f.idle(1);await f.stop();await serving;
+}
+assert.deepEqual(f.s.sends,[]);
+});
+}
+
+test("unused replacement rejects foreign, changed, non-pristine and started native state",async t=>{
+const f=await fixture(t),directory=await f.open();
+const owner=(await f.cli(["resident","inspect"])).owner;
+const expected={generation:owner.generation,owner:owner.owner,parent:owner.parent,worker:owner.worker,session:owner.session};
+const a=await import(author),o=f.g.parkedResident;
+await a.claimServeExisting(f.g,f.meta,expected,"unused");
+for(const [obj,key,value] of [[f.meta,"threadId","foreign"],
+[f.g,"parkedSocket",{...o.socket}],[o.credentials,"generation",999],
+[o,"admission",{}],[o,"failureRecord",{}],[o,"serveInvocation","active"],
+[o,"recovery",["request"]],[o.serveExistingRelay,"started",true]]){
+const prior=obj[key];obj[key]=value;
+await assert.rejects(a.replaceUnusedServing(f.g,f.meta,expected,"replacement"),/proof failed/);
+if(prior===undefined)delete obj[key];else obj[key]=prior;
+assert.equal(o.unusedReplacement,undefined);
+await missing(directory+"/resident-unused-replacement.json");
+}
 assert.deepEqual(f.s.sends,[]);
 });
 

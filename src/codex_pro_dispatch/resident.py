@@ -1701,11 +1701,12 @@ def guard(paths, locked, request=None, *, configuration=False, operation=None):
         raise core.BusyError("Resident owns this worker; use its reserved invocation")
 
 
-def claim_serve_existing(paths, locked, v, c):
+def claim_serve_existing(paths, locked, v, c, *, replace_unused=False):
     """Consume pristine serving recovery under the canonical mutation lock.
 
     Native object/task proof is supplied only by the activation path. This
     helper cannot serve, bind, rotate ownership, or authorize any worker send.
+    Explicit unused replacement may detach only this validated consumed session.
     An incomplete/ambiguous claim is intentionally never removable or reusable.
     """
     from .queue import Queue
@@ -1733,12 +1734,19 @@ def claim_serve_existing(paths, locked, v, c):
         raise core.BusyError("Serve-existing requires idle canonical state")
     # Exact allowlist rejects unknown, malformed, historical, and partial
     # claims, waiters, tickets, readiness, requests, audits and failure evidence.
-    if {item.name for item in directory.iterdir()} != {"session.json", "wake.sock"}:
+    inventory = {"session.json", "wake.sock"}
+    if replace_unused:
+        from .queue import read_private
+        inventory.add("resident-serve-existing.json")
+        if json.loads(read_private(directory / "resident-serve-existing.json")) != c:
+            raise core.StateError("Consumed serving claim differs")
+    if {item.name for item in directory.iterdir()} != inventory:
         raise core.StateError("Serve-existing session has prior or ambiguous evidence")
     info = (directory / "wake.sock").lstat()
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
         raise core.StateError("Serve-existing socket missing or malformed")
-    marker = directory / "resident-serve-existing.json"
+    marker = directory / ("resident-unused-replacement.json" if replace_unused
+                          else "resident-serve-existing.json")
     fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as output:
@@ -1751,6 +1759,11 @@ def claim_serve_existing(paths, locked, v, c):
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+    if replace_unused:
+        # The native caller fences the retained object before entering this
+        # transaction. Preserve its descriptor and consume marker forever.
+        write(paths, locked, dict(v, session=None))
+        return {"ok": True, "replaced": True, "send_authorized": False}
     return {"ok": True, "claimed": True, "send_authorized": False}
 
 
@@ -1771,6 +1784,8 @@ def control(action, credentials, paths=None):
             return {"ok": True, "owner": v}
         if action == "claim-serve-existing":
             return claim_serve_existing(paths, locked, v, c)
+        if action == "replace-unused-serving":
+            return claim_serve_existing(paths, locked, v, c, replace_unused=True)
         if action in {"handoff", "takeover"}:
             raise core.StateError("Handoff requires the native handoff packet; CLI credentials are not authorization")
         if core.worker_pool_active(paths, _locked=locked) or (v and v.get("version") == 3):
