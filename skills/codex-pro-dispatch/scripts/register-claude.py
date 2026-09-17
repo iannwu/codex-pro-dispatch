@@ -20,7 +20,8 @@ def main():
             target.unlink()
         print('Claude registration removed. Codex installation and request state retained.')
         return
-    required = ('SKILL.md', 'scripts/pro-dispatch', 'scripts/parked-activation.mjs')
+    required = ('SKILL.md', 'scripts/pro-dispatch', 'scripts/parked-activation.mjs',
+                'scripts/parked-serving.mjs')
     if not all((source / name).is_file() for name in required):
         parser.exit(1, 'Codex source installation is missing or incomplete. Paste into Codex:\n'
                     'Install codex-pro-dispatch globally using its documented source installer. '

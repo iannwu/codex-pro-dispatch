@@ -29,6 +29,8 @@ jobs:
           python-version: "3.11"
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
+      - name: Node tests
+        run: node --test tests/*.mjs tests/*.cjs
       - name: Python syntax
         run: python3 -m py_compile bin/pro-dispatch skills/codex-pro-dispatch/scripts/pro-dispatch src/codex_pro_dispatch/*.py
       - name: Shell syntax
