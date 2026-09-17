@@ -56,7 +56,7 @@ try{
 await (await import(author)).stopResidentAdmission(g.parkedResident??{}).catch(e=>{
 if(mode!=="beginlostwrite")throw e;assert.equal(e.code,"EEXIST");
 });
-await g.parkedSocket?.close("unit_cleanup");
+await g.parkedSocket?.close("unit_cleanup").catch(e=>{if(mode!=="recoveryaudit")throw e;assert.equal(e.code,"EEXIST");});
 for(const child of children)child.kill("SIGTERM");
 await Promise.allSettled([...jobs]);
 }finally{
@@ -111,6 +111,8 @@ const lines=[];
 await new AF("nodeRepl","globalThis","console","parkedSocket","parkedBinding",a.code)(
 {tmpDir:d,requestMeta:meta},g,{log:v=>lines.push(String(v))},
 g.parkedSocket,g.parkedBinding);
+if(mode==="serveclaimlost"&&a.title==="Guarded serve-existing claim")
+return {isError:true,content:[{type:"text",text:"claim response lost"}]};
 if(mode==="evidenceerror"&&!s.evidenceError&&a.title==="Preserve native evidence"){
 s.evidenceError=true;return {isError:true,content:[{type:"text",text:lines.join("\n")}]};
 }
@@ -204,7 +206,7 @@ if(!["ready","collect_only"].includes(result.state))throw Error("Resident "+resu
 return g.parkedResident.directory;
 }
 const Clock=class extends Date{static now(){return Date.now()+s.tick;}};
-const serve=()=>track(new AF("tools","text","Date",p.calls.serve)(
+const serve=(body=p.calls.serve)=>track(new AF("tools","text","Date",body)(
 tools,v=>out.push(v),Clock));
 const start=(n,id)=>activate(["rendezvous",g.parkedResident.directory,
 String(n),id,prompt,"unit-client"]);
@@ -230,6 +232,7 @@ pid:process.pid,ppid:process.ppid}),{mode:384});
 const publishB=()=>publish(2,"job-B");
 const waiting=n=>g.parkedResident.directory+"/waiting-"+n+"."+g.parkedResident.socket.config.sessionId;
 return {g,meta,s,out,cli,open,serve,start,stop,repeat,reopen,activate,d,children,waiting,publish,
+recovery:()=>activate(["resident-serve-existing-packet",g.parkedResident.directory]),
 // Idle means resident-next N is executing and has proven it is waiting.
 idle:async n=>{
 await until(()=>s.waits>=n);
@@ -1062,4 +1065,93 @@ assert.equal(q.requests[0].dispatch_status,"indeterminate");
 assert.deepEqual(f.s.sends,["job-A"]);
 assert.equal(JSON.parse(await fs.readFile(d+"/transport-audit.json","utf8")).reason,"resident_failed");
 assert.equal(f.g.parkedDelivery?.requestId,"job-A");
+});
+
+
+test("lost serve body recovers once with original socket, binding and canonical state",async t=>{
+const f=await fixture(t),directory=await f.open();
+const socket=f.g.parkedSocket,binding=f.g.parkedBinding;
+const before=await f.cli(["resident","inspect"]),queue=await f.cli(["queue","status"]);
+const packet=await f.recovery();
+assert.deepEqual(Object.keys(packet.calls),["serve"]);
+const serving=f.serve(packet.calls.serve);
+await f.idle(1);
+assert.equal(f.g.parkedSocket,socket);assert.equal(f.g.parkedBinding,binding);
+assert.deepEqual(await f.cli(["resident","inspect"]),before);
+assert.deepEqual(await f.cli(["queue","status"]),queue);
+await assert.rejects(f.serve(packet.calls.serve),/proof failed/);
+assert.equal(f.g.parkedSocket,socket);
+await f.stop();await serving;
+assert.deepEqual(f.s.sends,[]);
+assert((await fs.readdir(directory)).includes("resident-serve-existing.json"));
+});
+
+test("concurrent lost-body attempts have one winner",async t=>{
+const f=await fixture(t);await f.open();
+const a=await f.recovery(),b=await f.recovery();
+let failures=0;
+const running=[a,b].map(p=>f.serve(p.calls.serve).catch(e=>{assert.match(e.message,/proof failed/);failures++;}));
+await f.idle(1);assert.equal(failures,1);
+await f.stop();await Promise.all(running);
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("serve-existing rejects changed or ambiguous native identity before consuming",async t=>{
+const f=await fixture(t);await f.open();const p=await f.recovery();
+const o=f.g.parkedResident;
+const cases=[
+[f.meta,"threadId","foreign"],
+[f.meta["x-codex-turn-metadata"],"turn_id","foreign-turn"],
+[o.credentials,"generation",o.credentials.generation+1],
+[o.credentials,"owner","foreign"],
+[o,"directory",f.d],
+[f.g,"parkedSocket",{...o.socket}],
+[o,"socket",{...o.socket}],
+[f.g,"parkedBinding",{...o.binding}],
+[o,"descriptor","{}"],
+[o,"used",true],[o,"used",undefined],
+[o,"serveInvocation","uncertain"],[o,"serveExistingClaim","uncertain"],
+[o,"admission",{}],[o,"failureRecord",Promise.resolve()],
+[o,"failureFinalRecord",Promise.resolve()],[o,"serveJoined",{}],
+[o,"collectOnly",true],[o,"recovery",["job-old"]],
+[o,"preparedRecovery",["job-old"]],[o,"recoveryBindings",{old:{}}],
+[o,"recoveryBindings",[]],[o,"recoveryBindings",1],[o,"activation",{}],
+[f.g,"parkedDelivery",{}],[f.g,"parkedOpenBusy",true]
+];
+const recover=o.recover;delete o.recover;
+await assert.rejects(f.serve(p.calls.serve),/proof failed/);o.recover=recover;
+for(const [obj,key,value] of cases){
+const had=Object.hasOwn(obj,key),old=obj[key];obj[key]=value;
+await assert.rejects(f.serve(p.calls.serve),/proof failed/);
+if(had)obj[key]=old;else delete obj[key];
+assert.equal(o.used,false,key);
+}
+const serving=f.serve(p.calls.serve);await f.idle(1);await f.stop();await serving;
+});
+
+test("ambiguous canonical claim is consumed without closing or rewriting evidence",async t=>{
+const f=await fixture(t,"recoveryaudit"),directory=await f.open(),p=await f.recovery();
+const before=await f.cli(["resident","inspect"]);
+await fs.writeFile(directory+"/transport-audit.json","ambiguous",{mode:384});
+await assert.rejects(f.serve(p.calls.serve),/prior or ambiguous evidence/);
+assert.equal(f.g.parkedResident.used,true);
+await assert.rejects(f.serve(p.calls.serve),/proof failed/);
+assert.equal(await fs.readFile(directory+"/transport-audit.json","utf8"),"ambiguous");
+assert.deepEqual(await f.cli(["resident","inspect"]),before);
+// Test cleanup cannot overwrite the deliberately malformed audit.
+f.g.parkedSocket.close("unit_cleanup").catch(()=>{});
+});
+
+
+test("lost serve-existing claim reply never enters serving and cannot retry",async t=>{
+const f=await fixture(t,"serveclaimlost"),directory=await f.open(),p=await f.recovery();
+const before=await f.cli(["resident","inspect"]);
+await assert.rejects(f.serve(p.calls.serve),/claim uncertain/);
+assert.equal(f.g.parkedResident.used,true);
+assert.equal(f.g.parkedResident.serveInvocation,undefined);
+assert.equal(f.g.parkedResident.admission,undefined);
+assert.deepEqual((await fs.readdir(directory)).sort(),["resident-serve-existing.json","session.json","wake.sock"]);
+await assert.rejects(f.serve(p.calls.serve),/proof failed/);
+assert.deepEqual(await f.cli(["resident","inspect"]),before);
+assert.deepEqual(f.s.sends,[]);
 });

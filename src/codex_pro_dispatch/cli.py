@@ -102,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     resident = subparsers.add_parser("resident", help="Canonical resident ownership")
-    resident.add_argument("operation", choices=["inspect", "enroll", "start", "check", "bind-session", "admit", "begin", "end", "collector-open", "collector-close", "recover-start", "serve-open", "rollback-check", "handoff", "settle"])
+    resident.add_argument("operation", choices=["inspect", "enroll", "start", "check", "bind-session", "claim-serve-existing", "admit", "begin", "end", "collector-open", "collector-close", "recover-start", "serve-open", "rollback-check", "handoff", "settle"])
     resident.add_argument("credentials", type=json.loads, nargs="?", default={})
 
     queue = subparsers.add_parser("queue", help="Private native request broker queue")

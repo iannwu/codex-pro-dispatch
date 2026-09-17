@@ -1701,6 +1701,59 @@ def guard(paths, locked, request=None, *, configuration=False, operation=None):
         raise core.BusyError("Resident owns this worker; use its reserved invocation")
 
 
+def claim_serve_existing(paths, locked, v, c):
+    """Consume pristine serving recovery under the canonical mutation lock.
+
+    Native object/task proof is supplied only by the activation path. This
+    helper cannot serve, bind, rotate ownership, or authorize any worker send.
+    An incomplete/ambiguous claim is intentionally never removable or reusable.
+    """
+    from .queue import Queue
+    locked.validate(paths)
+    fields = {"generation", "owner", "parent", "session",
+              "worker_pool_sha256" if v and v.get("version") == 3 else "worker"}
+    if (set(c) != fields or type(c.get("generation")) is not int
+            or not matches(v, c) or c.get("session") != v.get("session")):
+        raise core.StateError("Serve-existing owner or session differs")
+    session, directory = _bound_session_location(v)
+    if session is None or directory is None:
+        raise core.StateError("Serve-existing bound session missing")
+    _, descriptor = _require_bound_descriptor(paths, v, session, directory)
+    helper = Path(__file__).resolve().parents[2] / "skills/codex-pro-dispatch/scripts/pro-dispatch"
+    if descriptor.get("helper") != str(helper):
+        raise core.StateError("Serve-existing helper differs")
+    if (v.get("inflight") is not None
+            or any(slot["phase"] != "idle" or slot["request"] is not None
+                   or slot["invocation"] is not None for slot in v.get("slots", []))
+            or core.active_assignments(paths, _locked=locked)
+            or core.active_cooldown(paths, _locked=locked)
+            or any(row["state"] == "claimed" for row in Queue(paths).records(_locked=locked))
+            or _recovery_marker(paths, v) is not None
+            or os.path.lexists(paths.state_dir / "native-client")):
+        raise core.BusyError("Serve-existing requires idle canonical state")
+    # Exact allowlist rejects unknown, malformed, historical, and partial
+    # claims, waiters, tickets, readiness, requests, audits and failure evidence.
+    if {item.name for item in directory.iterdir()} != {"session.json", "wake.sock"}:
+        raise core.StateError("Serve-existing session has prior or ambiguous evidence")
+    info = (directory / "wake.sock").lstat()
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise core.StateError("Serve-existing socket missing or malformed")
+    marker = directory / "resident-serve-existing.json"
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(json.dumps(c, sort_keys=True, separators=(",", ":")).encode())
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    return {"ok": True, "claimed": True, "send_authorized": False}
+
+
 def control(action, credentials, paths=None):
     """Start is CAS; begin reserves; end is the original final continuation only.
 
@@ -1716,6 +1769,8 @@ def control(action, credentials, paths=None):
         v = read(paths, locked)
         if action == "inspect":
             return {"ok": True, "owner": v}
+        if action == "claim-serve-existing":
+            return claim_serve_existing(paths, locked, v, c)
         if action in {"handoff", "takeover"}:
             raise core.StateError("Handoff requires the native handoff packet; CLI credentials are not authorization")
         if core.worker_pool_active(paths, _locked=locked) or (v and v.get("version") == 3):

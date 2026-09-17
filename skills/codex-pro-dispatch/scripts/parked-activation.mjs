@@ -488,6 +488,77 @@ const sourceHash=createHash("sha256").update(await fs.readFile(fileURLToPath(imp
 return {kind:"native_takeover_packet",sendAuthorized:false,expected,calls:{takeover:buildTakeoverCall(expected,sourceHash)}};
 }
 
+// This path retains the original native object and binding. It cannot recreate
+// a lost runtime. Failure after the synchronous fence is permanently consumed.
+export async function claimServeExisting(g,meta,expected,token){
+const o=g.parkedResident;
+if(!o||!["socket","binding","directory","attempt","used","descriptor","credentials",
+"recover","recovery","preparedRecovery","recoveryBindings","collectOnly","activation"].every(k=>Object.hasOwn(o,k))||
+g.parkedOpenBusy!==false||g.parkedSocket!==o.socket||
+g.parkedBinding!==o.binding||g.parkedDelivery!==null||
+meta?.threadId!==expected.parent||o.binding?.broker!==expected.parent||
+meta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn||
+typeof o.binding.turn!=="string"||!o.binding.turn||
+o.used!==false||o.serveInvocation!==undefined||o.serveExistingClaim!==undefined||
+o.admission!==undefined||o.failureRecord!==undefined||o.failureFinalRecord!==undefined||
+o.serveJoined!==undefined||o.collectOnly!==false||o.recover!=null||
+!Array.isArray(o.recovery)||o.recovery.length||
+!Array.isArray(o.preparedRecovery)||o.preparedRecovery.length||
+!o.recoveryBindings||typeof o.recoveryBindings!=="object"||Array.isArray(o.recoveryBindings)||
+Object.keys(o.recoveryBindings).length||
+!["residentAdmission","stopResidentAdmission","recordResidentFailure","waitResidentStop","recordResidentJoined"].every(k=>typeof o.activation?.[k]==="function")||
+!o.socket||typeof o.socket.receive!=="function"||typeof o.socket.close!=="function"||
+J(o.socket.config)!==o.descriptor||o.directory!==expected.session.directory||
+o.socket.config.sessionId!==expected.session.session_id||
+o.attempt!==expected.owner||
+!["generation","owner","parent",...(expected.worker_pool_sha256?["worker_pool_sha256"]:["worker"])].every(k=>o.credentials?.[k]===expected[k])||
+createHash("sha256").update(o.descriptor).digest("hex")!==expected.session.descriptor_sha256)
+throw Error("Serve-existing native proof failed; preserve session");
+// No await before fencing: a second recovery or original serve cannot race us.
+o.used=true;o.serveExistingClaim=token;
+await cli(["resident","claim-serve-existing",J(expected)]);
+// Open creates no receive waiter. The pinned socket only records request
+// events after receive(), which permanently writes ready-N. The canonical
+// claim checks the exact pristine inventory, including absence of ready-N.
+if(g.parkedResident!==o||g.parkedSocket!==o.socket||g.parkedBinding!==o.binding||
+o.used!==true||o.serveInvocation!==undefined||o.admission!==undefined||
+g.parkedDelivery!==null||J(o.socket.config)!==o.descriptor)
+throw Error("Serve-existing native proof changed; preserve claim");
+return {claimed:true};
+}
+
+async function serveExistingPacket(directory){
+await privateDirectory(directory);
+const current=await cli(["resident","inspect"]),owner=current.owner;
+if(!owner?.session||owner.session.directory!==directory)
+throw Error("Bound resident session required");
+const raw=await privateBytes(directory+"/session.json",16384),trusted=JSON.parse(raw);
+if(createHash("sha256").update(raw).digest("hex")!==owner.session.descriptor_sha256||
+trusted.helper!==helper||trusted.parent!==owner.parent||trusted.resident!==true)
+throw Error("Bound resident descriptor differs");
+const expected={generation:owner.generation,owner:owner.owner,parent:owner.parent,
+...(owner.worker_pool_sha256?{worker_pool_sha256:owner.worker_pool_sha256}:{worker:owner.worker}),
+session:owner.session};
+const token=randomBytes(16).toString("hex");
+const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
+const code=`{
+const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
+const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
+console.log(JSON.stringify(await activation.claimServeExisting(globalThis,nodeRepl.requestMeta,${J(expected)},${J(token)})));
+}`;
+let serve=(owner.worker_pool_sha256?buildPoolServe:buildResidentServe)(trusted,owner.parent,owner.owner);
+const guard='if(o.used)throw Error("Serve consumed");';
+if(!serve.includes(guard))throw Error("Serving claim missing");
+serve=serve.replace(guard,'if(o.used!==true||o.serveInvocation!==undefined||o.serveExistingClaim!=='+J(token)+')throw Error("Serve consumed");');
+const prelude=`// @exec: {"yield_time_ms":1000}
+const claim=await tools.mcp__node_repl__js(${J({code,timeout_ms:60000,title:"Guarded serve-existing claim"})});
+if(claim?.isError===true||claim?.content?.length!==1||claim.content[0].type!=="text"||JSON.parse(claim.content[0].text)?.claimed!==true)throw Error("Serve-existing claim uncertain; preserve session");
+`;
+return {kind:"native_serve_existing_packet",lifecycle:residentLifecycle,
+session:owner.session,generation:owner.generation,calls:{serve:prelude+serve}};
+}
+
 function buildPoolServe(trusted,parent,attempt){
 const base=J(trusted);
 const capacity=Number.isInteger(trusted.maxConcurrentRequests)?trusted.maxConcurrentRequests:
@@ -689,6 +760,11 @@ const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
 console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.requestMeta,
 ${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
 }`;
+return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,worker,trusted,pins,
+openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));",serve:buildResidentServe(trusted,parent,attempt)}};
+}
+
+function buildResidentServe(trusted,parent,attempt){
 const serve=`// @exec: {"yield_time_ms":1000}
 text(${J({kind:"resident_supervision_required",admissionObserved:false,lifecycle:residentLifecycle})});
 const host=tools;
@@ -818,8 +894,7 @@ if(failure)throw failure;
 }
 }
 `;
-return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,worker,trusted,pins,
-openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));",serve:joinedServe(serve,attempt)}};
+return joinedServe(serve,attempt);
 }
 
 async function clientPreflight(path){
@@ -1757,6 +1832,8 @@ descriptorSha256:args[14],auditSha256:args[15],
 requestId:args[16],commandSha256:args[17],promptSha256:args[18]
 }}:{})
 });
+else if(action==="resident-serve-existing-packet"&&args.length===1)
+result=await serveExistingPacket(args[0]);
 else if(action==="resident-stop"&&args.length===1)
 result=await residentStop(args[0]);
 else if(action==="resident-handoff-packet"&&args.length===1)

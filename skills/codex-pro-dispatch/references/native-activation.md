@@ -297,6 +297,38 @@ packet's `calls.serve` once, in the same native task/turn. Preserve its cell ID
 and follow the packet's `lifecycle` contract. Opening alone does not mean ready;
 `ready` here is the canonical start disposition, not listener availability.
 
+If open succeeded but its generated serving body was lost **before any serving
+attempt**, the sole recovery path is:
+
+```sh
+node "$ACT" resident-serve-existing-packet "$SESSION_DIRECTORY"
+```
+
+Execute only the returned `calls.serve`, once, verbatim through outer
+`functions.exec` in the original native owner task and turn. This packet has no
+open action. It retains the original socket object, descriptor and turn binding;
+it never reopens, rebinds, takes ownership, changes workers or replays a request.
+The updated activation module and helper must resolve to the same physical
+installation as the retained descriptor. Do not mix candidate and installed paths.
+
+Execution first checks the retained native state, then permanently fences the
+attempt before awaiting anything. Under the canonical lock it verifies the exact
+owner, generation and session, all idle slots, no active assignment, invocation,
+claim or cooldown, and the pristine `session.json` plus `wake.sock` inventory.
+The pinned transport cannot accept a request before a receive/readiness write;
+any admission object, readiness, ticket, command, request, audit, failure or
+unknown session artifact rejects recovery. It creates one exclusive durable
+`resident-serve-existing.json` claim without changing canonical or request files.
+Concurrent, duplicate, missing, malformed or uncertain evidence fails closed.
+A lost claim reply consumes recovery too. Preserve the claim and native state;
+never delete evidence, reset `used`, reconstruct the socket, change the turn
+binding, regenerate ordinary startup as a workaround, or retry an attempted
+serve. A lost native runtime or a new owner turn is ineligible.
+
+This exception only regenerates the never-started serving action. The original
+no-replay and collect-only rules remain in effect. Supervise the returned serve
+cell exactly as below; packet generation and claim success are not readiness.
+
 Resident service owns the dedicated Codex turn until shutdown. A yielded
 `functions.exec` cell is not a detached daemon: ending the owner turn can stop
 its native calls even if the cell still appears to run. Give the session path

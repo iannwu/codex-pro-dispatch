@@ -14,7 +14,8 @@ const J=JSON.stringify,mcp=v=>({content:[{type:"text",text:J(v)}]});
 const pause=()=>new Promise(r=>setTimeout(r,10));
 async function until(check){for(let i=0;i<1000;i++){if(await check())return;await pause();}throw Error("Fixture deadline");}
 
-test("native handoff requires old context, real target and returned serve cleanup",async t=>{
+for(const recover of [false,true])
+test("native handoff requires old context, real target and returned serve cleanup"+(recover?" after two-slot lost-body recovery":""),async t=>{
  const d=await fs.realpath(await fs.mkdtemp(tmpdir()+"/handoff-"));
  const previous=process.env.CODEX_PRO_DISPATCH_HOME;
  process.env.CODEX_PRO_DISPATCH_HOME=d+"/authority";
@@ -69,16 +70,22 @@ e=Path(${J(d+"/proof.json")})
 e.write_text(json.dumps(dict(kind='legacy_quiescence',config_dir=str(p.config_dir),state_dir=str(p.state_dir),implementation='fixture',observations='isolated fixture',authorization='unit test',physical_quiescence=True)))
 e.chmod(0o600)
 h=hashlib.sha256(e.read_bytes()).hexdigest()
-core.activate_worker_pool([dict(slot='slot-a',conversation_id='worker-a',label='A',model_confirmation='user-confirmed-worker',configured_at='fixture')],expected_legacy_sha256=hashlib.sha256(p.worker_file.read_bytes()).hexdigest(),evidence_file=e,evidence_sha256=h,paths=p)
+core.activate_worker_pool([dict(slot='slot-a',conversation_id='worker-a',label='A',model_confirmation='user-confirmed-worker',configured_at='fixture')${recover?",dict(slot='slot-b',conversation_id='worker-b',label='B',model_confirmation='user-confirmed-worker',configured_at='fixture')":""}],expected_legacy_sha256=hashlib.sha256(p.worker_file.read_bytes()).hexdigest(),evidence_file=e,evidence_sha256=h,paths=p)
 resident.control('enroll',dict(generation=0,owner='fixture',parent=${J(P)},evidence_file=str(e),evidence_sha256=h),p)
 `]);
- const packet=await activation(["resident-pool-packet",P,P,'["worker-a"]',d]);
+ const packet=await activation(["resident-pool-packet",P,P,J(recover?["worker-a","worker-b"]:["worker-a"]),d]);
  await execute(packet.calls.open);
  const dir=g.parkedResident.directory;
  const barrier=dir+"/resident-joined.json";
  const handoff=await activation(["resident-handoff-packet",N]);
- serving=execute(packet.calls.serve);serving.catch(()=>{});
+ const canonicalBefore=await cli(["resident","inspect"]);
+ const retainedSocket=g.parkedSocket,retainedBinding=g.parkedBinding;
+ const servingPacket=recover?await activation(["resident-serve-existing-packet",dir]):packet;
+ serving=execute(servingPacket.calls.serve);serving.catch(()=>{});
  await until(async()=> (await fs.readdir(dir)).some(n=>n.startsWith("waiting-")));
+ assert.equal(g.parkedSocket,retainedSocket);assert.equal(g.parkedBinding,retainedBinding);
+ assert.deepEqual(await cli(["resident","inspect"]),canonicalBefore);
+ if(recover)await assert.rejects(execute(servingPacket.calls.serve),/proof failed/);
  await activation(["resident-stop",dir]);
  await until(()=>cleanupReturned);
  await fs.access(dir+"/transport-audit.json");
@@ -112,7 +119,7 @@ resident.control('enroll',dict(generation=0,owner='fixture',parent=${J(P)},evide
  await assert.rejects(execute(handoff.calls.handoff),/Resident owner replaced/);
  // A fresh native task can use ordinary open/serve after the committed handoff.
  g={};meta={threadId:N,"x-codex-turn-metadata":{turn_id:"replacement"}};
- const replacement=await activation(["resident-pool-packet",N,N,'["worker-a"]',d]);
+ const replacement=await activation(["resident-pool-packet",N,N,J(recover?["worker-a","worker-b"]:["worker-a"]),d]);
  await execute(replacement.calls.open);
  serving=execute(replacement.calls.serve);serving.catch(()=>{});
  await until(async()=> (await fs.readdir(g.parkedResident.directory)).some(n=>n.startsWith("waiting-")));
