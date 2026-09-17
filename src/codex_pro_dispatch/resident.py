@@ -479,6 +479,30 @@ def _takeover_slot_record(paths, locked, v, slot, records):
     return "collect_only", audit_binding, record
 
 
+def _takeover_quiescent(paths, locked, owner):
+    """Prove the narrow unbound case under the generation's mutation lock.
+
+    A bound session can retain a native continuation even without a socket or
+    PID. Do not infer its termination from missing physical files or a failed
+    host read. Active/uncertain receipts remain untouched and block this path.
+    Every cooperative bind, reserve, claim and arm must recheck this generation
+    under the same lock, so late old-owner work cannot escape the fence.
+    """
+    from .queue import Queue
+    locked.validate(paths)
+    if (owner["session"] is not None
+            or any(slot["phase"] != "idle" or slot["request"] is not None
+                   or slot["invocation"] is not None for slot in owner["slots"])
+            or os.path.lexists(paths.state_dir / "native-client")
+            or os.path.lexists(paths.state_dir / "wake.sock")
+            or _recovery_marker(paths, owner) is not None
+            or core.active_assignments(paths, _locked=locked)
+            or core.active_cooldown(paths, _locked=locked)
+            or any(row["state"] == "claimed" for row in Queue(paths).records(_locked=locked))):
+        return False
+    return True
+
+
 def _takeover_from_native(paths, packet):
     """Private native-packet transition.  It performs exactly one owner-file write."""
     expected = _takeover_validate_packet(packet)
@@ -497,7 +521,22 @@ def _takeover_from_native(paths, packet):
         if replacement == expected["parent"] or not matches(v, expected):
             return _takeover_result("expected_state_stale")
         host = _takeover_owner_read(packet["owner_read_text"], expected["parent"])
-        if host:
+        # Only a captured host-call failure enables this lifecycle case.
+        # Malformed, truncated or wrong-identity successful reads still fail.
+        try:
+            failure = json.loads(packet["owner_read_text"])
+            read_failed = (isinstance(failure, dict) and set(failure) == {"owner_read_failure"}
+                           and isinstance(failure["owner_read_failure"], dict)
+                           and failure["owner_read_failure"].get("isError") is True)
+        except (ValueError, RecursionError):
+            read_failed = False
+        if host == "old_owner_unreadable" and read_failed:
+            try:
+                if not _takeover_quiescent(paths, locked, v):
+                    return _takeover_result("old_owner_quiescence_unproven")
+            except (core.DispatchError, OSError):
+                return _takeover_result("old_owner_quiescence_unproven")
+        elif host:
             return _takeover_result(host)
         from .queue import Queue
         broker = Queue(paths)
@@ -549,7 +588,8 @@ def _takeover_from_native(paths, packet):
                 return _takeover_result("request_evidence_invalid")
             qualification["takeover_history"] = [*history, previous]
         qualification["takeover"] = {
-            "at": core.utc_now(), "previous_parent": v["parent"],
+            "at": core.utc_now(), "owner_read_outcome": host or "idle",
+            "previous_parent": v["parent"],
             "previous_generation": v["generation"], "previous_owner": v["owner"],
             "replacement_parent": replacement,
             "evidence_sha256": hashlib.sha256(packet["owner_read_text"].encode()).hexdigest(),

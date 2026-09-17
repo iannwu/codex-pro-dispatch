@@ -12,7 +12,15 @@ Host `idle` permits takeover, even with unresolved requests. `active` or `workin
 returns `old_owner_active`: wait for the turn to stop or let the user interrupt
 it in the desktop app. Do not interrupt, reopen, resume, or message the old task
 as part of takeover. `notLoaded` requires the user to open that task once in the
-app, without starting a turn, then retry. Unreadable or unsupported status blocks.
+app, without starting a turn, then retry. A failed host read (including a deleted
+old task) permits takeover only if the canonical lock proves the owner is
+unbound, every slot is idle with no invocation, and there is no active assignment,
+claim, cooldown, recovery marker, or conflicting physical listener evidence.
+A retained session blocks this narrow path even if its socket or process is gone.
+`old_owner_quiescence_unproven` leaves all evidence unchanged; do not restore the
+old task or clear state to bypass it. Malformed, truncated, wrong-identity reads
+and unsupported statuses still block. The generation advances atomically,
+fencing late old-owner operations. No request or receipt is rewritten.
 On `commit_unknown`, inspect canonical state before any further action.
 
 After `committed` or `already_owner`, inspect the current tuple. Run `resident

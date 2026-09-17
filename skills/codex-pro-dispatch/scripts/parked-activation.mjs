@@ -463,11 +463,13 @@ return `function value(r){if(r?.isError||r?.content?.length!==1||r.content[0].ty
 try{
 const identity=value(await tools.mcp__node_repl__js(${native(`{${header}console.log(JSON.stringify(await a.captureTakeoverIdentity(globalThis,nodeRepl.requestMeta,${J(expected)})));}`,"Capture takeover identity")}));
 if(identity.outcome==="already_owner"){text(identity);}else{
-const read=await tools.mcp__codex_app__read_thread({threadId:${J(expected.parent)},turnLimit:1,includeOutputs:false});
-if(read?.isError||read?.truncated===true||read?.textTruncated===true||read?.content?.length!==1||read.content[0].type!=="text"||typeof read.content[0].text!=="string")text({ok:false,outcome:"old_owner_unreadable",send_authorized:false});
-else{const raw=read.content[0].text;
+let read;
+try{read=await tools.mcp__codex_app__read_thread({threadId:${J(expected.parent)},turnLimit:1,includeOutputs:false});}
+catch(e){read={isError:true,error:String(e?.message||e)};}
+const unreadable=read?.isError||read?.truncated===true||read?.textTruncated===true||read?.content?.length!==1||read.content[0].type!=="text"||typeof read.content[0].text!=="string";
+const raw=read?.isError?JSON.stringify({owner_read_failure:read}):unreadable?JSON.stringify(read??null):read.content[0].text;
 const commitCode='{'+${J(header)}+'console.log(JSON.stringify(await a.commitNativeTakeover(globalThis,nodeRepl.requestMeta,'+${J(J(expected))}+','+JSON.stringify(raw)+',nodeRepl.tmpDir)));}';
-text(value(await tools.mcp__node_repl__js({code:commitCode,timeout_ms:60000,title:"Commit takeover"})));}}}catch(e){if(!String(e?.message||e).includes("identity_invalid"))throw e;text({ok:false,outcome:"identity_invalid",send_authorized:false});}`;
+text(value(await tools.mcp__node_repl__js({code:commitCode,timeout_ms:60000,title:"Commit takeover"})));}}catch(e){if(!String(e?.message||e).includes("identity_invalid"))throw e;text({ok:false,outcome:"identity_invalid",send_authorized:false});}`;
 }
 
 async function takeoverPacket(){

@@ -45,10 +45,126 @@ class TakeoverTests(unittest.TestCase):
                 "expected": {key: owner[key] for key in ("generation", "owner", "parent", "worker_pool_sha256")},
                 "owner_read_text": raw, "evidence_path": str(evidence)}
 
-    def test_T5_idle_commit_fences_old_owner_and_accepts_only_one_racer(self):
+    def unreadable_packet(self, owner, **kwargs):
+        packet = self.packet(owner, **kwargs)
+        packet["owner_read_text"] = json.dumps({"owner_read_failure": {
+            "isError": True, "error": "Task not found"}})
+        Path(packet["evidence_path"]).write_text(packet["owner_read_text"])
+        return packet
+
+    def test_deleted_owner_quiescent_commit_preserves_records_and_fences_old_generation(self):
         owner, old = self._enrolled_owner()
-        packet = self.packet(owner)
-        packets = [packet, self.packet(owner, replacement="01a0ac4b-313b-7f33-9ca0-f76d994ef745")]
+        # Retain durable terminal receipt and queued request evidence.
+        self.claimed(old, status="prepared")
+        with self.caller(dict(old, invocation="inv-request", request="request")):
+            core.abandon_assignment("request", reason="fixture", paths=self.paths)
+            Queue(self.paths).release("request", "parent")
+        owner = self.current()
+        owner["slots"][0].update(request=None, invocation=None, phase="idle")
+        self.write_fixture(self.paths.state_dir / "resident-owner.json", owner)
+        Queue(self.paths).submit("queued", b"untouched", "client")
+        before = self.snapshot()
+        result = resident._takeover_from_native(self.paths, self.unreadable_packet(owner))
+        self.assertEqual(result["outcome"], "committed")
+        self.assertFalse(result["send_authorized"])
+        self.assertEqual(result["collect_only"], [])
+        self.assertEqual(result["cancel_prepared"], [])
+        after = self.snapshot()
+        self.assertEqual({k: v for k, v in before.items() if k != "resident-owner.json"},
+                         {k: v for k, v in after.items() if k != "resident-owner.json"})
+        self.assertEqual(self.current()["generation"], owner["generation"] + 1)
+        self.assertFalse(resident.matches(self.current(), old))
+        for action in ("start", "begin", "bind-session"):
+            with self.subTest(action=action), self.assertRaises(core.DispatchError):
+                resident.control(action, dict(old, invocation="late", request="queued"), self.paths)
+
+    def test_unreadable_owner_busy_or_uncertain_evidence_is_write_free(self):
+        for status in ("prepared", "armed", "submitted", "indeterminate"):
+            with self.subTest(status=status):
+                if status != "prepared":
+                    self.tearDown()
+                    self.setUp()
+                owner, old = self._enrolled_owner()
+                self.claimed(old, status=status)
+                before = self.snapshot()
+                result = resident._takeover_from_native(self.paths, self.unreadable_packet(owner))
+                self.assertEqual(result["outcome"], "old_owner_quiescence_unproven")
+                self.assertEqual(self.snapshot(), before)
+
+    def test_unreadable_owner_idle_slots_do_not_hide_active_receipt(self):
+        owner, old = self._enrolled_owner()
+        self.claimed(old, status="indeterminate")
+        current = self.current()
+        for slot in current["slots"]:
+            slot.update(request=None, invocation=None, phase="idle")
+        self.write_fixture(self.paths.state_dir / "resident-owner.json", current)
+        before = self.snapshot()
+        self.assertEqual(resident._takeover_from_native(
+            self.paths, self.unreadable_packet(owner))["outcome"],
+            "old_owner_quiescence_unproven")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unreadable_owner_bound_continuation_blocks_even_without_socket(self):
+        owner, _ = self._enrolled_owner()
+        directory, _ = fixtures.ThreeFeatureTests._bind_session(self, owner)
+        for physical in ("missing", "socket", "process"):
+            with self.subTest(physical=physical):
+                if physical == "socket":
+                    (directory / "wake.sock").touch()
+                if physical == "process":
+                    (directory / "listener.pid").write_text(str(os.getpid()))
+                before = self.snapshot()
+                self.assertEqual(resident._takeover_from_native(
+                    self.paths, self.unreadable_packet(owner))["outcome"],
+                    "old_owner_quiescence_unproven")
+                self.assertEqual(self.snapshot(), before)
+
+    def test_unreadable_owner_conflicting_physical_evidence_blocks(self):
+        owner, _ = self._enrolled_owner()
+        for name in ("wake.sock", "native-client"):
+            path = self.paths.state_dir / name
+            path.touch()
+            before = self.snapshot()
+            if name == "native-client":
+                with self.assertRaises(core.StateError):
+                    resident._takeover_from_native(self.paths, self.unreadable_packet(owner))
+            else:
+                self.assertEqual(resident._takeover_from_native(
+                    self.paths, self.unreadable_packet(owner))["outcome"],
+                    "old_owner_quiescence_unproven")
+            self.assertEqual(self.snapshot(), before)
+            path.unlink()
+
+    def test_unreadable_owner_cooldown_or_inconclusive_check_blocks(self):
+        owner, _ = self._enrolled_owner()
+        for value in ({"cooldown_until": "future"}, core.StateError("bad receipt")):
+            with patch.object(core, "active_cooldown", **(
+                    {"side_effect": value} if isinstance(value, Exception) else {"return_value": value})):
+                before = self.snapshot()
+                self.assertEqual(resident._takeover_from_native(
+                    self.paths, self.unreadable_packet(owner))["outcome"],
+                    "old_owner_quiescence_unproven")
+                self.assertEqual(self.snapshot(), before)
+
+    def test_unreadable_owner_revalidates_slots_after_packet_capture(self):
+        owner, old = self._enrolled_owner()
+        packet = self.unreadable_packet(owner)
+        self.claimed(old, status="armed")
+        before = self.snapshot()
+        self.assertEqual(resident._takeover_from_native(self.paths, packet)["outcome"],
+                         "old_owner_quiescence_unproven")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_T5_idle_commit_fences_old_owner_and_accepts_only_one_racer(self):
+        self.race_takeovers(self.packet)
+
+    def test_deleted_owner_commit_accepts_only_one_racer(self):
+        self.race_takeovers(self.unreadable_packet)
+
+    def race_takeovers(self, make_packet):
+        owner, old = self._enrolled_owner()
+        packet = make_packet(owner)
+        packets = [packet, make_packet(owner, replacement="01a0ac4b-313b-7f33-9ca0-f76d994ef745")]
         barrier = threading.Barrier(2)
         acquire = core.state_lock
         @contextmanager
