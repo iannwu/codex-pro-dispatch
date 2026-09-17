@@ -328,6 +328,28 @@ small integrity-pinned relay; the trusted installed module owns the serving loop
 No generated serving source is evaluated. Each emitted host call is settled once.
 A missing or changed installed module fails closed before the claim.
 
+The native REPL is a shared execution lane. Pool admission uses a 25-second
+observation when no job is running, and a 250-millisecond observation while a
+job needs that lane. This bounds idle-sibling blocking of owner checks, evidence
+writes and result publication. It does not change the winning claimant's
+publication deadline, the admission expiry detector or the Pro observation
+budget. The existing outer execution drives these observations; there is no
+new daemon, timer that renews itself, or coordinator notification.
+
+Each history read saves its original tool envelope and extracted history in
+one native call. They remain separate exclusive 0600 files, individually synced,
+with a directory sync before the helper may arm or observe. An uncertain write
+acknowledgment requires verification of both files and never authorizes a send
+retry. Pooled native evidence and transport calls check owner identity inside
+that same call, before performing the operation.
+
+A client's rendezvous returns after observation and publication, so a delayed
+return is not evidence of a delayed ChatGPT answer. For latency qualification,
+compare command observation, pre-send history, arm, actual ChatGPT user/answer
+turns, post-send history, evidence persistence and publication separately.
+Run the complete generated driver through one outer `functions.exec`; do not
+manually step its individual relay calls between model turns.
+
 Execute only the returned `calls.serve`, once, verbatim through outer
 `functions.exec` in the original native owner task. This packet has no open
 action. It retains the original socket object and descriptor. After the claim

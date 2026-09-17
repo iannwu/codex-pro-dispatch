@@ -161,8 +161,9 @@ const runParkedJob = async function runParkedJob(config, requestId) {
     return value;
   }
 
-  async function evidence(raw) {
+  async function evidence(raw, companion) {
     if (typeof raw !== "string") throw Error("Evidence must be returned text");
+    if (companion !== undefined && typeof companion !== "string") throw Error("Evidence must be returned text");
     if (directory === null) {
       const code = `{
 const fs=await import("node:fs/promises");
@@ -177,6 +178,7 @@ console.log(JSON.stringify({directory:await fs.realpath(created)}));
       directory = created.directory;
     }
     const path = directory + "/evidence-" + (++sequence) + ".json";
+    const companionPath = companion === undefined ? null : directory + "/evidence-" + (++sequence) + ".json";
     const code = `{
 const fs=await import("node:fs/promises");
 const path=${JSON.stringify(path)};
@@ -184,6 +186,9 @@ const raw=${JSON.stringify(raw)};
 const handle=await fs.open(path,"wx",0o600);
 try { await handle.writeFile(raw,"utf8"); await handle.sync(); }
 finally { await handle.close(); }
+${companionPath === null ? "" : `const second=await fs.open(${JSON.stringify(companionPath)},"wx",0o600);
+try { await second.writeFile(${JSON.stringify(companion)},"utf8"); await second.sync(); }
+finally { await second.close(); }`}
 const parent=await fs.open(${JSON.stringify(directory)},"r");
 try { await parent.sync(); } finally { await parent.close(); }
 console.log(JSON.stringify({path}));
@@ -193,7 +198,7 @@ console.log(JSON.stringify({path}));
     });
     let saved;
     try { saved = JSON.parse(nativeText(ack)); } catch { saved = null; }
-    if (saved?.path === path) return path;
+    if (saved?.path === path) return companionPath ?? path;
     // The exclusive write may have completed although its acknowledgment did
     // not decode. Never rewrite it; confirm the exact bytes and sync the file
     // and its directory, and stop when durability still cannot be confirmed.
@@ -207,6 +212,9 @@ try {
   if (await handle.readFile("utf8")!==raw) throw Error("Evidence bytes differ");
   await handle.sync();
 } finally { await handle.close(); }
+${companionPath === null ? "" : `const second=await fs.open(${JSON.stringify(companionPath)},"r");
+try { if(await second.readFile("utf8")!==${JSON.stringify(companion)}) throw Error("Evidence bytes differ"); await second.sync(); }
+finally { await second.close(); }`}
 const parent=await fs.open(${JSON.stringify(directory)},"r");
 try { await parent.sync(); } finally { await parent.close(); }
 console.log(JSON.stringify({verified:true}));
@@ -220,7 +228,7 @@ console.log(JSON.stringify({verified:true}));
       });
     }
     trace.push({ kind: "evidence_verified", path });
-    return path;
+    return companionPath ?? path;
   }
 
   async function read() {
@@ -230,17 +238,19 @@ console.log(JSON.stringify({verified:true}));
     const response = await tools.mcp__codex_app__read_thread({
       threadId: workerId(), turnLimit: 2, maxOutputCharsPerItem: 20000
     });
-    // The original envelope and operation identity are preserved before any
-    // extraction; the extracted history bytes follow for the helper.
-    const envelope = await evidence(JSON.stringify({
+    // Preserve the original envelope and operation identity alongside the
+    // extracted history bytes before handing either to the helper.
+    const envelope = JSON.stringify({
       operation: "read_thread", request_id: requestId, phase,
       worker_conversation_id: workerId(), startedAt, returnedAt: Date.now(),
       result: response
-    }));
+    });
     let raw;
     try { raw = nativeText(response); }
-    catch (error) { error.evidence = envelope; throw error; }
-    const path = await evidence(raw);
+    catch (error) { error.evidence = await evidence(envelope); throw error; }
+    // Keep both original envelope and extracted bytes, with one native write
+    // call and one parent-directory sync. Nothing arms until both are durable.
+    const path = await evidence(envelope, raw);
     let value;
     try { value = JSON.parse(raw); }
     catch { throw problem("Native inner history is not JSON", { path }); }
@@ -608,7 +618,14 @@ async function checked(fn,a,readOnly=false){
 await native('if(o.binding!==globalThis.parkedBinding||nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");console.log("{}");');
 try{const r=await fn(a);if(!readOnly&&r?.isError===true)nativeUncertain=true;return r;}catch(e){if(!readOnly)nativeUncertain=true;throw e;}
 }
-const tools={...host,mcp__codex_app__read_thread:a=>checked(x=>host.mcp__codex_app__read_thread(x),a,true),mcp__codex_app__send_message_to_thread:a=>checked(x=>host.mcp__codex_app__send_message_to_thread(x),a),mcp__node_repl__js:a=>checked(x=>host.mcp__node_repl__js(x),a)};
+// Native evidence/transport operations can validate ownership inside the same
+// REPL call. Keep the guard before the operation, without an extra host trip.
+async function checkedNative(a){
+const guard="{"+identity+'if(o.binding!==globalThis.parkedBinding||nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");}';
+try{const r=await host.mcp__node_repl__js({...a,code:guard+"\n"+a.code});if(r?.isError===true)nativeUncertain=true;return r;}
+catch(e){nativeUncertain=true;throw e;}
+}
+const tools={...host,mcp__codex_app__read_thread:a=>checked(x=>host.mcp__codex_app__read_thread(x),a,true),mcp__codex_app__send_message_to_thread:a=>checked(x=>host.mcp__codex_app__send_message_to_thread(x),a),mcp__node_repl__js:checkedNative};
 const {describeFailure,runParkedJob,runParkedDelivery}=createRunner(tools,text);
 
 
@@ -686,7 +703,7 @@ if(stopped)break;
 await command(["resident","check",JSON.stringify(owner.credentials)]);
 let next;
 do{next=await native(`console.log(JSON.stringify(await o.activation.residentAdmission(globalThis,nodeRepl.requestMeta,
-${JSON.stringify(invocationRoot)},${ordinal})));`);}while(next.pending===true);
+${JSON.stringify(invocationRoot)},${ordinal},undefined,${inflight.some(job=>job.pending)})));`);}while(next.pending===true);
 if(next.stopped){stopped=true;break;}
 const invocation=invocationRoot+"-"+ordinal;
 // Begin reserves the slot before receive. parked-client submit runs after

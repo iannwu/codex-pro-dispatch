@@ -145,6 +145,12 @@ if(mode==="replacementlost"&&a.title==="Replace consumed unused serving session"
 if(mode==="evidenceerror"&&!s.evidenceError&&a.title==="Preserve native evidence"){
 s.evidenceError=true;return {isError:true,content:[{type:"text",text:lines.join("\n")}]};
 }
+if(mode==="evidencepartial"&&!s.evidenceError&&a.title==="Preserve native evidence"&&a.code.includes("const second=")){
+s.evidenceError=true;
+const path=JSON.parse(/const second=await fs.open\((.*),"wx",0o600\)/.exec(a.code)[1]);
+await fs.unlink(path); // Simulate an envelope surviving without its history.
+return {isError:true,content:[]};
+}
 return {content:[{type:"text",text:lines.join("\n")}]};
 },
 async exec_command(a){
@@ -1257,6 +1263,71 @@ f.meta["x-codex-turn-metadata"].turn_id="later-owner-turn";
 const p=await f.recovery(),serving=f.serve(p.calls.serve);
 await f.idle(1);assert(f.s.repls>3);
 await f.stop();await serving;assert.deepEqual(f.s.sends,[]);
+});
+
+test("compact pool dispatch is not queued behind an idle sibling on a serialized native host",async t=>{
+const f=await fixture(t,"poolturn");await f.open();
+const native=f.tools.mcp__node_repl__js;
+let tail=Promise.resolve();
+const batches=[];
+// Real native REPL calls share one execution lane. The old fixture ran them
+// concurrently and hid the 25-second admission wait before each evidence call.
+f.tools.mcp__node_repl__js=args=>{
+const result=tail.then(async()=>{
+if(args.title==="Preserve native evidence"&&args.code.includes("const second="))batches.push(args.code);
+return native(args);
+});
+
+tail=result.catch(()=>{});return result;
+};
+const packet=await f.recovery(),serving=f.serve(packet.calls.serve);
+await f.idle(1);
+let timer;
+try{
+const result=await Promise.race([
+f.start(1,"latency-A"),
+new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("dispatch blocked by idle admission")),15000);})
+]);
+assert.equal(result.ok,true);
+assert.deepEqual(f.s.sends,["latency-A"]);
+assert.equal(batches.length,2,"pre-send and post-send reads each persist one evidence batch");
+for(const code of batches){
+const path=JSON.parse(/const path=(.*);/.exec(code)[1]);
+const rawPath=JSON.parse(/const second=await fs.open\((.*),"wx",0o600\)/.exec(code)[1]);
+const envelope=JSON.parse(await fs.readFile(path,"utf8"));
+assert.equal(await fs.readFile(rawPath,"utf8"),envelope.result.content[0].text);
+assert.equal((await fs.stat(path)).mode&0o777,0o600);
+assert.equal((await fs.stat(rawPath)).mode&0o777,0o600);
+}
+}finally{clearTimeout(timer);await f.stop();await serving;await tail;}
+});
+
+test("incomplete evidence batch never arms or sends",async t=>{
+const f=await fixture(t,"evidencepartial");await f.open();
+const serving=f.serve();await f.idle(1);
+const [served]=await Promise.allSettled([serving,f.start(1,"partial-evidence")]);
+assert.equal(served.status,"rejected");
+assert(f.s.evidenceError);
+assert.deepEqual(f.s.sends,[]);
+assert.equal((await f.cli(["status","partial-evidence"])).assignment.status,"prepared");
+});
+
+test("pooled evidence validates owner in the write call before arming",async t=>{
+const f=await fixture(t,"poolturn");await f.open();
+const native=f.tools.mcp__node_repl__js;
+let changed=false;
+f.tools.mcp__node_repl__js=async args=>{
+if(!changed&&args.title==="Preserve native evidence"){
+changed=true;f.g.parkedBinding=Object.freeze({...f.g.parkedBinding});
+}
+return native(args);
+};
+const packet=await f.recovery(),serving=f.serve(packet.calls.serve);
+await f.idle(1);
+const [served]=await Promise.allSettled([serving,f.start(1,"changed-owner")]);
+assert.equal(served.status,"rejected");assert(changed);
+assert.deepEqual(f.s.sends,[]);
+assert.equal((await f.cli(["status","changed-owner"])).assignment.status,"prepared");
 });
 
 for(const scenario of ["retained","legacy queued","canonical changed","missing legacy call"])

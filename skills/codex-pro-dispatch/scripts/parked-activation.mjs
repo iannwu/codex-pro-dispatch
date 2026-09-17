@@ -36,7 +36,7 @@ onCompletion:"Verify the original serve outcome and cleanup evidence before fina
 // writes; neither verifies a model. The literals stay inline because several
 // gate functions are serialized into packets and cannot see module scope.
 const pins={
-  "parked-runner.js":"f1ae66955f638262bd5a1d20655eca0fb90813264efebcc133650d3a2d214acc",
+  "parked-runner.js":"310e6c48254a116a7df0587dc39aea12a51d140f6f4f77d34bf99f2979539d3a",
 "parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
 "parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
 };
@@ -48,7 +48,7 @@ createHash("sha256").update(raw).digest("hex")!==hash)
 throw Error("Pinned script mismatch: "+name);
 sources[name]=raw.toString("utf8");
 }
-const servingPath=join(dir,"parked-serving.mjs"),servingHash="e078139f76aa5f895a642b3f3e9120944769ec3f58e72abdbc0bc303bd3cd6da";
+const servingPath=join(dir,"parked-serving.mjs"),servingHash="37e650554e74be1aed7fbbbb130db2adfe8f5efd344d7e3011074f97d54d2389";
 if(await fs.realpath(servingPath)!==servingPath||createHash("sha256").update(await fs.readFile(servingPath)).digest("hex")!==servingHash)
 throw Error("Pinned serving module mismatch");
 const {createRunner,servePool,serveResident}=await import(pathToFileURL(servingPath).href+"?sha256="+servingHash);
@@ -1507,7 +1507,7 @@ reason:e.code==="ENOENT"?"evidence_missing_or_changed":"evidence_unverifiable"};
 }
 }
 
-async function residentNext(directory,ordinal,signal){
+async function residentNext(directory,ordinal,signal,observationMs=25000){
 const c=await rendezvousSession(directory,ordinal,"resident-next");
 if(c.resident!==true||c.helper!==helper)throw Error("Resident mismatch");
 await absent(directory+"/ready-"+ordinal+".json");
@@ -1523,7 +1523,7 @@ return claimed;
 try{
 choice=await new Promise((resolve,reject)=>{
 let done=false,busy=false,again=false,deferred=false,bound,elapsed=false,outcome;
-const observation=setTimeout(()=>{elapsed=true;again=true;void check();},25000);
+const observation=setTimeout(()=>{elapsed=true;again=true;void check();},observationMs);
 const abort=()=>{
 clearInterval(beat);
 withdrawal=retire();withdrawal.catch(()=>{});
@@ -1597,7 +1597,7 @@ return {sessionId:c.sessionId,command:choice.v,attempt:choice.attempt};
 
 // One native writer and one awaited owner. The detector is renewed by outer
 // calls, never by a background heartbeat. It only covers admission, not Pro.
-export async function residentAdmission(g,meta,invocation,ordinal,next){
+export async function residentAdmission(g,meta,invocation,ordinal,next,workActive=false){
 const o=g.parkedResident;
 if(!o||!o.used||o.serveInvocation!==invocation||o.socket!==g.parkedSocket||
 o.binding!==g.parkedBinding||JSON.stringify(o.socket.config)!==o.descriptor||
@@ -1646,7 +1646,11 @@ a.failure.catch(()=>{}); // Preserved and joined by owner cleanup, never retried
 clearTimeout(a.timer);a.deadlineAt=Date.now()+60000;
 a.timer=setTimeout(a.expire,60000);
 a.work=(async()=>{
-if(next===undefined)return await residentNext(o.directory,ordinal,controller.signal);
+// The native REPL serializes calls. Do not hold it for an idle 25-second
+// observation while a sibling needs it to send, save evidence or publish.
+// Only the outer serving loop chooses this bounded observation; it neither
+// renews admission in the background nor changes the command publication bound.
+if(next===undefined)return await residentNext(o.directory,ordinal,controller.signal,workActive?250:25000);
 if(next.sessionId!==o.socket.config.sessionId||next.command?.ordinal!==ordinal)
 throw Error("Resident command mismatch");
 // The selected immutable command must still exist. Never start another long

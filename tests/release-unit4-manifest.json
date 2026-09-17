@@ -50,9 +50,18 @@
     },
     "reason": "Raw native envelopes preserved with operation identity before decoding; ambiguous evidence writes confirmed by bytes plus file and directory sync or stopped; acknowledgments limited to evidenced variants; outer resident failure reconciles unresolved receipts and drains runner-owned helpers; lost serve-claim ownership recovered by invocation token; unconfirmed close fails the service; failed residence labeled resident_failed; complete receipt publishes without staged history"
   },
+  "relay_latency_update": {
+    "previous_runtime_pins": {
+      "skills/codex-pro-dispatch/scripts/parked-runner.js": "f1ae66955f638262bd5a1d20655eca0fb90813264efebcc133650d3a2d214acc"
+    },
+    "previous_test_pins": {
+      "tests/test_parked_runner.cjs": "346d238562f9247212e86df5cae7eb297b975a08bcd82e09117572509d91a3fb"
+    },
+    "reason": "Envelope and extracted history remain separate exclusive durable files but share one native persistence call; uncertain acknowledgments verify both. Real-CLI fixture copies every newly persisted file. Live latency qualification remains required."
+  },
   "runtime": {
     "skills/codex-pro-dispatch/scripts/parked-client.mjs": "45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072",
-    "skills/codex-pro-dispatch/scripts/parked-runner.js": "f1ae66955f638262bd5a1d20655eca0fb90813264efebcc133650d3a2d214acc",
+    "skills/codex-pro-dispatch/scripts/parked-runner.js": "310e6c48254a116a7df0587dc39aea12a51d140f6f4f77d34bf99f2979539d3a",
     "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7"
   },
   "schema_version": 1,
@@ -130,7 +139,7 @@
         "cross-realm and non-Error failures serialize structurally"
       ],
       "pin_origin": "reviewed resident-failure repair; raw_before_decode, evidence verification, evidenced acknowledgment variants, structural failures",
-      "sha256": "346d238562f9247212e86df5cae7eb297b975a08bcd82e09117572509d91a3fb"
+      "sha256": "06dd12e741c4661524b8cf76619a10a9c7c3c4081e3e14613030474ae46cdb7b"
     },
     "tests/test_parked_socket.mjs": {
       "cases": [

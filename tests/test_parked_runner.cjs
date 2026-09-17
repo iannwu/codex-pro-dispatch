@@ -609,10 +609,15 @@ test("real CLI fences a replaced session and completes only on its new stable wo
     const save = f.tools.mcp__node_repl__js;
     f.tools.mcp__node_repl__js = async args => {
       if (args.code.includes("mkdtemp(")) return native(JSON.stringify({ directory: evidenceDir }));
+      const before = new Set(f.files.keys());
       const result = await save(args);
       const target = JSON.parse(result.content[0].text).path;
       assert.equal(path.dirname(target), evidenceDir);
-      fs.writeFileSync(target, f.files.get(target), { flag: "wx", mode: 0o600 });
+      for (const [saved, bytes] of f.files) {
+        if (before.has(saved)) continue;
+        assert.equal(path.dirname(saved), evidenceDir);
+        fs.writeFileSync(saved, bytes, { flag: "wx", mode: 0o600 });
+      }
       return result;
     };
     f.tools.mcp__codex_app__read_thread = async args => {
