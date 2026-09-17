@@ -1117,7 +1117,8 @@ const f=await fixture(t);await f.open();const p=await f.recovery();
 const o=f.g.parkedResident;
 const cases=[
 [f.meta,"threadId","foreign"],
-[f.meta["x-codex-turn-metadata"],"turn_id","foreign-turn"],
+[f.meta["x-codex-turn-metadata"],"turn_id",undefined],
+[f.meta["x-codex-turn-metadata"],"turn_id",""],
 [o.credentials,"generation",o.credentials.generation+1],
 [o.credentials,"owner","foreign"],
 [o,"directory",f.d],
@@ -1161,6 +1162,7 @@ f.g.parkedSocket.close("unit_cleanup").catch(()=>{});
 
 test("lost serve-existing claim reply never enters serving and cannot retry",async t=>{
 const f=await fixture(t,"serveclaimlost"),directory=await f.open(),p=await f.recovery();
+f.meta["x-codex-turn-metadata"].turn_id="later-claim-turn";
 const before=await f.cli(["resident","inspect"]);
 await assert.rejects(f.serve(p.calls.serve),/claim uncertain/);
 assert.equal(f.g.parkedResident.used,true);
@@ -1168,6 +1170,7 @@ assert.equal(f.g.parkedResident.serveInvocation,undefined);
 assert.equal(f.g.parkedResident.admission,undefined);
 assert.deepEqual((await fs.readdir(directory)).sort(),["resident-serve-existing.json","session.json","wake.sock"]);
 const token=f.g.parkedResident.serveExistingClaim;
+f.meta["x-codex-turn-metadata"].turn_id="still-later-turn";
 await assert.rejects(f.serve(p.calls.serve),/claim uncertain/);
 assert.equal(f.g.parkedResident.serveExistingClaim,token);
 assert.deepEqual(await f.cli(["resident","inspect"]),before);
@@ -1190,16 +1193,34 @@ assert.deepEqual(f.s.sends,[]);
 });
 }
 
-test("compact claim reports changed owner turn as text without consuming a fence",async t=>{
+test("compact claim reports foreign task as text without consuming a fence",async t=>{
 const f=await fixture(t,"servehostguarderror"),directory=await f.open(),p=await f.recovery();
 assert(Buffer.byteLength(p.calls.serve)<6144);
 assert(!/eval\s*\(|new Function/.test(p.calls.serve));
 f.meta["x-codex-turn-metadata"].turn_id="next-owner-turn";
-await assert.rejects(f.serve(p.calls.serve),/owner turn changed/);
+f.meta.threadId="foreign-task";
+await assert.rejects(f.serve(p.calls.serve),/proof failed/);
 assert.equal(f.g.parkedResident.used,false);
 assert.equal(f.g.parkedResident.serveExistingClaim,undefined);
 assert.equal(f.s.suppressedNativeError,undefined,"guard error must survive a host that drops thrown errors");
 await missing(directory+"/resident-serve-existing.json");
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("same owner later-turn recovery retains socket and canonical identity",async t=>{
+const f=await fixture(t),directory=await f.open(),p=await f.recovery();
+const before=await f.cli(["resident","inspect"]),socket=f.g.parkedSocket,binding=f.g.parkedBinding;
+f.meta["x-codex-turn-metadata"].turn_id="later-owner-turn";
+const serving=f.serve(p.calls.serve);await f.idle(1);
+assert.equal(f.g.parkedSocket,socket);
+assert.equal(binding.turn,"unit-turn");
+assert.equal(f.g.parkedResident.binding,f.g.parkedBinding);
+assert.deepEqual(f.g.parkedBinding,{broker:P,turn:"later-owner-turn"});
+assert(Object.isFrozen(f.g.parkedBinding));
+assert.deepEqual(await f.cli(["resident","inspect"]),before);
+await fs.lstat(directory+"/resident-serve-existing.json");
+await assert.rejects(f.serve(p.calls.serve),/proof failed/);
+await f.stop();await serving;
 assert.deepEqual(f.s.sends,[]);
 });
 

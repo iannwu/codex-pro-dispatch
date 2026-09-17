@@ -493,18 +493,17 @@ const sourceHash=createHash("sha256").update(await fs.readFile(fileURLToPath(imp
 return {kind:"native_takeover_packet",sendAuthorized:false,expected,calls:{takeover:buildTakeoverCall(expected,sourceHash)}};
 }
 
-// This path retains the original native object and binding. It cannot recreate
+// This path retains the original native object and socket. It cannot recreate
 // a lost runtime. Failure after the synchronous fence is permanently consumed.
 export async function claimServeExisting(g,meta,expected,token){
-const o=g.parkedResident;
-if(o?.binding&&meta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)
-throw Error("Serve-existing native proof failed: owner turn changed; preserve session");
+const o=g.parkedResident,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+const binding=o?.binding,socket=o?.socket;
 if(!o||!["socket","binding","directory","attempt","used","descriptor","credentials",
 "recover","recovery","preparedRecovery","recoveryBindings","collectOnly","activation"].every(k=>Object.hasOwn(o,k))||
 g.parkedOpenBusy!==false||g.parkedSocket!==o.socket||
 g.parkedBinding!==o.binding||g.parkedDelivery!==null||
 meta?.threadId!==expected.parent||o.binding?.broker!==expected.parent||
-meta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn||
+typeof turn!=="string"||!turn||
 typeof o.binding.turn!=="string"||!o.binding.turn||
 o.used!==false||o.serveInvocation!==undefined||o.serveExistingClaim!==undefined||
 o.admission!==undefined||o.failureRecord!==undefined||o.failureFinalRecord!==undefined||
@@ -527,10 +526,15 @@ await cli(["resident","claim-serve-existing",J(expected)]);
 // Open creates no receive waiter. The pinned socket only records request
 // events after receive(), which permanently writes ready-N. The canonical
 // claim checks the exact pristine inventory, including absence of ready-N.
-if(g.parkedResident!==o||g.parkedSocket!==o.socket||g.parkedBinding!==o.binding||
-o.used!==true||o.serveInvocation!==undefined||o.admission!==undefined||
+if(g.parkedResident!==o||g.parkedSocket!==socket||o.socket!==socket||g.parkedBinding!==binding||o.binding!==binding||
+meta?.threadId!==expected.parent||meta?.["x-codex-turn-metadata"]?.turn_id!==turn||
+o.used!==true||o.serveExistingClaim!==token||o.serveInvocation!==undefined||o.admission!==undefined||
 g.parkedDelivery!==null||J(o.socket.config)!==o.descriptor)
 throw Error("Serve-existing native proof changed; preserve claim");
+// Only a successfully fenced, pristine same-task claim may bind a later turn.
+// The original frozen binding is never mutated; all subsequent calls must
+// match the new turn, and a lost reply still leaves this claim consumed.
+if(turn!==binding.turn)o.binding=g.parkedBinding=Object.freeze({broker:expected.parent,turn});
 serveExistingRelays.set(o,{token,binding:o.binding,socket:o.socket,expected,started:false});
 return {claimed:true};
 }
