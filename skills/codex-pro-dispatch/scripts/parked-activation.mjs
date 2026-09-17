@@ -466,10 +466,16 @@ if(identity.outcome==="already_owner"){text(identity);}else{
 let read;
 try{read=await tools.mcp__codex_app__read_thread({threadId:${J(expected.parent)},turnLimit:1,includeOutputs:false});}
 catch(e){read={isError:true,error:String(e?.message||e)};}
-const unreadable=read?.isError||read?.truncated===true||read?.textTruncated===true||read?.content?.length!==1||read.content[0].type!=="text"||typeof read.content[0].text!=="string";
-const raw=read?.isError?JSON.stringify({owner_read_failure:read}):unreadable?JSON.stringify(read??null):read.content[0].text;
+const exactKeys=(v,keys)=>v!==null&&typeof v==="object"&&!Array.isArray(v)&&Object.keys(v).sort().join(",")===keys;
+const deleted=exactKeys(read,"content,isError")&&read.isError===true&&Array.isArray(read.content)&&read.content.length===1&&
+exactKeys(read.content[0],"text,type")&&read.content[0].type==="text"&&
+read.content[0].text===${J("No Codex thread found for threadId: "+expected.parent+". Hosts without a readable match: local")};
+let unreadable=read?.isError||read?.truncated===true||read?.textTruncated===true||read?.content?.length!==1||read.content[0]?.type!=="text"||typeof read.content[0]?.text!=="string";
+if(!unreadable){try{const parsed=JSON.parse(read.content[0].text);if(parsed&&Object.hasOwn(parsed,"owner_read_failure"))unreadable=true;}catch{unreadable=true;}}
+if(!deleted&&unreadable){text({ok:false,outcome:"old_owner_unreadable",send_authorized:false});}else{
+const raw=deleted?JSON.stringify({owner_read_failure:read}):read.content[0].text;
 const commitCode='{'+${J(header)}+'console.log(JSON.stringify(await a.commitNativeTakeover(globalThis,nodeRepl.requestMeta,'+${J(J(expected))}+','+JSON.stringify(raw)+',nodeRepl.tmpDir)));}';
-text(value(await tools.mcp__node_repl__js({code:commitCode,timeout_ms:60000,title:"Commit takeover"})));}}catch(e){if(!String(e?.message||e).includes("identity_invalid"))throw e;text({ok:false,outcome:"identity_invalid",send_authorized:false});}`;
+text(value(await tools.mcp__node_repl__js({code:commitCode,timeout_ms:60000,title:"Commit takeover"})));}}}catch(e){if(!String(e?.message||e).includes("identity_invalid"))throw e;text({ok:false,outcome:"identity_invalid",send_authorized:false});}`;
 }
 
 async function takeoverPacket(){

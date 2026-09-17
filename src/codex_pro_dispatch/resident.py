@@ -331,6 +331,8 @@ def _takeover_owner_read(raw, parent):
     """Validate the one unedited host read.  This intentionally knows no queue state."""
     try:
         value = json.loads(raw)
+        if "owner_read_failure" in value:
+            return "old_owner_unreadable"
         thread = value["thread"]
         if (value.get("schemaVersion") != 1 or not isinstance(thread, dict)
                 or thread.get("id") != parent or thread.get("kind") != "codex"
@@ -479,6 +481,27 @@ def _takeover_slot_record(paths, locked, v, slot, records):
     return "collect_only", audit_binding, record
 
 
+def _takeover_deleted_owner_read(raw, parent):
+    """Accept only the exact native local missing-task response, never errors in general."""
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("Duplicate host evidence key")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, RecursionError):
+        return False
+    expected = {"owner_read_failure": {"isError": True, "content": [{
+        "type": "text", "text": f"No Codex thread found for threadId: {parent}. "
+                                "Hosts without a readable match: local"}]}}
+    return (value == expected
+            and value["owner_read_failure"]["isError"] is True)
+
+
 def _takeover_quiescent(paths, locked, owner):
     """Prove the narrow unbound case under the generation's mutation lock.
 
@@ -521,16 +544,9 @@ def _takeover_from_native(paths, packet):
         if replacement == expected["parent"] or not matches(v, expected):
             return _takeover_result("expected_state_stale")
         host = _takeover_owner_read(packet["owner_read_text"], expected["parent"])
-        # Only a captured host-call failure enables this lifecycle case.
-        # Malformed, truncated or wrong-identity successful reads still fail.
-        try:
-            failure = json.loads(packet["owner_read_text"])
-            read_failed = (isinstance(failure, dict) and set(failure) == {"owner_read_failure"}
-                           and isinstance(failure["owner_read_failure"], dict)
-                           and failure["owner_read_failure"].get("isError") is True)
-        except (ValueError, RecursionError):
-            read_failed = False
-        if host == "old_owner_unreadable" and read_failed:
+        # The native missing-task response is the only deletion evidence.
+        if host == "old_owner_unreadable" and _takeover_deleted_owner_read(
+                packet["owner_read_text"], expected["parent"]):
             try:
                 if not _takeover_quiescent(paths, locked, v):
                     return _takeover_result("old_owner_quiescence_unproven")

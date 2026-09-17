@@ -12,8 +12,11 @@ Host `idle` permits takeover, even with unresolved requests. `active` or `workin
 returns `old_owner_active`: wait for the turn to stop or let the user interrupt
 it in the desktop app. Do not interrupt, reopen, resume, or message the old task
 as part of takeover. `notLoaded` requires the user to open that task once in the
-app, without starting a turn, then retry. A failed host read (including a deleted
-old task) permits takeover only if the canonical lock proves the owner is
+app, without starting a turn, then retry. Only the exact native local missing-task
+response permits the deleted-owner path: `isError: true` and a single text block saying `No Codex thread found for
+threadId: <expected old parent>. Hosts without a readable match: local`, with
+no extra fields or content. Thrown, ambiguous, mixed, truncated, contradictory,
+and malformed errors block. The canonical lock must also prove the owner is
 unbound, every slot is idle with no invocation, and there is no active assignment,
 claim, cooldown, recovery marker, or conflicting physical listener evidence.
 A retained session blocks this narrow path even if its socket or process is gone.

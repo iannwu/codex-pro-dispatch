@@ -59,7 +59,7 @@ print(json.dumps(dict(root=x.temp.name,expected=dict(generation=owner["generatio
  return fixture;
 }
 
-async function runNative(expected,directory,{changeIdentity=false,missing=false,unreadable=false,throws=false}={}) {
+async function runNative(expected,directory,{changeIdentity=false,missing=false,unreadable=false,throws=false,readResponse=undefined}={}) {
  const source=await fs.readFile(script),hash=(await import("node:crypto")).createHash("sha256").update(source).digest("hex");
  const g={},meta=missing?{}:{threadId:NEW,"x-codex-turn-metadata":{turn_id:"turn"}},calls=[],printed=[];
  const raw=' {"schemaVersion":1,"thread":{"id":'+JSON.stringify(expected.parent)+',"kind":"codex","hostId":"local","status":{"type":"idle"}}}\n';
@@ -69,8 +69,9 @@ async function runNative(expected,directory,{changeIdentity=false,missing=false,
    catch(e){return {isError:true,content:[{type:"text",text:String(e.message)}]};}
    return {content:[{type:"text",text:lines.join("\n")}]}},
   async mcp__codex_app__read_thread(arg){calls.push("read");assert.deepEqual(arg,{threadId:expected.parent,turnLimit:1,includeOutputs:false});
-   if(throws)throw Error("Task not found");
-   if(unreadable)return {isError:true,content:[{type:"text",text:"Task not found"}]};
+   if(throws)throw Error("No Codex thread found for threadId: "+expected.parent+". Hosts without a readable match: local");
+   if(readResponse!==undefined)return readResponse;
+   if(unreadable)return deletedResponse(expected.parent);
    if(changeIdentity)meta.threadId=OLD;
    return {content:[{type:"text",text:raw}]};},
  };
@@ -92,7 +93,9 @@ test("T16 real helper commits captured identity and exact evidence, replay reads
  assert.deepEqual(replay.calls,["Capture takeover identity"]);
 });
 
-for(const options of [{unreadable:true},{throws:true}])test("deleted owner reaches quiescent helper: "+JSON.stringify(options),async t=>{
+const deletedResponse=parent=>({content:[{type:"text",text:"No Codex thread found for threadId: "+parent+". Hosts without a readable match: local"}],isError:true});
+test("exact native missing-task response reaches quiescent helper",async t=>{
+ const options={unreadable:true};
  const fixture=await nativeFixture(t),run=await runNative(fixture.expected,fixture.root,options);
  assert.equal(run.result.outcome,"committed",JSON.stringify(run.result));
  assert.deepEqual(run.calls,["Capture takeover identity","read","Commit takeover"]);
@@ -101,6 +104,35 @@ for(const options of [{unreadable:true},{throws:true}])test("deleted owner reach
  assert.equal(owner.qualification.takeover.owner_read_outcome,"old_owner_unreadable");
  const evidence=JSON.parse(await fs.readFile(owner.qualification.takeover.evidence_path,"utf8"));
  assert.equal(evidence.owner_read_failure.isError,true);
+});
+
+test("mixed, ambiguous and malformed host failures never reach commit",async t=>{
+ const fixture=await nativeFixture(t),path=fixture.expected.stateDir+"/resident-owner.json";
+ const before=await fs.readFile(path),deleted=deletedResponse(fixture.expected.parent);
+ const active={schemaVersion:1,thread:{id:fixture.expected.parent,kind:"codex",hostId:"local",status:{type:"active"}}};
+ const cases=[
+  {throws:true},
+  {readResponse:{isError:true,content:[{type:"text",text:JSON.stringify(active)}]}},
+  {readResponse:{...deleted,structuredContent:active}},
+  {readResponse:{...deleted,content:[...deleted.content,{type:"text",text:JSON.stringify(active)}]}},
+  {readResponse:{...deleted,truncated:true}}, {readResponse:{...deleted,textTruncated:true}},
+  {readResponse:{...deleted,content:[{...deleted.content[0],truncated:true}]}},
+  {readResponse:{isError:true,error:"Task not found"}},
+  {readResponse:{isError:true,content:[{type:"text",text:"Task not found"}]}},
+  {readResponse:{...deleted,content:[{type:"text",text:deleted.content[0].text+" extra"}]}},
+  {readResponse:deletedResponse("wrong")},
+  {readResponse:{content:[{type:"text",text:"{"}]}},
+  {readResponse:{content:[{type:"text",text:JSON.stringify({owner_read_failure:deleted})}]}},
+  {readResponse:{...deleted,isError:false}},
+  {readResponse:{...deleted,content:[null]}},
+ ];
+ for(const options of cases){
+  const run=await runNative(fixture.expected,fixture.root,options);
+  assert.equal(run.result.outcome,"old_owner_unreadable",JSON.stringify(options));
+  assert.deepEqual(run.calls,["Capture takeover identity","read"]);
+  assert.deepEqual(await fs.readFile(path),before);
+ }
+ assert.equal((await fs.readdir(fixture.root)).some(x=>x.startsWith("pro-takeover-")),false);
 });
 
 test("T16 missing metadata and changed identity normalize before evidence or commit",async t=>{

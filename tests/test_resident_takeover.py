@@ -48,9 +48,42 @@ class TakeoverTests(unittest.TestCase):
     def unreadable_packet(self, owner, **kwargs):
         packet = self.packet(owner, **kwargs)
         packet["owner_read_text"] = json.dumps({"owner_read_failure": {
-            "isError": True, "error": "Task not found"}})
+            "isError": True, "content": [{"type": "text", "text":
+                f"No Codex thread found for threadId: {owner['parent']}. "
+                "Hosts without a readable match: local"}]}})
         Path(packet["evidence_path"]).write_text(packet["owner_read_text"])
         return packet
+
+    def test_deleted_owner_evidence_requires_exact_unambiguous_host_response(self):
+        owner, _ = self._enrolled_owner()
+        packet = self.unreadable_packet(owner)
+        exact = json.loads(packet["owner_read_text"])["owner_read_failure"]
+        active = json.loads(self.packet(owner, status="active")["owner_read_text"])
+        responses = [
+            {"isError": True, "error": "Task not found"},
+            {"isError": True, "content": [{"type": "text", "text": json.dumps(active)}]},
+            dict(exact, structuredContent=active), dict(exact, truncated=True),
+            dict(exact, textTruncated=True), dict(exact, thread=active["thread"]),
+            dict(exact, content=exact["content"] + [{"type": "text", "text": json.dumps(active)}]),
+            dict(exact, content=[dict(exact["content"][0], truncated=True)]),
+            dict(exact, content=[{"type": "text", "text": "Task not found"}]),
+            dict(exact, isError=1), dict(exact, isError=False),
+            dict(exact, content=[{"type": "text", "text": exact["content"][0]["text"] + " extra"}]),
+            dict(exact, content=[{"type": "text", "text": exact["content"][0]["text"].replace(owner["parent"], "wrong")}]),
+        ]
+        raws = [json.dumps({"owner_read_failure": value}) for value in responses]
+        raws += [packet["owner_read_text"] + " garbage",
+                 packet["owner_read_text"].replace('"isError": true', '"isError": false, "isError": true'),
+                 "{", json.dumps({"owner_read_failure": exact, "thread": active["thread"]}),
+                 json.dumps({**json.loads(self.packet(owner)["owner_read_text"]),
+                             "owner_read_failure": exact})]
+        before = self.snapshot()
+        for raw in raws:
+            with self.subTest(raw=raw):
+                packet["owner_read_text"] = raw
+                Path(packet["evidence_path"]).write_text(raw)
+                self.assertFalse(resident._takeover_from_native(self.paths, packet)["ok"])
+                self.assertEqual(self.snapshot(), before)
 
     def test_deleted_owner_quiescent_commit_preserves_records_and_fences_old_generation(self):
         owner, old = self._enrolled_owner()
