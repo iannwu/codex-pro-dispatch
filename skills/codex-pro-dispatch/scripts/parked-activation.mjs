@@ -498,6 +498,9 @@ return {kind:"native_takeover_packet",sendAuthorized:false,expected,calls:{takeo
 export async function claimServeExisting(g,meta,expected,token){
 const o=g.parkedResident,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
 const binding=o?.binding,socket=o?.socket;
+const retained=o&&Array.isArray(o.recovery)&&o.recovery.length>0&&
+new Set(o.recovery).size===o.recovery.length&&o.recovery.every(r=>typeof r==="string"&&r)&&
+o.recover===o.recovery[0]&&typeof o.collectOnly==="boolean";
 if(!o||!["socket","binding","directory","attempt","used","descriptor","credentials",
 "recover","recovery","preparedRecovery","recoveryBindings","collectOnly","activation"].every(k=>Object.hasOwn(o,k))||
 g.parkedOpenBusy!==false||g.parkedSocket!==o.socket||
@@ -508,11 +511,11 @@ typeof o.binding.turn!=="string"||!o.binding.turn||
 o.used!==false||o.serveInvocation!==undefined||o.serveExistingClaim!==undefined||
 o.serveExistingRelay!==undefined||o.unusedReplacement!==undefined||
 o.admission!==undefined||o.failureRecord!==undefined||o.failureFinalRecord!==undefined||
-o.serveJoined!==undefined||o.collectOnly!==false||o.recover!=null||
-!Array.isArray(o.recovery)||o.recovery.length||
+o.serveJoined!==undefined||(!retained&&(o.collectOnly!==false||o.recover!=null))||
+!Array.isArray(o.recovery)||(!retained&&o.recovery.length)||
 !Array.isArray(o.preparedRecovery)||o.preparedRecovery.length||
 !o.recoveryBindings||typeof o.recoveryBindings!=="object"||Array.isArray(o.recoveryBindings)||
-Object.keys(o.recoveryBindings).length||
+(!retained&&Object.keys(o.recoveryBindings).length)||
 !["residentAdmission","stopResidentAdmission","recordResidentFailure","waitResidentStop","recordResidentJoined"].every(k=>typeof o.activation?.[k]==="function")||
 !o.socket||typeof o.socket.receive!=="function"||typeof o.socket.close!=="function"||
 J(o.socket.config)!==o.descriptor||o.directory!==expected.session.directory||
@@ -523,7 +526,15 @@ createHash("sha256").update(o.descriptor).digest("hex")!==expected.session.descr
 throw Error("Serve-existing native proof failed; preserve session");
 // No await before fencing: a second recovery or original serve cannot race us.
 o.used=true;o.serveExistingClaim=token;
-await cli(["resident","claim-serve-existing",J(expected)]);
+const claim=await cli(["resident","claim-serve-existing",J(expected)]);
+// Canonical receipt validation never grants a resend. Require the retained
+// native plan to match it exactly before starting the existing collector.
+const plan=claim.recovery;
+if(retained ? !plan||J(o.recovery)!==J(plan.request_ids)||o.recover!==plan.request_id||
+J(o.preparedRecovery)!==J(plan.prepared_ids)||
+J(Object.keys(o.recoveryBindings).sort())!==J(Object.keys(plan.recovery_bindings).sort())||
+o.recovery.some(r=>J(Object.entries(o.recoveryBindings[r]??{}).sort())!==J(Object.entries(plan.recovery_bindings[r]).sort()))
+: plan!==undefined)throw Error("Serve-existing recovery proof differs; preserve claim");
 // Open creates no receive waiter. The pinned socket only records request
 // events after receive(), which permanently writes ready-N. The canonical
 // claim checks the exact pristine inventory, including absence of ready-N.

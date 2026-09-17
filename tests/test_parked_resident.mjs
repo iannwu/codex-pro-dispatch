@@ -262,7 +262,7 @@ const stop=()=>activate(["resident-stop",g.parkedResident.directory]);
 const repeat=id=>json(process.execPath,[scripts+"parked-client.mjs",
 g.parkedResident.directory,"submit",id,prompt,"unit-client"]);
 const reopen=async()=>{
-p=await activate(["resident-packet",P,P,W,d]);
+p=await activate(["resident-packet",P,P,mode==="poolturn"?J([W,"resident-pro-b"]):W,d]);
 return open();
 };
 // A client publication for ordinal n without waiting on its readiness
@@ -1132,6 +1132,43 @@ assert.equal(f.g.parkedSocket,socket);
 await f.stop();await serving;
 assert.deepEqual(f.s.sends,[]);
 assert((await fs.readdir(directory)).includes("resident-serve-existing.json"));
+});
+
+for(const mismatch of [false,true])
+test("truncated pre-serve packet with completed collect-only slot, changed binding: "+mismatch,async t=>{
+const f=await fixture(t,"poolturn");await f.open();
+const c={...f.g.parkedResident.credentials,invocation:"prior",request:"old-B",slot:"slot-1",worker:"resident-pro-b"};
+await f.cli(["queue","submit","--request-id","old-B","--prompt-file",f.d+"/prompt.txt","--client-session-id","client"]);
+await f.cli(["resident","begin",J(c)]);
+const {createRunner}=await import(scripts+"parked-serving.mjs");
+const result=await createRunner(f.tools,()=>{}).runParkedJob({...f.g.parkedSocket.config,residentInvocation:c,preflightConfirmed:true,restoreParent:false},"old-B");
+assert.equal(result.ok,true);
+assert.equal((await f.cli(["status","old-B"])).assignment.status,"complete");
+await f.g.parkedSocket.close("resident_stopped");
+const paths=(await f.cli(["status","--current"])).paths;
+const proof=J({kind:"legacy_quiescence",...paths,physical_quiescence:true,implementation:"fixture",observations:"joined synthetic send",authorization:"test"});
+await fs.writeFile(f.d+"/recover.json",proof,{mode:384});
+await f.cli(["resident","recover-start",J({...f.g.parkedResident.credentials,new_owner:"recovered",evidence_file:f.d+"/recover.json",evidence_sha256:(await import("node:crypto")).createHash("sha256").update(proof).digest("hex")})]);
+await f.reopen(); // Discard the ordinary serve body as if its output was truncated.
+assert.equal(f.g.parkedResident.collectOnly,false); // An idle sibling allows ready + recovery.
+assert.deepEqual(f.g.parkedResident.recovery,["old-B"]);
+const before=(await f.cli(["status","old-B"])).assignment;
+if(mismatch){
+f.g.parkedResident.recoveryBindings["old-B"].prior_parent="foreign";
+const packet=await f.recovery();
+await assert.rejects(f.serve(packet.calls.serve),/recovery proof differs/);
+assert.equal(f.g.parkedResident.used,true);
+assert.equal(f.g.parkedResident.serveInvocation,undefined);
+assert.deepEqual(f.s.sends,["old-B"]);
+assert.deepEqual((await f.cli(["status","old-B"])).assignment,before);
+return;
+}
+const packet=await f.recovery(),serving=f.serve(packet.calls.serve);
+await Promise.race([f.idle(1),serving.then(()=>{throw Error("serve ended before admission");})]);
+await f.stop();await serving;
+assert.deepEqual(f.s.sends,["old-B"]);
+assert.deepEqual((await f.cli(["status","old-B"])).assignment,before);
+assert.equal((await f.cli(["resident","inspect"])).owner.slots[1].phase,"idle");
 });
 
 test("concurrent lost-body attempts have one winner",async t=>{

@@ -1723,12 +1723,33 @@ def claim_serve_existing(paths, locked, v, c, *, replace_unused=False):
     helper = Path(__file__).resolve().parents[2] / "skills/codex-pro-dispatch/scripts/pro-dispatch"
     if descriptor.get("helper") != str(helper):
         raise core.StateError("Serve-existing helper differs")
+    # A fresh socket can inherit completed, fenced work without ever serving.
+    # Only these receipt-bound collect-only slots may accompany a lost body.
+    # Unused replacement remains idle-only; this exception only resumes serve.
+    broker = Queue(paths)
+    recovered = []
+    for slot in v.get("slots", []):
+        if slot["phase"] == "idle" and slot["request"] is None and slot["invocation"] is None:
+            continue
+        if (replace_unused or slot["phase"] != "collect_only"
+                or slot["invocation"] is not None or not slot["request"]):
+            raise core.BusyError("Serve-existing requires idle or completed collect-only slots")
+        row = broker.load(slot["request"], _locked=locked)
+        receipt = broker.receipt(row, _locked=locked)
+        if (row["state"] not in {"claimed", "published", "acknowledged"}
+                or not receipt or receipt.get("status") != "complete"
+                or receipt.get("no_resend") is not True
+                or receipt.get("worker_slot") != slot["slot"]
+                or receipt.get("worker_conversation_id") != slot["worker_conversation_id"]
+                or type(receipt.get("owner_generation")) is not int
+                or receipt["owner_generation"] >= v["generation"]):
+            raise core.BusyError("Serve-existing recovery receipt is not completed and fenced")
+        recovered.append(slot["request"])
     if (v.get("inflight") is not None
-            or any(slot["phase"] != "idle" or slot["request"] is not None
-                   or slot["invocation"] is not None for slot in v.get("slots", []))
             or core.active_assignments(paths, _locked=locked)
             or core.active_cooldown(paths, _locked=locked)
-            or any(row["state"] == "claimed" for row in Queue(paths).records(_locked=locked))
+            or any(row["state"] == "claimed" and row["request_id"] not in recovered
+                   for row in broker.records(_locked=locked))
             or _recovery_marker(paths, v) is not None
             or os.path.lexists(paths.state_dir / "native-client")):
         raise core.BusyError("Serve-existing requires idle canonical state")
@@ -1764,7 +1785,12 @@ def claim_serve_existing(paths, locked, v, c, *, replace_unused=False):
         # transaction. Preserve its descriptor and consume marker forever.
         write(paths, locked, dict(v, session=None))
         return {"ok": True, "replaced": True, "send_authorized": False}
-    return {"ok": True, "claimed": True, "send_authorized": False}
+    result = {"ok": True, "claimed": True, "send_authorized": False}
+    if recovered:
+        plan = _pool_result(v, "collect_only", "serve_existing", request_ids=recovered)
+        result["recovery"] = {k: plan[k] for k in
+                              ("request_id", "request_ids", "prepared_ids", "recovery_bindings")}
+    return result
 
 
 def control(action, credentials, paths=None):

@@ -176,7 +176,7 @@ class ServeExistingTests(unittest.TestCase):
                 with core.state_lock(self.paths, create=False) as locked:
                     core.atomic_write_json(path, row, _locked=locked)
                 before = self.snapshot()
-                with self.assertRaises(core.BusyError):
+                with self.assertRaises(core.DispatchError):
                     self.claim(c)
                 self.assertEqual(self.snapshot(), before)
         with core.state_lock(self.paths, create=False) as locked:
@@ -201,6 +201,64 @@ class ServeExistingTests(unittest.TestCase):
         with self.assertRaises(core.StateError):
             self.claim(dict(generation=1, owner='none', parent='parent',
                             worker_pool_sha256='a'*64, session=None))
+
+    def completed_recovery(self):
+        owner, c, directory = self.pristine()
+        self._arm_crash_request(owner, c)
+        path = self.paths.state_dir / 'resident-owner.json'
+        row = core.read_json(path)
+        slot = row['slots'][0]
+        receipt_path = core.assignment_path(slot['request'], self.paths)
+        receipt = core.read_json(receipt_path)
+        receipt['status'] = 'complete'
+        row['generation'] += 1
+        slot.update(phase='collect_only', invocation=None)
+        with core.state_lock(self.paths, create=False) as locked:
+            core.atomic_write_json(path, row, _locked=locked)
+            core.atomic_write_json(receipt_path, receipt, _locked=locked)
+        return {**c, 'generation': row['generation']}, directory, path, receipt_path
+
+    def test_completed_fenced_collection_claim_preserves_authority_and_receipt(self):
+        c, directory, _, _ = self.completed_recovery()
+        before = self.snapshot()
+        result = self.claim(c)
+        self.assertTrue(result['claimed'])
+        self.assertFalse(result['send_authorized'])
+        self.assertEqual(result['recovery']['request_ids'], ['request-crash'])
+        self.assertEqual(result['recovery']['prepared_ids'], [])
+        self.assertEqual(self.snapshot(), before)
+        with self.assertRaises(core.DispatchError):
+            self.replace(c)  # Never broaden unused replacement to occupied slots.
+        with self.assertRaises(core.DispatchError):
+            self.claim(c)
+
+    def test_completed_collection_requires_exact_fenced_receipt_and_no_invocation(self):
+        c, directory, owner_path, receipt_path = self.completed_recovery()
+        receipt = core.read_json(receipt_path)
+        owner = core.read_json(owner_path)
+        cases = []
+        for key, value in [('status', 'armed'), ('status', 'prepared'),
+                           ('status', 'indeterminate'), ('no_resend', False),
+                           ('owner_generation', c['generation']),
+                           ('worker_conversation_id', 'foreign'), ('worker_slot', 'slot-b')]:
+            cases.append((receipt_path, {**receipt, key: value}))
+        for key, value in [('phase', 'reserved'), ('phase', 'running'),
+                           ('phase', 'cancel_pending'),
+                           ('invocation', {'invocation': 'old', 'request': 'request-crash'})]:
+            changed = copy.deepcopy(owner)
+            changed['slots'][0][key] = value
+            cases.append((owner_path, changed))
+        for path, changed in cases:
+            with self.subTest(changed=changed):
+                with core.state_lock(self.paths, create=False) as locked:
+                    core.atomic_write_json(path, changed, _locked=locked)
+                before = self.snapshot()
+                with self.assertRaises(core.DispatchError):
+                    self.claim(c)
+                self.assertEqual(self.snapshot(), before)
+                self.assertFalse((directory / 'resident-serve-existing.json').exists())
+                with core.state_lock(self.paths, create=False) as locked:
+                    core.atomic_write_json(path, receipt if path == receipt_path else owner, _locked=locked)
 
     def test_claim_write_failure_keeps_consumed_evidence(self):
         _, c, directory = self.pristine()

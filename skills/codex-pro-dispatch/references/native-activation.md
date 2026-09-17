@@ -360,8 +360,15 @@ installation as the retained descriptor. Do not mix candidate and installed path
 
 Execution first checks the retained native state, then permanently fences the
 attempt before awaiting anything. Under the canonical lock it verifies the exact
-owner, generation and session, all idle slots, no active assignment, invocation,
-claim or cooldown, and the pristine `session.json` plus `wake.sock` inventory.
+owner, generation and session, no active assignment, invocation or cooldown,
+and the pristine `session.json` plus `wake.sock` inventory. Slots must be idle,
+except for completed, no-resend requests fenced into collect-only slots from an
+older generation. Each exception requires its exact queue/receipt/worker binding;
+unrelated claims, prepared work and uncertain deliveries remain ineligible.
+The retained native recovery plan must match the canonical plan before serving.
+This covers a truncated ordinary packet after open: the existing collector may
+finish publication/release without sending again. It does not permit occupied
+slots through the separate unused-replacement path.
 The pinned transport cannot accept a request before a receive/readiness write;
 any admission object, readiness, ticket, command, request, audit, failure or
 unknown session artifact rejects recovery. It creates one exclusive durable
