@@ -81,6 +81,7 @@ resident.control('enroll',dict(generation=0,owner='fixture',parent=${J(P)},evide
  const canonicalBefore=await cli(["resident","inspect"]);
  const retainedSocket=g.parkedSocket,retainedBinding=g.parkedBinding;
  const servingPacket=recover?await activation(["resident-serve-existing-packet",dir]):packet;
+ if(recover){assert(Buffer.byteLength(JSON.stringify(servingPacket))+1<8192);assert(Buffer.byteLength(servingPacket.calls.serve)<6144);}
  serving=execute(servingPacket.calls.serve);serving.catch(()=>{});
  await until(async()=> (await fs.readdir(dir)).some(n=>n.startsWith("waiting-")));
  assert.equal(g.parkedSocket,retainedSocket);assert.equal(g.parkedBinding,retainedBinding);

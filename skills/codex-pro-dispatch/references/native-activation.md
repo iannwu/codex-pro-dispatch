@@ -304,6 +304,11 @@ attempt**, the sole recovery path is:
 node "$ACT" resident-serve-existing-packet "$SESSION_DIRECTORY"
 ```
 
+The complete packet is bounded by an 8 KiB regression test. `calls.serve` is a
+small integrity-pinned relay; the trusted installed module owns the serving loop.
+No generated serving source is evaluated. Each emitted host call is settled once.
+A missing or changed installed module fails closed before the claim.
+
 Execute only the returned `calls.serve`, once, verbatim through outer
 `functions.exec` in the original native owner task and turn. This packet has no
 open action. It retains the original socket object, descriptor and turn binding;
@@ -324,6 +329,13 @@ A lost claim reply consumes recovery too. Preserve the claim and native state;
 never delete evidence, reset `used`, reconstruct the socket, change the turn
 binding, regenerate ordinary startup as a workaround, or retry an attempted
 serve. A lost native runtime or a new owner turn is ineligible.
+
+If packet generation succeeded but its output was truncated or lost, and no
+`calls.serve` invocation occurred, rerun the same recovery command for the same
+session in the original owner task and turn, then discard the earlier packet.
+Generation is read-only and creates no claim. Claim absence alone is insufficient:
+any attempted or uncertain execution remains consumed by the native fence.
+A lost relay reply is also terminal for that attempt; never replay relay calls.
 
 This exception only regenerates the never-started serving action. The original
 no-replay and collect-only rules remain in effect. Supervise the returned serve

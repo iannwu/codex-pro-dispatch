@@ -83,7 +83,7 @@ const access=await activate(["client-preflight",d]);
 assert.equal(access.filesystemAccess,true);assert.equal(access.sendAuthorized,false);
 assert(!(await fs.readdir(d)).some(n=>n.startsWith(".pro-access-")));
 let p=await activate(["resident-packet",P,P,W,d]);
-const prompt=d+"/prompt.txt";await fs.writeFile(prompt,"Fixture answer.",{mode:384});
+const prompt=d+"/prompt.txt";await fs.writeFile(prompt,mode==="replacementtext"?"Literal replacement text: $& $` $\'":"Fixture answer.",{mode:384});
 const tools={
 async mcp__node_repl__js(a){
 s.repls++;
@@ -111,6 +111,8 @@ const lines=[];
 await new AF("nodeRepl","globalThis","console","parkedSocket","parkedBinding",a.code)(
 {tmpDir:d,requestMeta:meta},g,{log:v=>lines.push(String(v))},
 g.parkedSocket,g.parkedBinding);
+if(mode==="relaylost"&&a.title==="Serve-existing relay")
+return {isError:true,content:[{type:"text",text:"relay response lost"}]};
 if(mode==="serveclaimlost"&&a.title==="Guarded serve-existing claim")
 return {isError:true,content:[{type:"text",text:"claim response lost"}]};
 if(mode==="evidenceerror"&&!s.evidenceError&&a.title==="Preserve native evidence"){
@@ -1154,4 +1156,69 @@ assert.deepEqual((await fs.readdir(directory)).sort(),["resident-serve-existing.
 await assert.rejects(f.serve(p.calls.serve),/proof failed/);
 assert.deepEqual(await f.cli(["resident","inspect"]),before);
 assert.deepEqual(f.s.sends,[]);
+});
+
+
+test("compact recovery packet stays well below the 20000-character host ceiling",async t=>{
+const f=await fixture(t,"replacementtext"),directory=await f.open();
+const before=await f.cli(["resident","inspect"]),descriptor=await fs.readFile(directory+"/session.json");
+const first=await f.recovery(),second=await f.recovery();
+t.diagnostic(`packet=${Buffer.byteLength(J(second))+1} bytes; calls.serve=${Buffer.byteLength(second.calls.serve)} bytes`);
+for(const packet of [first,second]){
+assert(Buffer.byteLength(J(packet))+1<8192,"entire CLI output must fit 8 KiB");
+assert(Buffer.byteLength(packet.calls.serve)<6144,"serve wrapper must fit 6 KiB");
+assert(!/eval\s*\(|new Function|runParkedJob/.test(packet.calls.serve));
+}
+assert.deepEqual(await f.cli(["resident","inspect"]),before);
+assert.deepEqual(await fs.readFile(directory+"/session.json"),descriptor);
+assert.deepEqual((await fs.readdir(directory)).sort(),["session.json","wake.sock"]);
+assert.equal(f.g.parkedResident.used,false);
+// Discarded output generated no claim. The replacement may serve once.
+const serving=f.serve(second.calls.serve);await f.idle(1);
+await assert.rejects(f.serve(first.calls.serve),/proof failed/);
+await f.start(1,"job-A");await f.idle(2);await f.stop();await serving;
+assert.deepEqual(f.s.sends,["job-A"]);
+assert.equal((await f.cli(["status","job-A"])).assignment.submission_count,1);
+});
+
+test("compact wrapper rejects a stale activation pin before claiming",async t=>{
+const f=await fixture(t),directory=await f.open(),p=await f.recovery();
+const hash=(await import("node:crypto")).createHash("sha256").update(await fs.readFile(author)).digest("hex");
+await assert.rejects(f.serve(p.calls.serve.replaceAll(hash,"0".repeat(64))),/Activation pin changed/);
+assert.equal(f.g.parkedResident.used,false);
+await missing(directory+"/resident-serve-existing.json");
+});
+
+test("lost relay reply cannot restart a claimed continuation",async t=>{
+const f=await fixture(t,"relaylost"),directory=await f.open(),p=await f.recovery();
+await assert.rejects(f.serve(p.calls.serve),/relay uncertain/);
+assert.equal(f.g.parkedResident.used,true);
+await fs.lstat(directory+"/resident-serve-existing.json");
+const hash=(await import("node:crypto")).createHash("sha256").update(await fs.readFile(author)).digest("hex");
+const activation=await import(author+"?sha256="+hash),token=f.g.parkedResident.serveExistingClaim;
+await assert.rejects(activation.serveExistingStep(f.g,f.meta,token,null),/Unknown or consumed/);
+await assert.rejects(activation.serveExistingStep(f.g,f.meta,token,{id:999,value:{}}),/Unknown or consumed/);
+await assert.rejects(activation.serveExistingStep(f.g,f.meta,"other-token",{id:1,value:{}}),/identity changed/);
+await assert.rejects(activation.serveExistingStep(f.g,{...f.meta,threadId:"foreign"},token,{id:1,value:{}}),/identity changed/);
+await assert.rejects(activation.serveExistingStep(f.g,{...f.meta,"x-codex-turn-metadata":{turn_id:"foreign"}},token,{id:1,value:{}}),/identity changed/);
+await assert.rejects(f.serve((await f.recovery()).calls.serve),/proof failed/);
+assert.deepEqual(f.s.sends,[]);
+});
+
+test("static runner factory matches the immutable pinned runner",async()=>{
+const {createRunner}=await import(scripts+"parked-serving.mjs");
+const raw=await fs.readFile(scripts+"parked-runner.js","utf8");
+const expected="function createRunner(tools,text){\n"+raw.replace(/globalThis\.(describeFailure|runParkedJob|runParkedDelivery|runParkedWorkerPool) =/g,"const $1 =").replace("globalThis.runParkedPool = globalThis.runParkedWorkerPool;","return {describeFailure,runParkedJob,runParkedDelivery,runParkedWorkerPool};")+"\n}";
+assert.equal(createRunner.toString(),expected);
+});
+
+test("activation rejects modified serving module bytes",async()=>{
+const original=nativeFs.readFile;
+nativeFs.readFile=async function(path,...args){
+const raw=await original.call(this,path,...args);
+return String(path).endsWith("/parked-serving.mjs")?Buffer.concat([raw,Buffer.from("\n// changed")]):raw;
+};
+syncBuiltinESMExports();
+try{await assert.rejects(import(author+"?bad-serving-pin"),/Pinned serving module mismatch/);}
+finally{nativeFs.readFile=original;syncBuiltinESMExports();}
 });

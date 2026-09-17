@@ -86,7 +86,7 @@ then
   echo "Node.js standard-library preflight failed." >&2
   exit 1
 fi
-for name in parked-runner.js parked-socket.mjs parked-client.mjs parked-activation.mjs; do
+for name in parked-runner.js parked-socket.mjs parked-client.mjs parked-activation.mjs parked-serving.mjs; do
   source_file="${EXPECTED_SKILL}/scripts/${name}"
   if [[ ! -f "$source_file" || -L "$source_file" ]]; then
     echo "Missing regular packaged script: $source_file" >&2

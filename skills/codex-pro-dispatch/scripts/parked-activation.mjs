@@ -48,6 +48,11 @@ createHash("sha256").update(raw).digest("hex")!==hash)
 throw Error("Pinned script mismatch: "+name);
 sources[name]=raw.toString("utf8");
 }
+const servingPath=join(dir,"parked-serving.mjs"),servingHash="e078139f76aa5f895a642b3f3e9120944769ec3f58e72abdbc0bc303bd3cd6da";
+if(await fs.realpath(servingPath)!==servingPath||createHash("sha256").update(await fs.readFile(servingPath)).digest("hex")!==servingHash)
+throw Error("Pinned serving module mismatch");
+const {createRunner,servePool,serveResident}=await import(pathToFileURL(servingPath).href+"?sha256="+servingHash);
+
 function cli(args,timeout=30000,missingPath,input){
 return new Promise((resolve,reject)=>{
 const child=execFile("python3",[helper,...args],{
@@ -524,7 +529,42 @@ if(g.parkedResident!==o||g.parkedSocket!==o.socket||g.parkedBinding!==o.binding|
 o.used!==true||o.serveInvocation!==undefined||o.admission!==undefined||
 g.parkedDelivery!==null||J(o.socket.config)!==o.descriptor)
 throw Error("Serve-existing native proof changed; preserve claim");
+serveExistingRelays.set(o,{token,binding:o.binding,socket:o.socket,expected,started:false});
 return {claimed:true};
+}
+
+// A retained claim owns one module continuation. Replies settle each emitted
+// host call once. Lost/duplicate replies cannot restart or recreate that loop.
+const serveExistingRelays=new WeakMap();
+export async function serveExistingStep(g,meta,token,reply){
+const o=g.parkedResident,r=serveExistingRelays.get(o);
+if(!r||r.token!==token||o.serveExistingClaim!==token||o.used!==true||
+g.parkedSocket!==r.socket||o.socket!==r.socket||g.parkedBinding!==r.binding||o.binding!==r.binding||
+meta?.threadId!==r.expected.parent||meta?.["x-codex-turn-metadata"]?.turn_id!==r.binding.turn)
+throw Error("Serve-existing relay identity changed; preserve claim");
+if(!r.started){
+if(reply!==null)throw Error("Unexpected relay reply");
+r.started=true;r.pending=new Map();r.calls=[];r.outputs=[];r.serial=0;r.done=false;
+const host=Object.fromEntries(["exec_command","write_stdin","mcp__node_repl__js","mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread","mcp__codex_app__navigate_to_codex_page"].map(tool=>[tool,args=>new Promise((resolve,reject)=>{
+const id=++r.serial;r.pending.set(id,{resolve,reject});r.calls.push({id,tool,args});
+})]));
+const text=value=>r.outputs.push(value),trusted=JSON.parse(o.descriptor);
+const serve=r.expected.worker_pool_sha256?servePool:serveResident;
+r.running=(async()=>{
+await serve(host,text,trusted,r.expected.parent,r.expected.owner,residentLifecycle,token,poolRecoveryPlan,recoverPoolRequests);
+const joined=await host.mcp__node_repl__js({code:`console.log(JSON.stringify(await globalThis.parkedResident.activation.recordResidentJoined(globalThis,nodeRepl.requestMeta,${J(r.expected.owner)})));`,timeout_ms:60000,title:"Record joined resident execution"});
+if(joined?.isError===true)throw Error("Native join barrier failed");
+text(joined);
+})().then(()=>{r.done=true;},e=>{r.error=String(e?.message||e);});
+}else{
+if(!reply||!r.pending.has(reply.id)||!Object.hasOwn(reply,"value")&&!Object.hasOwn(reply,"error"))
+throw Error("Unknown or consumed relay reply; preserve claim");
+const call=r.pending.get(reply.id);r.pending.delete(reply.id);
+if(Object.hasOwn(reply,"error"))call.reject(Error(reply.error));else call.resolve(reply.value);
+}
+// Settle the continuation's microtasks, never wait on a host call inside REPL.
+await new Promise(resolve=>setImmediate(resolve));
+return {calls:r.calls.splice(0),outputs:r.outputs.splice(0),done:r.done,error:r.error??null};
 }
 
 async function serveExistingPacket(directory){
@@ -547,159 +587,33 @@ if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").updat
 const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
 console.log(JSON.stringify(await activation.claimServeExisting(globalThis,nodeRepl.requestMeta,${J(expected)},${J(token)})));
 }`;
-let serve=(owner.worker_pool_sha256?buildPoolServe:buildResidentServe)(trusted,owner.parent,owner.owner);
-const guard='if(o.used)throw Error("Serve consumed");';
-if(!serve.includes(guard))throw Error("Serving claim missing");
-serve=serve.replace(guard,'if(o.used!==true||o.serveInvocation!==undefined||o.serveExistingClaim!=='+J(token)+')throw Error("Serve consumed");');
-const prelude=`// @exec: {"yield_time_ms":1000}
+const relayCode=`{const a=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});console.log(JSON.stringify(await a.serveExistingStep(globalThis,nodeRepl.requestMeta,${J(token)},REPLY)));}`;
+const serve=`// @exec: {"yield_time_ms":1000}
 const claim=await tools.mcp__node_repl__js(${J({code,timeout_ms:60000,title:"Guarded serve-existing claim"})});
 if(claim?.isError===true||claim?.content?.length!==1||claim.content[0].type!=="text"||JSON.parse(claim.content[0].text)?.claimed!==true)throw Error("Serve-existing claim uncertain; preserve session");
-`;
+const pending=new Map(),allowed=new Set(["exec_command","write_stdin","mcp__node_repl__js","mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread","mcp__codex_app__navigate_to_codex_page"]);
+let reply=null;
+for(;;){
+const raw=await tools.mcp__node_repl__js({code:${J(relayCode)}.replace("REPLY",()=>JSON.stringify(reply)),timeout_ms:60000,title:"Serve-existing relay"});
+if(raw?.isError===true||raw?.content?.length!==1||raw.content[0].type!=="text")throw Error("Serve-existing relay uncertain; preserve session");
+const step=JSON.parse(raw.content[0].text);
+for(const output of step.outputs)text(output);
+if(step.error)throw Error(step.error);
+if(step.done){if(pending.size)throw Error("Unjoined relay calls");break;}
+for(const call of step.calls){
+if(!allowed.has(call.tool)||pending.has(call.id))throw Error("Invalid relay call");
+pending.set(call.id,(async()=>{try{return {id:call.id,value:await tools[call.tool](call.args)};}catch(e){return {id:call.id,error:String(e?.message||e)};}})());
+}
+if(!pending.size)throw Error("Serve-existing relay stalled; preserve session");
+reply=await Promise.race(pending.values());pending.delete(reply.id);
+}`;
 return {kind:"native_serve_existing_packet",lifecycle:residentLifecycle,
-session:owner.session,generation:owner.generation,calls:{serve:prelude+serve}};
+session:owner.session,generation:owner.generation,calls:{serve}};
 }
 
 function buildPoolServe(trusted,parent,attempt){
-const base=J(trusted);
-const capacity=Number.isInteger(trusted.maxConcurrentRequests)?trusted.maxConcurrentRequests:
-(Array.isArray(trusted.workers)?trusted.workers.length:1);
-const serve=`// @exec: {"yield_time_ms":1000}
-text(${J({kind:"resident_supervision_required",admissionObserved:false,lifecycle:residentLifecycle})});
-const host=tools;
-{
-function value(r){
-if(r?.isError===true||r?.content?.length!==1||r.content[0].type!=="text")
-throw Object.assign(Error("Invalid tool result"),{detail:r});
-try{return JSON.parse(r.content[0].text);}catch(e){throw Object.assign(Error("Invalid tool result"),{detail:r,cause:e});}
-}
-const quote=v=>"'"+String(v).replace(/'/g,"'\\\\''")+"'";
-let pending=null,failure=null,stopped=false,nativeUncertain=false,helperUncertain=false;
-async function command(args){
-helperUncertain=true;
-let r=await host.exec_command({cmd:["python3",${J(helper)},...args].map(quote).join(" "),login:false,tty:false,yield_time_ms:30000,max_output_tokens:4096}),out="";
-for(;;){out+=r.output||"";if(r.exit_code!==undefined){pending=null;helperUncertain=false;if(r.exit_code!==0)throw Error(out);return JSON.parse(out);}
-if(!Number.isInteger(r.session_id))throw Error("Unresolved helper identity");pending=r.session_id;r=await host.write_stdin({session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096});}
-}
-const identity=\`const o=globalThis.parkedResident;
-if(nodeRepl.requestMeta?.threadId!==${J(parent)}||o?.attempt!==${J(attempt)}||
-o.socket!==globalThis.parkedSocket||JSON.stringify(o.socket.config)!==o.descriptor)
-throw Error("Resident owner changed");\`;
-async function native(code){return value(await host.mcp__node_repl__js({code:"{"+identity+code+"}",timeout_ms:60000,title:"Resident pool owner"}));}
-async function checked(fn,a,readOnly=false){
-await native('if(o.binding!==globalThis.parkedBinding||nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");console.log("{}");');
-try{const r=await fn(a);if(!readOnly&&r?.isError===true)nativeUncertain=true;return r;}catch(e){if(!readOnly)nativeUncertain=true;throw e;}
-}
-const tools={...host,mcp__codex_app__read_thread:a=>checked(x=>host.mcp__codex_app__read_thread(x),a,true),mcp__codex_app__send_message_to_thread:a=>checked(x=>host.mcp__codex_app__send_message_to_thread(x),a),mcp__node_repl__js:a=>checked(x=>host.mcp__node_repl__js(x),a)};
-${sources["parked-runner.js"].replace("globalThis.describeFailure =","const describeFailure =").replace("globalThis.runParkedJob =","const runParkedJob =").replace("globalThis.runParkedDelivery =","const runParkedDelivery =").replace("globalThis.runParkedWorkerPool =","const runParkedWorkerPool =")}
-${poolRecoveryPlan.toString()}
-${recoverPoolRequests.toString()}
-const baseConfig=${base};
-const invocationRoot=Date.now().toString(36)+Math.random().toString(36).slice(2);
-const capacity=${capacity};
-function track(result){pending??=result?.pending_helper_session??null;helperUncertain||=result?.helper_quiescent===false;}
-try{
-const owner=await native(\`if(o.used)throw Error("Serve consumed");
-if(nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");
-o.used=true;o.serveInvocation=\${JSON.stringify(invocationRoot)};
-console.log(JSON.stringify({credentials:o.credentials,recovery:o.recovery,preparedRecovery:o.preparedRecovery,recoveryBindings:o.recoveryBindings,collectOnly:o.collectOnly,sessionId:o.socket.config.sessionId}));\`);
-await recoverPoolRequests(poolRecoveryPlan(owner,capacity),{
-openCollector:()=>command(["resident","collector-open",JSON.stringify({...owner.credentials})]),
-closeCollector:()=>command(["resident","collector-close",JSON.stringify({...owner.credentials,collector_only:true})]),
-async collect(request){
-const binding=owner.recoveryBindings?.[request];
-if(!binding?.prior_parent)throw Error("Missing canonical recovery binding");
-const requestParent=binding.prior_parent;
-const recoveryCredentials={...owner.credentials,invocation:invocationRoot+"-recovery",request,request_parent:requestParent,collector_only:true};
-const result=await runParkedJob({...baseConfig,parent:requestParent,sessionId:owner.sessionId,residentInvocation:recoveryCredentials,preflightConfirmed:true,restoreParent:false,collectOnly:true},request);
-track(result);
-return result;
-},
-endCollected(request,result){
-// worker is the conversation id; slot is the pool slot. Do not swap them.
-return command(["resident","end",JSON.stringify({...owner.credentials,invocation:invocationRoot+"-recovery",request,worker:result.worker_conversation_id,slot:result.worker_slot})]);
-},
-async sendPrepared(request){
-const invocation=invocationRoot+"-prepared-"+request;
-const begun=await command(["resident","begin",JSON.stringify({...owner.credentials,invocation,request})]);
-if(typeof begun?.worker_slot!=="string")throw Error("Prepared begin did not bind a worker slot");
-const credentials={...owner.credentials,invocation,request,slot:begun.worker_slot};
-const result=await runParkedJob({...baseConfig,sessionId:owner.sessionId,residentInvocation:credentials,preflightConfirmed:true,restoreParent:false,collectOnly:false},request);
-track(result);
-return {...result,recoveryCredentials:credentials};
-},
-endPrepared(request,result){
-const terminal=result?.ok===true&&["published","acknowledged"].includes(result.observation||result.state);
-if(terminal&&result.worker_slot&&pending===null&&!helperUncertain&&!nativeUncertain)
-return command(["resident","end",JSON.stringify({...result.recoveryCredentials,worker:result.worker_conversation_id,slot:result.worker_slot})]);
-}
-});
-const inflight=[];
-function occupied(){
-return inflight.filter(job=>job.pending||job.held).length;
-}
-async function runOne(delivery,credentials){
-const completed=await runParkedDelivery({...baseConfig,sessionId:owner.sessionId,residentInvocation:credentials,preflightConfirmed:true,restoreParent:false},delivery);
-track(completed.result);
-const result=completed.result;
-const status=result?.observation||result?.state;
-if(result?.ok===true&&["published","acknowledged"].includes(status)){
-if(result.worker_slot&&pending===null&&!helperUncertain&&!nativeUncertain)
-await command(["resident","end",JSON.stringify({...credentials,worker:result.worker_conversation_id,slot:result.worker_slot})]);
-}else if(result?.ok===true&&status==="pending"){
-// Observation budget ended with work still running. Keep the slot reserved
-// and leave the listener up so a sibling worker can continue.
-}else if(result?.ok===true&&status==="not_submitted")
-throw Error("Admitted pool work remained queued; retain invocation");
-else throw Error("Pool delivery unresolved; retain invocation");
-return completed;
-}
-for(let ordinal=1;ordinal<=64;ordinal++){
-while(occupied()>=capacity){
-const running=inflight.filter(job=>job.pending);
-if(!running.length){
-const halt=await native(\`console.log(JSON.stringify(await o.activation.waitResidentStop(o)));\`);
-if(halt?.stopped){stopped=true;break;}
-throw Error("Pending pool slots remain reserved; retain invocation");
-}
-await Promise.race(running.map(job=>job.done));
-}
-if(stopped)break;
-await command(["resident","check",JSON.stringify(owner.credentials)]);
-let next;
-do{next=await native(\`console.log(JSON.stringify(await o.activation.residentAdmission(globalThis,nodeRepl.requestMeta,
-\${JSON.stringify(invocationRoot)},\${ordinal})));\`);}while(next.pending===true);
-if(next.stopped){stopped=true;break;}
-const invocation=invocationRoot+"-"+ordinal;
-// Begin reserves the slot before receive. parked-client submit runs after
-// ready-N, so the queue record may still be absent here.
-const begun=await command(["resident","begin",JSON.stringify({...owner.credentials,invocation,request:next.command.requestId})]);
-if(typeof begun?.worker_slot!=="string")throw Error("Begin did not bind a worker slot");
-const credentials={...owner.credentials,invocation,request:next.command.requestId,slot:begun.worker_slot};
-const delivery=await native(\`console.log(JSON.stringify(await o.activation.residentAdmission(globalThis,nodeRepl.requestMeta,
-\${JSON.stringify(invocationRoot)},\${ordinal},\${JSON.stringify(next)})));\`);
-if(delivery?.requestId!==credentials.request||delivery.sessionId!==owner.sessionId)throw Error("Admission mismatch");
-await native('globalThis.parkedDelivery=null;console.log("{}");');
-const job={pending:true,held:false};
-job.done=runOne(delivery,credentials).then(completed=>{
-const status=completed?.result?.observation||completed?.result?.state;
-job.pending=false;
-job.held=completed?.result?.ok===true&&status==="pending";
-return completed;
-});
-inflight.push(job);
-}
-await Promise.all(inflight.map(job=>job.done));
-if(!stopped)throw Error("Resident serving limit reached; no request was resent");
-}catch(e){failure=e;}
-finally{
-if(pending!==null)try{const joined=await host.write_stdin({session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096});if(joined.exit_code!==undefined){pending=null;helperUncertain=false;}}catch(e){failure??=e;}
-try{await native(\`try{await o.activation.stopResidentAdmission(o);}finally{try{
-if(\${JSON.stringify(failure!==null)})await o.activation.recordResidentFailure(o,{sessionId:o.socket.config.sessionId,at:Date.now(),reason:"resident_failed",pendingHelperSession:\${JSON.stringify(pending)},nativeUncertain:\${JSON.stringify(nativeUncertain)},helperUncertain:\${JSON.stringify(helperUncertain)},error:\${JSON.stringify(failure===null?null:describeFailure(failure))}},true);
-}finally{await o.socket.close(\${JSON.stringify(stopped&&!failure?"resident_stopped":"resident_failed")});}}console.log(JSON.stringify({closed:true}));\`);}catch(e){failure??=e;}
-if(failure)throw failure;
-}
-}`;
-return joinedServe(serve,attempt);
+const body=servePool.toString().replace("createRunner(tools,text)","("+createRunner.toString()+")(tools,text)");
+return joinedServe(`const poolRecoveryPlan=${poolRecoveryPlan.toString()},recoverPoolRequests=${recoverPoolRequests.toString()};\nawait (${body})(tools,text,${J(trusted)},${J(parent)},${J(attempt)},${J(residentLifecycle)},undefined,poolRecoveryPlan,recoverPoolRequests);`,attempt);
 }
 
 async function poolResidentPacket(broker,parent,workers,root){
@@ -765,136 +679,8 @@ openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mc
 }
 
 function buildResidentServe(trusted,parent,attempt){
-const serve=`// @exec: {"yield_time_ms":1000}
-text(${J({kind:"resident_supervision_required",admissionObserved:false,lifecycle:residentLifecycle})});
-const host=tools;
-{
-function value(r){
-if(r?.isError===true||r?.content?.length!==1||r.content[0].type!=="text")
-throw Object.assign(Error("Invalid tool result"),{detail:r});
-try{return JSON.parse(r.content[0].text);}catch(e){throw Object.assign(Error("Invalid tool result"),{detail:r,cause:e});}
-}
-const quote=v=>"'"+String(v).replace(/'/g,"'\\\\''")+"'";
-let pending=null,owner=null,credentials=null,reserved=false,failure=null,stopped=false;
-let nativeUncertain=false,helperUncertain=false;
-async function command(args){
-helperUncertain=true;
-let r=await host.exec_command({cmd:["python3",${J(helper)},...args].map(quote).join(" "),
-login:false,tty:false,yield_time_ms:30000,max_output_tokens:4096}),out="";
-for(;;){
-out+=r.output||"";
-if(r.exit_code!==undefined){pending=null;helperUncertain=false;if(r.exit_code!==0)throw Error(out);return JSON.parse(out);}
-if(!Number.isInteger(r.session_id))throw Error("Unresolved helper identity");
-pending=r.session_id;
-r=await host.write_stdin({session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096});
-}
-}
-const identity=\`const o=globalThis.parkedResident;
-if(nodeRepl.requestMeta?.threadId!==${J(parent)}||o?.attempt!==${J(attempt)}||
-o.socket!==globalThis.parkedSocket||JSON.stringify(o.socket.config)!==o.descriptor)
-throw Error("Resident owner changed");\`;
-async function native(code){return value(await host.mcp__node_repl__js({
-code:"{"+identity+code+"}",timeout_ms:60000,title:"Resident owner"}));}
-async function checked(fn,a,readOnly=false){
-await native('if(o.binding!==globalThis.parkedBinding||nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");console.log("{}");');
-// A failed history read cannot send or mutate ownership. Still reject it,
-// but let this continuation release after cleanup so recovery stays possible.
-// Sends and REPL calls keep their existing uncertainty guard.
-try{const r=await fn(a);if(!readOnly&&r?.isError===true)nativeUncertain=true;return r;}
-catch(e){if(!readOnly)nativeUncertain=true;throw e;}
-}
-const tools={...host,
-mcp__codex_app__read_thread:a=>checked(x=>host.mcp__codex_app__read_thread(x),a,true),
-mcp__codex_app__send_message_to_thread:a=>checked(x=>host.mcp__codex_app__send_message_to_thread(x),a),
-mcp__node_repl__js:a=>checked(x=>host.mcp__node_repl__js(x),a)};
-${sources["parked-runner.js"].replace("globalThis.describeFailure =","const describeFailure =")
-.replace("globalThis.runParkedJob =","const runParkedJob =")
-.replace("globalThis.runParkedDelivery =","const runParkedDelivery =")}
-// A fresh invocation ID is generated here, never accepted from a client.
-const invocation=Date.now().toString(36)+Math.random().toString(36).slice(2);
-async function end(){
-if(nativeUncertain||helperUncertain||pending!==null)throw Error("Unjoined operation; retain invocation");
-await command(["resident","end",JSON.stringify(credentials)]);reserved=false;credentials=null;
-}
-function track(result){
-pending??=result?.pending_helper_session??null;
-helperUncertain||=result?.helper_quiescent===false;
-}
-try{
-owner=await native(\`if(o.used)throw Error("Serve consumed");
-if(nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");
-o.used=true;o.serveInvocation=\${JSON.stringify(invocation)};
-console.log(JSON.stringify({credentials:o.credentials,directory:o.directory,recover:o.recover,
-recovery:o.recovery,collectOnly:o.collectOnly,sessionId:o.socket.config.sessionId}));\`);
-async function begin(request){
-credentials={...owner.credentials,invocation,request};
-// Lost begin acknowledgment cannot authorize admission or send. Cleanup
-// does not release it, because reserved becomes true only after success.
-await command(["resident","begin",JSON.stringify(credentials)]);reserved=true;
-}
-for(const request of owner.recovery){
-await begin(request);
-let result;const deadline=Date.now()+${J(trusted.activeJobMs)};
-do{result=await runParkedJob({...${J(trusted)},residentInvocation:credentials,
-preflightConfirmed:true,restoreParent:false,collectOnly:owner.collectOnly},request);
-track(result);owner.collectOnly=true;}while(result.ok===true&&result.observation==="pending"&&pending===null&&Date.now()<deadline);
-if(result.ok!==true||result.observation==="pending"||pending!==null)throw Error("Recovery observation ended; preserve request");
-await end();
-owner.collectOnly=false;
-}
-for(let ordinal=1;ordinal<=64;ordinal++){
-await command(["resident","check",JSON.stringify(owner.credentials)]);
-let next;
-do{next=await native(\`console.log(JSON.stringify(await o.activation.residentAdmission(globalThis,nodeRepl.requestMeta,
-\${JSON.stringify(invocation)},\${ordinal})));\`);}while(next.pending===true);
-if(next.stopped){stopped=true;break;}
-await begin(next.command.requestId);
-const delivery=await native(\`console.log(JSON.stringify(await o.activation.residentAdmission(globalThis,nodeRepl.requestMeta,
-\${JSON.stringify(invocation)},\${ordinal},\${JSON.stringify(next)})));\`);
-if(delivery?.requestId!==credentials.request||delivery.sessionId!==owner.sessionId)throw Error("Admission mismatch");
-const completed=await runParkedDelivery({...${J(trusted)},residentInvocation:credentials,
-sessionId:owner.sessionId,preflightConfirmed:true,restoreParent:false},delivery);
-const result=completed.result;track(result);
-const transport=value(completed.transport);
-if(result.ok!==true||!["published","acknowledged"].includes(result.observation||result.state)||
-pending!==null||transport.closed!==false||transport.reservedRequestId!==null)
-throw Error("Resident delivery unresolved; retain invocation");
-await native('globalThis.parkedDelivery=null;console.log("{}");');
-await end();
-}
-if(!stopped)throw Error("Resident serving limit reached; no request was resent");
-}catch(e){track(e.result);failure=e;}
-finally{
-// A returned terminal helper is joined, irrespective of its exit code. An
-// unknown execution or thrown native call is never released by a timer.
-if(pending!==null)try{
-const joined=await host.write_stdin({session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096});
-if(joined.exit_code!==undefined){pending=null;helperUncertain=false;}
-}catch(e){failure??=e;}
-let closed=false;
-if(owner)try{
-await native(\`try{await o.activation.stopResidentAdmission(o);}finally{try{
-if(\${JSON.stringify(failure!==null)})await o.activation.recordResidentFailure(o,{
-sessionId:o.socket.config.sessionId,at:Date.now(),reason:"resident_failed",
-requestId:\${JSON.stringify(credentials?.request??null)},heldDelivery:globalThis.parkedDelivery,
-pendingHelperSession:\${JSON.stringify(pending)},stopRequested:\${JSON.stringify(stopped)},
-nativeUncertain:\${JSON.stringify(nativeUncertain)},helperUncertain:\${JSON.stringify(helperUncertain)},
-error:\${JSON.stringify(failure===null?null:describeFailure(failure))}},true);
-}finally{await o.socket.close(\${JSON.stringify(stopped&&!failure?"resident_stopped":"resident_failed")});}}
-console.log(JSON.stringify({closed:true}));\`);
-closed=true;
-}catch(e){failure??=e;}
-// Only this original continuation releases after every known operation and
-// cleanup has joined. Receipt status still controls whether recovery can send.
-if(reserved&&closed&&!nativeUncertain&&!helperUncertain&&pending===null)
-try{await end();}catch(e){failure??=e;}
-if(owner)text({kind:"resident_closed",outcome:stopped&&!failure?"resident_stopped":"resident_failed",
-reservation_retained:reserved?true:credentials!==null||helperUncertain?"unknown":false,pending_helper_session:pending});
-if(failure)throw failure;
-}
-}
-`;
-return joinedServe(serve,attempt);
+const body=serveResident.toString().replace("createRunner(tools,text)","("+createRunner.toString()+")(tools,text)");
+return joinedServe(`const poolRecoveryPlan=${poolRecoveryPlan.toString()},recoverPoolRequests=${recoverPoolRequests.toString()};\nawait (${body})(tools,text,${J(trusted)},${J(parent)},${J(attempt)},${J(residentLifecycle)},undefined,poolRecoveryPlan,recoverPoolRequests);`,attempt);
 }
 
 async function clientPreflight(path){
