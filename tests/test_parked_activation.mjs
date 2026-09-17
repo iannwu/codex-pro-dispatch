@@ -144,7 +144,7 @@ eq(p.trusted.maxConcurrentRequests,1);
 eq(p.trusted.workers.map(w=>w.conversation_id),["unit-pro"]);
 assert.match(p.calls.serve,/preparedRecovery/);
 assert.match(p.calls.serve,/collectOnly:false/);
-assert.match(p.calls.serve,/Prepared unsent work cannot be recovered collector-only/);
+assert.match(p.calls.serve,/status==="pending"\|\|status==="not_submitted"/);
 assert.match(p.calls.serve,/pendingCollect/);
 assert.match(p.calls.serve,/status==="pending"/);
 assert.match(p.calls.serve,/residentInvocation\?\.generation/);

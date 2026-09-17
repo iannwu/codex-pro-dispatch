@@ -343,7 +343,7 @@ test("prepared recovery sends once and collector-only never sends", async () => 
       endCollected: async () => {},
       endPrepared: async () => {}
     }
-  ), /Prepared unsent work cannot be recovered collector-only/);
+  ), /Recovery remains collect-only/);
   await assert.rejects(() => recoverPoolRequests(
     { collect: [], sendable: ["request-prepared"] },
     {
@@ -417,4 +417,19 @@ test("pending collector does not block a ready sibling", async () => {
     "open", "collect:request-pending", "collect:request-complete",
     "end-collect:request-complete", "close"
   ]);
+});
+
+
+test("completed recovery frees sibling capacity beside not_submitted", async () => {
+  const ended = [];
+  await recoverPoolRequests(
+    { collect: ["uncertain", "complete"], sendable: [], capacity: 2 },
+    {
+      openCollector: async () => {}, closeCollector: async () => {},
+      collect: async request => ({ ok: true, observation: request === "uncertain" ? "not_submitted" : "published" }),
+      endCollected: async request => ended.push(request),
+      sendPrepared: async () => { throw Error("collect-only must never send"); }
+    }
+  );
+  assert.deepEqual(ended, ["complete"]);
 });

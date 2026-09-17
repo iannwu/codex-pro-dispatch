@@ -117,10 +117,10 @@ test("T16 chmod immediately follows mkdtemp, failure precedes open and helper",a
 });
 
 test("T12 pending collector permits only idle sibling and never invokes prepared send",async()=>{
- for(const capacity of [1,2]){
+ for(const observation of ["pending","not_submitted"])for(const capacity of [1,2]){
   const calls=[];
   const hooks={openCollector:async()=>calls.push("open"),closeCollector:async()=>calls.push("close"),
-   collect:async request=>{calls.push(request);return {ok:true,observation:"pending"};},
+   collect:async request=>{calls.push(request);return {ok:true,observation};},
    endCollected:async()=>{throw Error("pending slot cannot end");},
    sendPrepared:async()=>{throw Error("inherited request cannot send");}};
   const run=activation.recoverPoolRequests(activation.poolRecoveryPlan({recovery:["inherited"],preparedRecovery:[]},capacity),hooks);
@@ -129,7 +129,7 @@ test("T12 pending collector permits only idle sibling and never invokes prepared
  }
 });
 
-for(const inherited of ["armed","prepared"]){
+for(const inherited of ["armed","prepared","running_prepared"]){
  test(`T12/T13 real runner after takeover: ${inherited} retained or cancelled, fresh sends once`,async t=>{
   const fixture=await nativeFixture(t,inherited==="prepared"?1:2),e=fixture.expected;
   const {execFileSync,execFile}=await import("node:child_process");
@@ -148,7 +148,7 @@ ${code}
   const prior=python(`q.submit("inherited",b"original prompt","client")
 token=resident.invocation.set(dict(c,invocation="original",request="inherited"))
 claim=q.claim(c["parent"],True,"inherited")
-${inherited==="armed"?'core.arm_for_send("slot-a","inherited",c["generation"],"original",p)':''}
+${inherited==="armed"?'core.arm_for_send("slot-a","inherited",c["generation"],"original",p)':inherited==="running_prepared"?'with core.state_lock(p) as lock: resident.mark_running(p,lock,"slot-a","inherited",c["generation"],"original")':''}
 resident.invocation.reset(token)
 print(json.dumps(claim))`);
   assert.equal((await runNative(e,fixture.root)).result.outcome,"committed");
@@ -174,7 +174,7 @@ print(json.dumps(dict(credentials=c,workers=[dict(slot=x["slot"],conversation_id
     assert.equal(sends.length,0);
     const receipt=JSON.parse(await fs.readFile(e.stateDir+"/assignments/fresh.json","utf8"));
     assert.equal(receipt.status,"armed");assert.equal(receipt.no_resend,true);
-    assert.equal(threadId,inherited==="armed"?"worker-b":"worker-a");
+    assert.equal(threadId,inherited!=="prepared"?"worker-b":"worker-a");
     sends.push(threadId);prompts.set(threadId,prompt);return mcp({});
    },
   };
@@ -185,7 +185,12 @@ print(json.dumps(dict(credentials=c,workers=[dict(slot=x["slot"],conversation_id
   await activation.recoverPoolRequests(activation.poolRecoveryPlan({recovery:prepared.started.request_ids,preparedRecovery:[]},2),{
    openCollector:()=>cli(["resident","collector-open",JSON.stringify(prepared.credentials)]),
    closeCollector:()=>cli(["resident","collector-close",JSON.stringify({...prepared.credentials,collector_only:true})]),
-   collect:request=>g.runParkedJob({...config,parent:OLD,collectOnly:true,residentInvocation:{...prepared.credentials,collector_only:true,request,request_parent:OLD}},request),
+   collect:async request=>{
+    const result=await g.runParkedJob({...config,parent:OLD,collectOnly:true,residentInvocation:{...prepared.credentials,collector_only:true,request,request_parent:OLD}},request);
+    if(inherited==="running_prepared")assert.equal(result.observation,"not_submitted");
+    return result;
+   },
+   sendPrepared:()=>{throw Error("Inherited collect-only request must never send");},
    endCollected:()=>{throw Error("Inherited pending request cannot end");},
   });
   assert.equal(sends.length,0);
@@ -194,7 +199,11 @@ print(json.dumps(dict(credentials=c,workers=[dict(slot=x["slot"],conversation_id
   assert.equal(sends.length,1);
   assert.equal(commands.filter(x=>x.includes("'arm-for-send'")).length,1);
   const old=python('print(json.dumps(core.load_assignment("inherited",p)))');
-  assert.equal(old.status,inherited==="armed"?"armed":"abandoned");
+  assert.equal(old.status,inherited==="armed"?"armed":inherited==="running_prepared"?"prepared":"abandoned");
   assert.equal(old.submission_count,0);
+  if(inherited==="running_prepared"){
+   const slot=python('print(json.dumps(resident.control("inspect",{},p)["owner"]["slots"][0]))');
+   assert.equal(slot.phase,"collect_only");assert.equal(slot.request,"inherited");
+  }
  });
 }

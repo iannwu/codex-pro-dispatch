@@ -283,17 +283,16 @@ return capacity===undefined?{collect,sendable}:{collect,sendable,capacity};
 }
 
 export async function recoverPoolRequests(plan,hooks){
-let pendingCollect=false;
+let pendingCollect=0;
 if(plan.collect.length){
 await hooks.openCollector();
 try{
 for(const request of plan.collect){
 const result=await hooks.collect(request);
-if(result?.observation==="not_submitted")
-throw Error("Prepared unsent work cannot be recovered collector-only");
 const status=result?.observation||result?.state;
-if(status==="pending"){
-pendingCollect=true;
+// Collect-only ownership stays unresolved even when no native send is observed.
+if(status==="pending"||status==="not_submitted"){
+pendingCollect++;
 continue;
 }
 if(result?.ok!==true||!["published","acknowledged"].includes(status))
@@ -312,7 +311,7 @@ await hooks.endPrepared(request,result);
 else if(status!=="pending")
 throw Error("Prepared recovery unresolved; retain invocation");
 }
-if(pendingCollect&&plan.collect.length>=(plan.capacity??1))
+if(pendingCollect>=(plan.capacity??1))
 throw Error("Recovery remains collect-only; preserve request");
 }
 
