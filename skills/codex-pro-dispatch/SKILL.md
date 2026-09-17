@@ -49,6 +49,8 @@ never titles or screen position.
 `RECOVERY_INTEGRITY`: Keep one canonical authority and the existing unresolved assignment, claim, and account cooldown guards. Do not take over another task's worker or use another
 state home to evade a busy result. Do not turn an ad hoc conversation exception into production registration.
 
+`COMPLETION_OWNERSHIP`: A live rendezvous belongs to its requesting client and resident runner through collection, durable save, and acknowledgement. Other coordinators may read canonical status and notify that owner, but must not collect, save, acknowledge, or start a replacement lifecycle while the rendezvous is active.
+
 `VERIFICATION_BOUNDARY`: Accept native results through the existing core validator, preserving exact returned prompt/message association and framing. Report bounded_native_summary, source_bytes_verified:false, and
 generation_finality_verified:false. An idle chat or completed enclosing turn does not prove generation finality. Validate substantive claims independently.
 

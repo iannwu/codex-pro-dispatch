@@ -19,6 +19,11 @@ to route around `busy`, or use another state home. A busy current owner needs
 to finish its existing request, not another listener. If no current listener is available
 (not merely busy), say:
 
+Once Claude starts rendezvous, that Claude invocation and the resident runner
+exclusively own collection, durable save, and acknowledgement. Other
+coordinators may read canonical status and notify Claude, but must not collect,
+save, acknowledge, or start a replacement lifecycle while rendezvous is active.
+
 > No Codex listener is ready. In a Codex desktop task, paste: "Use
 > codex-pro-dispatch to set up a resident listener for my Claude requests.
 > Check the installed paths, actual Claude client preflight and canonical
