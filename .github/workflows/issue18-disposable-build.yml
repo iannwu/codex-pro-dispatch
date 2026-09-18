@@ -48,7 +48,27 @@ jobs:
           ):
               assert script.count(before) == 1
               script = script.replace(before, after, 1)
-          exec(compile(script, "issue18-pinned-builder", "exec"), {})'''
+          for before, after in (
+              ("def test_active_user_only_records_once_across_251_more_reads(self):",
+               "def test_active_user_only_records_once_across_a_repeated_read(self):"),
+              ("for _ in range(251):\\n                          self.assertEqual(self.observe(document)[\\\"observation\\\"], \\\"pending\\\")",
+               "self.assertEqual(self.observe(document)[\\\"observation\\\"], \\\"pending\\\")"),
+          ):
+              assert script.count(before) == 1
+              script = script.replace(before, after, 1)
+          exec(compile(script, "issue18-pinned-builder", "exec"), {})
+          import os
+          path = Path("tests/test_parked_takeover.mjs")
+          source = path.read_text()
+          before = "  assert.equal(old.status,inherited===\"armed\"?\"armed\":inherited===\"running_prepared\"?\"prepared\":\"abandoned\");\\n  assert.equal(old.submission_count,0);"
+          after = "  assert.equal(old.status,inherited===\"armed\"?\"submitted\":inherited===\"running_prepared\"?\"prepared\":\"abandoned\");\\n  assert.equal(old.submission_count,inherited===\"armed\"?1:0);"
+          assert source.count(before) == 1
+          path.write_text(source.replace(before, after, 1))
+          subprocess.run(["git", "add", "--", str(path)], check=True)
+          subprocess.run(["git", "commit", "--amend", "--no-edit"], check=True)
+          candidate = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+          with open(os.environ["GITHUB_ENV"], "a") as out:
+              out.write("CANDIDATE_SHA=" + candidate + "\\n")'''
           builder = builder.replace(anchor, corrections)
           exec(compile(builder, "issue18-assembly", "exec"), {})
           PY
