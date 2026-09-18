@@ -39,11 +39,27 @@ originalCellOnly:true,directNativeFallback:false
 const residentOuterTools=["exec_command","write_stdin","mcp__node_repl__js",
 "mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread",
 "mcp__codex_app__navigate_to_codex_page"];
+const residentSurfaceGuard=`if(typeof tools!=="object"||tools===null||typeof text!=="function"||${J(residentOuterTools)}.some(name=>typeof tools[name]!=="function"))throw Error("unsupported_listener_surface");`;
 function guardResidentBody(body){
-const guard=`if(typeof tools!=="object"||tools===null||typeof text!=="function"||${J(residentOuterTools)}.some(name=>typeof tools[name]!=="function"))throw Error("unsupported_listener_surface");`;
 const newline=body.indexOf("\n");
 return body.startsWith("// @exec:")&&newline!==-1?
-body.slice(0,newline+1)+guard+"\n"+body.slice(newline+1):guard+"\n"+body;
+body.slice(0,newline+1)+residentSurfaceGuard+"\n"+body.slice(newline+1):residentSurfaceGuard+"\n"+body;
+}
+function sha256Text(value){
+const bytes=new TextEncoder().encode(value),length=bytes.length,total=(length+9+63)&~63;
+const data=new Uint8Array(total);data.set(bytes);data[length]=128;
+const bits=length*8,view=new DataView(data.buffer);
+view.setUint32(total-8,Math.floor(bits/4294967296));view.setUint32(total-4,bits>>>0);
+const k=[1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298];
+const h=[1779033703,3144134277,1013904242,2773480762,1359893119,2600822924,528734635,1541459225],w=new Uint32Array(64),r=(x,n)=>(x>>>n)|(x<<(32-n));
+for(let offset=0;offset<total;offset+=64){
+for(let i=0;i<16;i++)w[i]=view.getUint32(offset+i*4);
+for(let i=16;i<64;i++){const a=w[i-15],b=w[i-2];w[i]=(w[i-16]+(r(a,7)^r(a,18)^(a>>>3))+w[i-7]+(r(b,17)^r(b,19)^(b>>>10)))>>>0;}
+let [a,b,c,d,e,f,g,z]=h;
+for(let i=0;i<64;i++){const t1=(z+(r(e,6)^r(e,11)^r(e,25))+((e&f)^(~e&g))+k[i]+w[i])>>>0,t2=((r(a,2)^r(a,13)^r(a,22))+((a&b)^(a&c)^(b&c)))>>>0;z=g;g=f;f=e;e=(d+t1)>>>0;d=c;c=b;b=a;a=(t1+t2)>>>0;}
+h[0]=(h[0]+a)>>>0;h[1]=(h[1]+b)>>>0;h[2]=(h[2]+c)>>>0;h[3]=(h[3]+d)>>>0;h[4]=(h[4]+e)>>>0;h[5]=(h[5]+f)>>>0;h[6]=(h[6]+g)>>>0;h[7]=(h[7]+z)>>>0;
+}
+return h.map(n=>n.toString(16).padStart(8,"0")).join("");
 }
 // Worker gates accept exactly the two user-confirmation markers the helper
 // writes; neither verifies a model. The literals stay inline because several
@@ -1274,7 +1290,7 @@ return buffer.subarray(0,used);
 }finally{await h.close();}
 }
 
-export async function readResidentPacketCall(packetFile,stage,expectedPacketSha256){
+async function readResidentPacketStage(packetFile,stage,expectedPacketSha256){
 if(!["qualify","open","serve"].includes(stage)||
 typeof expectedPacketSha256!=="string"||!/^[a-f0-9]{64}$/.test(expectedPacketSha256))
 throw Error("Invalid resident packet selector");
@@ -1290,9 +1306,37 @@ if(!["native_activation_packet","native_serve_existing_packet","native_post_arm_
 J(execution)!==J(residentExecution)||typeof packet.calls?.[stage]!=="string"||!packet.calls[stage])
 throw Error("Unsupported resident packet call");
 const code=packet.calls[stage],bytes=Buffer.from(code,"utf8");
-return {kind:"resident_packet_call",tool:"functions.exec",arguments:{code},
-codeBytes:bytes.length,codeSha256:createHash("sha256").update(bytes).digest("hex"),
+return {code,bytes};
+}
+
+export async function readResidentPacketCall(packetFile,stage,expectedPacketSha256){
+const {code,bytes}=await readResidentPacketStage(packetFile,stage,expectedPacketSha256);
+const quote=value=>"'"+String(value).replace(/'/g,"'\\''")+"'";
+const self=await fs.realpath(fileURLToPath(import.meta.url)),selfSha256=createHash("sha256").update(await fs.readFile(self)).digest("hex");
+const command="test \"$(/usr/bin/shasum -a 256 "+quote(self)+" | /usr/bin/awk '{print $1}')\" = "+
+quote(selfSha256)+" && "+[process.execPath,"--no-warnings",self,"packet-body",packetFile,stage,
+expectedPacketSha256].map(quote).join(" ");
+const expectedBytes=bytes.length,targetSha256=createHash("sha256").update(bytes).digest("hex");
+const newline=code.indexOf("\n"),directive=code.startsWith("// @exec:")&&newline!==-1?code.slice(0,newline+1):"";
+const bootstrap=directive+residentSurfaceGuard+`\nconst loaded=await tools.exec_command(${J({cmd:command,login:false,tty:false,
+yield_time_ms:30000,max_output_tokens:50000})});
+if(loaded.exit_code!==0||typeof loaded.output!=="string")throw Error("Pinned packet body unavailable"+(loaded.session_id?"; preserve helper session "+loaded.session_id:""));
+let selected;try{selected=JSON.parse(loaded.output);}catch{throw Error("Pinned packet body invalid");}
+if(selected?.kind!=="resident_packet_body"||selected.stage!==${J(stage)}||
+typeof selected.code!=="string"||new TextEncoder().encode(selected.code).length!==${expectedBytes}||
+!selected.code.startsWith(${J(directive)})||(${sha256Text.toString()})(selected.code)!==${J(targetSha256)})
+throw Error("Pinned packet body differs");
+const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+await new AsyncFunction("tools","text",`+J('"use strict";\n')+`+selected.code)(tools,text);`;
+return {kind:"resident_packet_call",tool:"functions.exec",arguments:{code:bootstrap},
+codeBytes:Buffer.byteLength(bootstrap),codeSha256:createHash("sha256").update(bootstrap).digest("hex"),
+targetCodeBytes:bytes.length,targetCodeSha256:targetSha256,
 continuation:"functions.wait",directNativeFallback:false};
+}
+
+export async function readResidentPacketBody(packetFile,stage,expectedPacketSha256){
+const selected=await readResidentPacketStage(packetFile,stage,expectedPacketSha256);
+return {kind:"resident_packet_body",stage,code:selected.code};
 }
 
 function workerId(worker){
@@ -1887,6 +1931,8 @@ let result;
 if(action==="packet"&&args.length===3) result=await packet(...args);
 else if(action==="packet-call"&&args.length===3)
 result=await readResidentPacketCall(args[0],args[1],args[2]);
+else if(action==="packet-body"&&args.length===3)
+result=await readResidentPacketBody(args[0],args[1],args[2]);
 else if(action==="resident-packet"&&[3,4].includes(args.length))
 result=await residentPacket(args[0],args[1],
   (args[2].startsWith("[")?JSON.parse(args[2]):args[2]),args[3]);
