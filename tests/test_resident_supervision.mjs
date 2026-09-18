@@ -29,7 +29,8 @@ async function fixture(t, active = true) {
     await fs.mkdir(path, {recursive: true, mode: 0o700});
   await fs.copyFile(join(repo, relative), join(root, relative));
   await fs.copyFile(join(repo, 'hooks/hooks.json'), join(root, 'hooks/hooks.json'));
-  const status = {ok: true, paths: {config_dir: join(root, 'config'), state_dir: join(root, 'state')}, active_assignment: null};
+  const status = {ok: true, paths: {config_dir: join(root, 'config'), state_dir: join(root, 'state')},
+    active_assignment: null, active_assignments: []};
   const descriptor = {resident: true, sessionId: 'a'.repeat(32), parent,
     configDir: status.paths.config_dir, stateDir: status.paths.state_dir};
   await save(join(root, 'session/session.json'), descriptor);
@@ -41,12 +42,14 @@ async function fixture(t, active = true) {
       {slot: 'worker-2', worker_conversation_id: 'other-worker', request: null, invocation: null, phase: 'idle'}
     ],
     session: {directory: join(root, 'session'), session_id: descriptor.sessionId, descriptor_sha256: sha(encode(descriptor))}};
-  const authority = {status, owner};
+  status.worker_pool = {file_sha256: owner.worker_pool_sha256,
+    workers: owner.slots.map(s => ({slot: s.slot, conversation_id: s.worker_conversation_id}))};
+  const authority = {status, owner, queue: {ok: true, requests: []}};
   const recordPath = join(scripts, 'fixture-authority.json');
   await save(recordPath, authority);
   // The production module calls the actual helper interface. This isolated
-  // helper permits only its two existing read operations and no mutations.
-  await fs.writeFile(join(scripts, 'pro-dispatch'), `import json, pathlib, sys\nv=json.loads(pathlib.Path(__file__).with_name('fixture-authority.json').read_text())\na=sys.argv[1:]\nif a==['status','--current']: print(json.dumps(v['status']))\nelif a==['resident','inspect']: print(json.dumps({'ok':True,'owner':v['owner']}))\nelse: raise SystemExit('Mutation attempted')\n`);
+  // helper permits only its existing read operations and no mutations.
+  await fs.writeFile(join(scripts, 'pro-dispatch'), `import json, pathlib, sys\nv=json.loads(pathlib.Path(__file__).with_name('fixture-authority.json').read_text())\na=sys.argv[1:]\nif a==['status','--current']: print(json.dumps(v['status']))\nelif a==['resident','inspect']: print(json.dumps({'ok':True,'owner':v['owner']}))\nelif a==['queue','status']: print(json.dumps(v['queue']))\nelse: raise SystemExit('Mutation attempted')\n`);
   await save(join(root, 'state/assignment.json'), {assignment_id: rid, status: 'armed', no_resend: true, submission_count: 0});
   await save(join(root, 'session/command-2.json'), {requestId: 'incident-unobserved-B', ordinal: 2});
   const guard = await import(pathToFileURL(join(root, relative)).href);
@@ -359,7 +362,7 @@ async function unboundTakeover(t) {
 
 // Feed different canonical snapshots to successive read-only helper calls.
 // Only test instrumentation writes the counter, outside the canonical state.
-async function changeAfterFirstSnapshot(f, change) {
+async function changeAfterFirstSnapshot(f, change, threshold = 3) {
   const scripts = join(f.root, 'skills/codex-pro-dispatch/scripts');
   const after = structuredClone(f.authority);
   change(after);
@@ -367,12 +370,12 @@ async function changeAfterFirstSnapshot(f, change) {
   await fs.writeFile(join(scripts, 'pro-dispatch'), `import json, pathlib, sys
 p=pathlib.Path(__file__).parent
 args=sys.argv[1:]
-if args not in [['status','--current'],['resident','inspect']]: raise SystemExit('Mutation attempted')
+if args not in [['status','--current'],['resident','inspect'],['queue','status']]: raise SystemExit('Mutation attempted')
 c=p/'read-count'
 n=int(c.read_text())+1 if c.exists() else 1
 c.write_text(str(n))
-v=json.loads((p/('fixture-after.json' if n>=3 else 'fixture-authority.json')).read_text())
-print(json.dumps(v['status'] if args==['status','--current'] else {'ok':True,'owner':v['owner']}))
+v=json.loads((p/('fixture-after.json' if n>=${threshold} else 'fixture-authority.json')).read_text())
+print(json.dumps(v['status'] if args==['status','--current'] else v['queue'] if args==['queue','status'] else {'ok':True,'owner':v['owner']}))
 `);
 }
 
@@ -512,6 +515,105 @@ test('unbound takeover rechecks active assignment and canonical paths', async t 
   ]) {
     const f = await unboundTakeover(t);
     await changeAfterFirstSnapshot(f, change);
+    assert.equal((await f.hook()).decision, 'block');
+  }
+});
+
+async function retainedReceipt(t) {
+  const f = await unboundTakeover(t);
+  const owner = f.authority.owner;
+  owner.generation = 27;
+  const oldParent = 'original-listener';
+  const slot = owner.slots[0];
+  const audit = (generation, previous, replacement) => ({
+    previous_generation: generation, previous_parent: previous,
+    previous_owner: 'owner-' + generation, replacement_parent: replacement,
+    collect_only: [rid], cancel_prepared: [],
+    request_bindings: {[rid]: {prior_parent: oldParent, slot: slot.slot, worker}},
+    slot_transitions: {[slot.slot]: {from: generation === 22 ? 'running' : 'collect_only',
+      to: 'collect_only', request: rid}}
+  });
+  owner.qualification = {takeover_history: [
+    audit(22, oldParent, 'parent-23'), audit(23, 'parent-23', 'parent-24'),
+    audit(24, 'parent-24', 'parent-25'), audit(25, 'parent-25', 'parent-26')
+  ], takeover: audit(26, 'parent-26', parent)};
+  const receipt = {assignment_id: rid, status: 'armed', submission_count: 0,
+    no_resend: true, owner_generation: 22, parent_task_id: oldParent,
+    worker_slot: slot.slot, worker_conversation_id: worker};
+  f.authority.status.active_assignment = receipt;
+  f.authority.status.active_assignments = [receipt];
+  f.authority.queue.requests = [{request_id: rid, state: 'claimed', dispatch_status: 'armed',
+    owner_generation: 22, parent_task_id: oldParent, worker_slot: slot.slot,
+    worker_conversation_id: worker, send_authorized: false, send_may_have_occurred: true}];
+  await f.update();
+  return f;
+}
+
+async function unchangedDecision(f, allowed) {
+  await f.update();
+  const before = await f.snapshot();
+  const decision = await f.hook();
+  if (allowed) assert.deepEqual(decision, {});
+  else assert.equal(decision.decision, 'block');
+  assert.deepEqual(await f.snapshot(), before);
+}
+
+test('retained receipt permits finalization without changing generation-22 evidence', async t => {
+  const f = await retainedReceipt(t);
+  for (const stop_hook_active of [false, true, true]) {
+    const before = await f.snapshot();
+    assert.deepEqual(await f.hook({...event, stop_hook_active}), {});
+    assert.deepEqual(await f.snapshot(), before);
+  }
+});
+
+test('retained receipt blocks multiple active receipts hidden by the scalar alias', async t => {
+  const f = await retainedReceipt(t);
+  f.authority.status.active_assignments.push({...f.authority.status.active_assignment,
+    assignment_id: 'second-request', worker_slot: 'worker-2',
+    worker_conversation_id: 'other-worker'});
+  f.authority.status.active_assignment = null;
+  await unchangedDecision(f, false);
+});
+
+test('retained receipt requires exact receipt, queue, and takeover bindings', async t => {
+  for (const change of [
+    v => { v.status.active_assignment.worker_slot = 'worker-2'; },
+    v => { v.status.active_assignment.parent_task_id = 'wrong-parent';
+      v.queue.requests[0].parent_task_id = 'wrong-parent'; },
+    v => { v.status.active_assignment.owner_generation = 23;
+      v.queue.requests[0].owner_generation = 23; },
+    v => { v.queue.requests[0].worker_conversation_id = 'other-worker'; },
+    v => { delete v.owner.qualification.takeover.request_bindings[rid]; },
+    v => { v.owner.qualification.takeover.slot_transitions['worker-1'].to = 'running'; }
+  ]) {
+    const f = await retainedReceipt(t);
+    change(f.authority);
+    await unchangedDecision(f, false);
+  }
+});
+
+test('retained receipt blocks bound or live current work', async t => {
+  for (const change of [
+    v => { v.owner.session = {directory: '/bound'}; },
+    v => { v.owner.slots[0].phase = 'running'; },
+    v => { v.owner.slots[0].invocation = {request: rid, invocation: 'live'}; },
+    v => { v.owner.inflight = {request: rid, invocation: 'legacy-live'}; }
+  ]) {
+    const f = await retainedReceipt(t);
+    change(f.authority);
+    await unchangedDecision(f, false);
+  }
+});
+
+test('retained receipt rereads owner, complete status, and queue', async t => {
+  for (const change of [
+    v => { v.owner.generation++; },
+    v => { v.status.active_assignment.status = 'pending'; },
+    v => { v.queue.requests[0].dispatch_status = 'pending'; }
+  ]) {
+    const f = await retainedReceipt(t);
+    await changeAfterFirstSnapshot(f, change, 4);
     assert.equal((await f.hook()).decision, 'block');
   }
 });

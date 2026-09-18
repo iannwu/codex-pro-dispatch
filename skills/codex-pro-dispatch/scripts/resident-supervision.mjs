@@ -170,6 +170,117 @@ export async function waitSupervision(g, meta, trusted) {
   return {kind: 'resident_supervision_stop_observed', admissionObserved: false};
 }
 
+// Inspect the complete current-status projection, not just its scalar alias:
+// active_assignment is also null when multiple assignments remain unresolved.
+function unboundOwner(owner, status) {
+  const slots = owner.slots, pool = status.worker_pool, active = status.active_assignments;
+  return owner.version === 3 && owner.session === null && owner.inflight == null &&
+    Number.isSafeInteger(owner.generation) && owner.generation > 0 &&
+    id(owner.owner) && id(owner.parent) &&
+    /^[a-f0-9]{64}$/.test(owner.worker_pool_sha256) &&
+    Array.isArray(slots) && slots.length >= 1 && slots.length <= 2 &&
+    Array.isArray(pool?.workers) && pool.workers.length === slots.length &&
+    pool.file_sha256 === owner.worker_pool_sha256 &&
+    slots.every((slot, i) => slot !== null && typeof slot === 'object' &&
+      Object.keys(slot).sort().join(',') === 'invocation,phase,request,slot,worker_conversation_id' &&
+      id(slot.slot) && id(slot.worker_conversation_id) && slot.invocation === null &&
+      pool.workers[i]?.slot === slot.slot &&
+      pool.workers[i]?.conversation_id === slot.worker_conversation_id &&
+      ((slot.phase === 'idle' && slot.request === null) ||
+       (slot.phase === 'collect_only' && id(slot.request)))) &&
+    ['slot', 'worker_conversation_id'].every(key => new Set(slots.map(s => s[key])).size === slots.length) &&
+    new Set(slots.filter(s => s.request !== null).map(s => s.request)).size ===
+      slots.filter(s => s.request !== null).length &&
+    Array.isArray(active) && active.length <= 1 &&
+    same(status.active_assignment, active.length === 1 ? active[0] : null);
+}
+
+function retainedProvenance(owner, receipt, slot) {
+  const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const ids = v => Array.isArray(v) && v.every(id) && new Set(v).size === v.length;
+  const q = owner.qualification;
+  if (!object(q) || !object(q.takeover) ||
+      !Array.isArray(q.takeover_history === undefined ? [] : q.takeover_history) ||
+      !Array.isArray(q.handoffs === undefined ? [] : q.handoffs)) fail();
+  // Follow committed parent changes, not only the latest takeover. A request
+  // from generation 22 can survive several later takeovers and same-parent starts.
+  const takeovers = [...(q.takeover_history === undefined ? [] : q.takeover_history), q.takeover];
+  const events = [...takeovers.map(a => ({a, takeover: true})),
+    ...(q.handoffs === undefined ? [] : q.handoffs).map(a => ({a, takeover: false}))];
+  if (events.some(({a, takeover}) => !object(a) ||
+      !Number.isSafeInteger(a.previous_generation) || a.previous_generation < 1 ||
+      !id(a.previous_parent) || !id(takeover ? a.replacement_parent : a.parent))) fail();
+  events.sort((x, y) => x.a.previous_generation - y.a.previous_generation);
+  let generation = 0, parent = null, found = false, latest = null;
+  const rid = receipt.assignment_id;
+  for (const {a, takeover} of events) {
+    if (a.previous_generation < generation ||
+        (parent !== null && a.previous_parent !== parent)) fail();
+    const nextParent = takeover ? a.replacement_parent : a.parent;
+    if (nextParent === a.previous_parent) fail();
+    if (takeover) {
+      latest = a;
+      if (!id(a.previous_owner) || !ids(a.collect_only) || !ids(a.cancel_prepared) ||
+          a.collect_only.some(r => a.cancel_prepared.includes(r)) ||
+          !object(a.request_bindings) || !object(a.slot_transitions)) fail();
+      const b = a.request_bindings[rid];
+      if (b !== undefined || a.collect_only.includes(rid) || found) {
+        if (!object(b) || Object.keys(b).sort().join(',') !== 'prior_parent,slot,worker' ||
+            !a.collect_only.includes(rid) || a.cancel_prepared.includes(rid) ||
+            b.prior_parent !== receipt.parent_task_id || b.slot !== slot.slot ||
+            b.worker !== slot.worker_conversation_id) fail();
+        const transition = a.slot_transitions[slot.slot];
+        if (!object(transition) ||
+            Object.keys(transition).sort().join(',') !== 'from,request,to' ||
+            transition.request !== rid || transition.to !== 'collect_only' ||
+            !['running', 'reserved', 'collect_only'].includes(transition.from)) fail();
+        if (!found && (a.previous_parent !== receipt.parent_task_id ||
+            receipt.owner_generation < generation ||
+            receipt.owner_generation > a.previous_generation)) fail();
+        found = true;
+      }
+    } else {
+      // Graceful handoff cannot carry an unresolved request. Earlier handoffs
+      // may establish the parent in which this request was originally armed.
+      if (found || a.generation !== a.previous_generation + 1) fail();
+    }
+    generation = a.previous_generation + 1;
+    parent = nextParent;
+  }
+  if (!found || latest !== q.takeover || parent !== owner.parent ||
+      generation > owner.generation) fail();
+}
+
+async function unboundStopProof(owner, status) {
+  if (!unboundOwner(owner, status)) return null;
+  const receipt = status.active_assignment;
+  if (receipt === null) return {queue: null};
+  const slot = owner.slots.find(s => s.request === receipt.assignment_id);
+  if (!slot || slot.phase !== 'collect_only' || !id(receipt.assignment_id) ||
+      receipt.worker_slot !== slot.slot ||
+      receipt.worker_conversation_id !== slot.worker_conversation_id ||
+      !id(receipt.parent_task_id) || !Number.isSafeInteger(receipt.owner_generation) ||
+      receipt.owner_generation < 1 || receipt.owner_generation >= owner.generation ||
+      !['armed', 'submitted', 'pending', 'ambiguous', 'indeterminate'].includes(receipt.status) ||
+      receipt.no_resend !== true || ![0, 1].includes(receipt.submission_count)) fail();
+  retainedProvenance(owner, receipt, slot);
+  // Queue.status reuses Queue.receipt's canonical association validator,
+  // including exact owner_generation, parent, worker, slot and prompt hashes.
+  const queue = await cli(['queue', 'status']);
+  if (!Array.isArray(queue.requests) ||
+      queue.requests.some(r => !r || !id(r.request_id)) ||
+      new Set(queue.requests.map(r => r.request_id)).size !== queue.requests.length) fail();
+  const claims = queue.requests.filter(r => r.state === 'claimed');
+  if (claims.length !== 1) fail();
+  const claim = claims[0];
+  if (claim.request_id !== receipt.assignment_id ||
+      claim.dispatch_status !== receipt.status ||
+      claim.send_authorized !== false || claim.send_may_have_occurred !== true ||
+      ['owner_generation', 'parent_task_id', 'worker_slot', 'worker_conversation_id']
+        .some(key => claim[key] !== receipt[key])) fail();
+  return {queue};
+}
+
 const block = reason => ({decision: 'block', reason});
 const waitReason = 'The resident owner has not joined. Use functions.wait on the ORIGINAL returned serve cell, not a new serve call. Never resend, reopen, reset receipts, clear locks, or renew admission from this hook. If the original execution is unavailable, preserve evidence and report the host limitation through commentary; owner-loss closure remains mandatory.';
 export async function stopDecision(event) {
@@ -209,17 +320,17 @@ export async function stopDecision(event) {
       }
     }
     if (!owner || owner.parent !== event.session_id) return {};
-    // A schema-3 takeover may retain collect-only evidence before a new
-    // session exists. Evidence is not a serving execution to join. Keep this
-    // exception AFTER challenge processing and require a stable, unbound owner.
-    if (owner.version === 3 && owner.session === null && owner.inflight == null &&
-        status.active_assignment === null && Array.isArray(owner.slots) &&
-        owner.slots.every(slot => slot.invocation === null &&
-          ((slot.phase === 'idle' && slot.request === null) ||
-           (slot.phase === 'collect_only' && id(slot.request))))) {
-      const current = await authority();
-      if (!same(current.owner, owner) || current.status.active_assignment !== null ||
-          !same(current.status.paths, status.paths)) fail();
+    // This exemption runs only AFTER pending qualification challenges.
+    const proof = await unboundStopProof(owner, status);
+    if (proof !== null) {
+      // Read-only and bounded. Recheck the full active set (the scalar alias
+      // hides multiple assignments), provenance, queue bindings and paths.
+      const [current, currentStatus, currentQueue] = await Promise.all([
+        cli(['resident', 'inspect']), cli(['status', '--current']),
+        proof.queue === null ? null : cli(['queue', 'status'])
+      ]);
+      if (!same(current.owner, owner) || !same(currentStatus, status) ||
+          !same(currentQueue, proof.queue)) fail();
       return {}; // Finalization only; no admission, collection, or send authority.
     }
     if (owner.inflight != null || owner.slots?.some(slot => slot.request !== null || slot.invocation !== null) ||
