@@ -218,8 +218,11 @@ test('unqualified open is blocked before canonical start or any socket creation'
   const source = await sourceSection('openResident');
   let starts = 0;
   const sentinel = Error('reached canonical start');
-  const open = new Function('ownerSupervision', 'cli', 'J', source.replace('export ', '') + '\nreturn openResident;')(
-    f.guard, async () => { starts++; throw sentinel; }, JSON.stringify);
+  const open = new Function('ownerSupervision', 'cli', 'J', 'assertResidentOpenConfiguration', source.replace('export ', '') + '\nreturn openResident;')(
+    f.guard, async args => {
+      if (args.join() === 'status,--current') return f.authority.status;
+      starts++; throw sentinel;
+    }, JSON.stringify, () => {});
   await assert.rejects(open({}, meta, f.trusted, {generation: 0}, 'attempt', f.root));
   assert.equal(starts, 0);
 });
@@ -231,8 +234,11 @@ test('qualified open reaches the unchanged canonical start guard, not direct sen
   await f.guard.prepareSupervision(g, meta, f.trusted); await f.hook();
   const source = await sourceSection('openResident');
   let starts = 0;
-  const open = new Function('ownerSupervision', 'cli', 'J', source.replace('export ', '') + '\nreturn openResident;')(
-    f.guard, async args => { assert.deepEqual(args.slice(0, 2), ['resident', 'start']); starts++; return {state: 'busy'}; }, JSON.stringify);
+  const open = new Function('ownerSupervision', 'cli', 'J', 'assertResidentOpenConfiguration', source.replace('export ', '') + '\nreturn openResident;')(
+    f.guard, async args => {
+      if (args.join() === 'status,--current') return f.authority.status;
+      assert.deepEqual(args.slice(0, 2), ['resident', 'start']); starts++; return {state: 'busy'};
+    }, JSON.stringify, () => {});
   assert.deepEqual(await open(g, meta, f.trusted, {generation: 0}, 'attempt', f.root), {state: 'busy'});
   assert.equal(starts, 1);
 });

@@ -46,13 +46,15 @@ test("native handoff requires old context, real target and returned serve cleanu
    return {content:[{type:"text",text:lines.join("\n")}]};
   },
   async exec_command(a){return {exit_code:0,output:await run("/bin/sh",["-c",a.cmd])};},
+  async write_stdin(){assert.fail("Handoff fixture must not use a host session");},
   async mcp__codex_app__read_thread(a){
    reads++;assert.equal(a.threadId,N);
    if(switchContext)meta={...meta,threadId:N};
    return targetExists?mcp({schemaVersion:1,thread:{id:N,kind:targetKind,hostId:"local"}}):
     {isError:true,content:[{type:"text",text:"Task not found"}]};
   },
-  async mcp__codex_app__send_message_to_thread(){assert.fail("Handoff must never send");}
+  async mcp__codex_app__send_message_to_thread(){assert.fail("Handoff must never send");},
+  async mcp__codex_app__navigate_to_codex_page(){assert.fail("Handoff fixture must not navigate");}
  };
  const execute=code=>new AF("tools","text",code)(tools,()=>{});
  t.after(async()=>{

@@ -5,7 +5,7 @@ import {tmpdir} from "node:os";
 import {execFile,spawnSync} from "node:child_process";
 import {createHash} from "node:crypto";
 import {fileURLToPath} from "node:url";
-import {watchFile} from "../skills/codex-pro-dispatch/scripts/parked-activation.mjs";
+import {watchFile,assertResidentOpenConfiguration} from "../skills/codex-pro-dispatch/scripts/parked-activation.mjs";
 const root=fileURLToPath(new URL("../",import.meta.url)),eq=assert.deepEqual;
 const author=root+"skills/codex-pro-dispatch/scripts/parked-activation.mjs";
 function fixture(t,confirm="--confirm-pro"){
@@ -125,9 +125,11 @@ assert.match(p.lifecycle.instruction,/Do not send a final response/);
 // host must receive the supervision contract even when startup later fails.
 const out=[],sentinel=Error("fixture stops before native ownership");
 const AF=Object.getPrototypeOf(async()=>{}).constructor;
-await assert.rejects(new AF("tools","text",p.calls.serve)({
-mcp__node_repl__js:async()=>{throw sentinel;}
-},value=>out.push(value)),e=>e===sentinel);
+const tools=Object.fromEntries(["exec_command","write_stdin","mcp__node_repl__js",
+"mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread",
+"mcp__codex_app__navigate_to_codex_page"].map(name=>[name,async()=>{}]));
+tools.mcp__node_repl__js=async()=>{throw sentinel;};
+await assert.rejects(new AF("tools","text",p.calls.serve)(tools,value=>out.push(value)),e=>e===sentinel);
 assert.equal(out[0].kind,"resident_supervision_required");
 assert.equal(out[0].admissionObserved,false);
 eq(out[0].lifecycle,p.lifecycle);
@@ -179,6 +181,56 @@ JSON.stringify(["unit-pro","unit-other"]),root]);
 eq(code,0);
 eq(p.trusted.maxConcurrentRequests,2);
 eq(p.trusted.workers.map(w=>w.conversation_id),["unit-pro","unit-other"]);
+});
+test("resident packet declares the exact outer execution contract and extracts calls byte-for-byte",t=>{
+const f=fixture(t,"--confirm-worker"),client=f.d+"/client";fs.mkdirSync(client,{mode:448});
+activatePool(f,[{slot:"slot-a",conversation_id:"unit-pro",label:"A",
+model_confirmation:"user-confirmed-worker",configured_at:"fixture"}]);
+const [code,p]=f.invoke(["resident-pool-packet","parent","parent",JSON.stringify(["unit-pro"]),client]);
+eq(code,0);eq(p.execution,{version:1,executor:"functions.exec",continuation:"functions.wait",
+originalCellOnly:true,directNativeFallback:false});
+for(const body of Object.values(p.calls))assert.match(body,/unsupported_listener_surface/);
+assert.match(p.calls.qualify.split("\n")[0],/^\/\/ @exec:/);
+assert.match(p.calls.serve.split("\n")[0],/^\/\/ @exec:/);
+const packet=client+"/packet.json",raw=Buffer.from(JSON.stringify(p));
+fs.writeFileSync(packet,raw,{mode:384});
+const digest=createHash("sha256").update(raw).digest("hex");
+for(const stage of ["qualify","open","serve"]){
+const [selectedCode,selected]=f.invoke(["packet-call",packet,stage,digest]);
+eq(selectedCode,0);eq(selected.tool,"functions.exec");
+eq(selected.arguments.code,p.calls[stage]);
+eq(selected.codeBytes,Buffer.byteLength(p.calls[stage]));
+eq(selected.codeSha256,createHash("sha256").update(p.calls[stage]).digest("hex"));
+eq(selected.directNativeFallback,false);
+}
+const [badCode,bad]=f.invoke(["packet-call",packet,"open","0".repeat(64)]);
+assert.notEqual(badCode,0);assert.match(bad.error,/digest differs/);
+});
+test("resident outer guard rejects an unsupported surface before a native callback",t=>{
+const f=fixture(t),client=f.d+"/client";fs.mkdirSync(client,{mode:448});
+const [code,p]=f.invoke(["resident-packet","parent","parent","unit-pro",client]);
+eq(code,0);
+const AF=Object.getPrototypeOf(async()=>{}).constructor;
+let called=false;
+return assert.rejects(new AF("tools","text",p.calls.open)({
+mcp__node_repl__js:async()=>{called=true;}
+},()=>{}),/unsupported_listener_surface/).then(()=>assert.equal(called,false));
+});
+test("pre-open validation rejects the shortened live pool hash",t=>{
+const f=fixture(t,"--confirm-worker"),home=f.d+"/authority";
+activatePool(f,[{slot:"slot-a",conversation_id:"unit-pro",label:"A",
+model_confirmation:"user-confirmed-worker",configured_at:"fixture"}]);
+const status=f.cli(["status","--current"])[1],hash=status.worker_pool.file_sha256;
+const trusted={helper:root+"skills/codex-pro-dispatch/scripts/pro-dispatch",
+configDir:home+"/config",stateDir:home+"/state",parent:"parent",
+workers:[{slot:"slot-a",conversation_id:"unit-pro"}],worker_pool_sha256:hash,
+workerPoolSha256:hash,resident:true,maxConcurrentRequests:1};
+assert.doesNotThrow(()=>assertResidentOpenConfiguration(trusted,{generation:1,worker_pool_sha256:hash},status));
+const shortened="4645c38f51d754878cdabe538f1fd5789f66fa82e72";
+assert.throws(()=>assertResidentOpenConfiguration({...trusted,workerPoolSha256:shortened},
+{generation:1,worker_pool_sha256:hash},status),/configuration differs/);
+assert.throws(()=>assertResidentOpenConfiguration({...trusted,worker_pool_sha256:"0".repeat(64),workerPoolSha256:"0".repeat(64)},
+{generation:1,worker_pool_sha256:"0".repeat(64)},status),/configuration differs/);
 });
 test("pool rendezvous carries the bound hash through real resident admission",async t=>{
 const f=fixture(t,"--confirm-worker"),home=f.d+"/authority";
