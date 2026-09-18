@@ -407,10 +407,11 @@ class ReleaseQueueTests(unittest.TestCase):
         self.call("arm", "unit-A")
         before = self.records()
         self.assertEqual(self.observe(code=4)["error"], "No native snapshot or staged history")
-        for kind in ("running", "missing", "worker", "prompt", "truncated", "footer"):
+        for kind in ("running", "missing", "worker", "prompt", "truncated"):
             document = self.document()
             if kind == "running":
                 document["thread"]["status"]["type"] = "running"
+                document["turns"] = []  # No current outbound evidence yet.
             elif kind == "missing":
                 document["turns"] = []
             elif kind == "worker":
@@ -418,9 +419,7 @@ class ReleaseQueueTests(unittest.TestCase):
             elif kind == "prompt":
                 document["turns"][0]["items"][0]["content"][0]["text"] += "x"
             elif kind == "truncated":
-                document["turns"][0]["items"][1]["truncated"] = True
-            else:
-                document["turns"][0]["items"][1]["text"] += "\n"
+                document["turns"][0]["items"][0]["truncated"] = True
             with self.subTest(kind=kind):
                 if kind in {"running", "missing"}:
                     self.assertEqual(self.observe(document)["observation"], "pending")

@@ -1920,12 +1920,10 @@ def abandon_assignment(
     )
 
 
-def _native_response(raw: bytes, receipt: Mapping[str, Any]) -> tuple[bytes, dict[str, Any]]:
-    """Select a framed exchange from the desktop's lossy history summary.
-
-    This establishes summary association, not source-byte integrity or native
-    generation finality. Do not manufacture production evidence from it.
-    """
+def _native_outbound(
+    raw: bytes, receipt: Mapping[str, Any]
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Select exact outbound read-back independently of worker/reply progress."""
     def invalid() -> None:
         raise MarkerError("native-read-invalid: unsupported or ambiguous native summary")
 
@@ -1957,8 +1955,6 @@ def _native_response(raw: bytes, receipt: Mapping[str, Any]) -> tuple[bytes, dic
         status = thread.get("status")
         if not isinstance(status, dict) or not isinstance(status.get("type"), str):
             invalid()
-        if status["type"] != "idle":
-            raise StateError("native-worker-not-idle: wait and read again; never resend")
         turns = data.get("turns")
         if not isinstance(turns, list):
             invalid()
@@ -1994,15 +1990,8 @@ def _native_response(raw: bytes, receipt: Mapping[str, Any]) -> tuple[bytes, dic
             invalid()
         if sha256_text(content[0]["text"]) != receipt["wrapped_prompt_sha256"]:
             raise StateError("native-readback-mismatch: returned prompt differs; never resend")
-        if len(turn["items"]) == 1:
-            raise StateError("native-reply-not-observed: assistant absent; never resend")
-        if len(turn["items"]) != 2:
-            invalid()
-        assistant = turn["items"][1]
-        if assistant.get("type") != "agentMessage" or not isinstance(assistant.get("text"), str):
-            invalid()
         flags = {}
-        for name, scope in (("envelope", data), ("thread", thread), ("turn", turn), ("user", user), ("user_text", content[0]), ("assistant", assistant)):
+        for name, scope in (("envelope", data), ("thread", thread), ("turn", turn), ("user", user), ("user_text", content[0])):
             for key in ("truncated", "textTruncated"):
                 value = scope.get(key)
                 if key in scope and type(value) is not bool:
@@ -2010,6 +1999,40 @@ def _native_response(raw: bytes, receipt: Mapping[str, Any]) -> tuple[bytes, dic
                 if value is True:
                     raise MarkerError("truncated-response: native summary reports shortening")
                 flags[f"{name}.{key}"] = value  # null means omitted, never false.
+        return content[0]["text"], data, turn, flags
+    except (ValueError, UnicodeError, RecursionError, TypeError, KeyError, IndexError):
+        invalid()
+
+
+def _native_response(raw: bytes, receipt: Mapping[str, Any]) -> tuple[bytes, dict[str, Any]]:
+    """Select a framed exchange from the desktop's lossy history summary.
+
+    This establishes summary association, not source-byte integrity or native
+    generation finality. Do not manufacture production evidence from it.
+    """
+    def invalid() -> None:
+        raise MarkerError("native-read-invalid: unsupported or ambiguous native summary")
+
+    try:
+        _, data, turn, flags = _native_outbound(raw, receipt)
+        thread = data["thread"]
+        user = turn["items"][0]
+        if thread["status"]["type"] != "idle":
+            raise StateError("native-worker-not-idle: wait and read again; never resend")
+        if len(turn["items"]) == 1:
+            raise StateError("native-reply-not-observed: assistant absent; never resend")
+        if len(turn["items"]) != 2:
+            invalid()
+        assistant = turn["items"][1]
+        if assistant.get("type") != "agentMessage" or not isinstance(assistant.get("text"), str):
+            invalid()
+        for key in ("truncated", "textTruncated"):
+            value = assistant.get(key)
+            if key in assistant and type(value) is not bool:
+                invalid()
+            if value is True:
+                raise MarkerError("truncated-response: native summary reports shortening")
+            flags[f"assistant.{key}"] = value
         text = assistant["text"]
         if len(text.encode("utf-16-le")) // 2 >= 20000:
             raise MarkerError("native-read-limit: reject a response at the reader's boundary")

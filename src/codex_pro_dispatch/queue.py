@@ -759,9 +759,9 @@ class Queue:
     def observe(self, rid, parent, confirmed=False, native_read=None):
         """Observe existing post-arm work; never claim, arm, or send.
 
-        Pending snapshots do not mutate request/receipt records. A candidate
-        must pass the existing native-summary and short-envelope validators.
-        Publication and interrupted-publication recovery retain core authority.
+        Pending snapshots may record exact outbound delivery once, but never
+        stage or publish a response. Results still require the native-summary
+        and short-envelope validators; core retains publication authority.
         """
         from .resident import invocation
         if isinstance(invocation.get(), dict) and invocation.get().get("takeover_settlement") is True:
@@ -811,45 +811,37 @@ class Queue:
             if len(native_read) > 4 * 1024 * 1024:
                 raise core.ConfigurationError("Native history exceeds 4 MiB")
 
-            try:
-                response, association = core._native_response(native_read, receipt)
-            except core.StateError as exc:
-                reason = str(exc).partition(":")[0]
-                if staged is None and reason in {
-                    "native-worker-not-idle", "native-reply-not-observed"
-                }:
-                    return dict(
-                        self.metadata(r, _locked=locked),
-                        observation="pending",
-                        reason_code=reason,
-                        no_resend=True,
-                    )
-                raise
-
-            parsed = core._parse_result(response, rid)
-            if parsed.result_kind != "short":
-                raise core.StateError(
-                    "Queue observer requires a short result; operator resolution required"
-                )
-
             mutation = resident.collector_observation() if collector else contextlib.nullcontext()
             with mutation:
-                if receipt.get("outbound_prompt_verified") is not True:
-                    # _native_response already validated the complete JSON, unique
-                    # matching turn, item ordering, and exact wrapped-prompt hash.
-                    # Extract its returned text without normalization/reconstruction.
-                    data = json.loads(native_read.decode("utf-8"))
-                    turn = next(
-                        item for item in data["turns"]
-                        if item["id"] == association["turn_id"]
-                    )
-                    sent_prompt = turn["items"][0]["content"][0]["text"]
-                    core.mark_submitted(
-                        rid, sent_prompt, self.paths, _locked=locked
-                    )
-                elif receipt.get("submission_count") != 1:
-                    raise core.StateError("Verified submission count is invalid")
+                try:
+                    sent_prompt, _, _, _ = core._native_outbound(native_read, receipt)
+                    if receipt.get("outbound_prompt_verified") is not True:
+                        receipt = core.mark_submitted(
+                            rid, sent_prompt, self.paths, _locked=locked
+                        )
+                    elif (type(receipt.get("submission_count")) is not int
+                          or receipt["submission_count"] != 1
+                          or receipt.get("sent_prompt_sha256") != receipt["wrapped_prompt_sha256"]):
+                        raise core.StateError("Verified submission record is invalid")
+                    response, _ = core._native_response(native_read, receipt)
+                except core.StateError as exc:
+                    reason = str(exc).partition(":")[0]
+                    if staged is None and reason in {
+                        "native-worker-not-idle", "native-reply-not-observed"
+                    }:
+                        return dict(
+                            self.metadata(r, _locked=locked),
+                            observation="pending",
+                            reason_code=reason,
+                            no_resend=True,
+                        )
+                    raise
 
+                parsed = core._parse_result(response, rid)
+                if parsed.result_kind != "short":
+                    raise core.StateError(
+                        "Queue observer requires a short result; operator resolution required"
+                    )
                 result = self.publish(
                     rid, parent, confirmed=True,
                     native_read=native_read, _locked=locked,
