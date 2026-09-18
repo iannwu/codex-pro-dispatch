@@ -35,8 +35,9 @@ the old generation, cancels unarmed work, and preserves collect-only recovery. R
 
 ## Repository access through ChatGPT
 
-The worker may read authorized remote repositories through its own GitHub connector, even with text-only dispatch and no local filesystem access. Include owner/repo, requested SHA/ref and paths; require the actual retrieved revision
-and access limitations. Uncommitted files are not shared. Read access does not imply writes. See [github-verification.md](references/github-verification.md); this skill never grants connector permissions. Parked consultation is read-only.
+The worker's GitHub connector supports both reading and writing remote repositories, subject to its configured repository permissions and available tools. The worker may read code or make repository changes as authorized by the assignment, even with text-only dispatch and no local filesystem access.
+
+Include owner/repo, requested SHA/ref and paths; require the actual retrieved revision and access limitations. Uncommitted files are not shared. Parked consultation is a read-only assignment, even when the connector can write. Write assignments are supported and require [github-verification.md](references/github-verification.md). This skill does not install, authenticate, or broaden connector permissions.
 
 ## Contract
 
