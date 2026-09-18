@@ -48,7 +48,7 @@ createHash("sha256").update(raw).digest("hex")!==hash)
 throw Error("Pinned script mismatch: "+name);
 sources[name]=raw.toString("utf8");
 }
-const servingPath=join(dir,"parked-serving.mjs"),servingHash="37e650554e74be1aed7fbbbb130db2adfe8f5efd344d7e3011074f97d54d2389";
+const servingPath=join(dir,"parked-serving.mjs"),servingHash="bbb799f73b6d198d9c73a73f1d67af4979825e76820f17960431fe28f28506a5";
 if(await fs.realpath(servingPath)!==servingPath||createHash("sha256").update(await fs.readFile(servingPath)).digest("hex")!==servingHash)
 throw Error("Pinned serving module mismatch");
 const {createRunner,servePool,serveResident}=await import(pathToFileURL(servingPath).href+"?sha256="+servingHash);
@@ -679,7 +679,7 @@ if(!r.started){
 if(reply!==null)throw Error("Unexpected relay reply");
 r.started=true;r.pending=new Map();r.calls=[];r.outputs=[];r.serial=0;r.done=false;
 const host=Object.fromEntries(["exec_command","write_stdin","mcp__node_repl__js","mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread","mcp__codex_app__navigate_to_codex_page"].map(tool=>[tool,args=>new Promise((resolve,reject)=>{
-const id=++r.serial,request={id,tool,args};r.pending.set(id,{resolve,reject,request,dispatched:false});r.calls.push(request);
+const id=++r.serial,request={id,tool,args};r.pending.set(id,{resolve,reject,request,dispatched:false});r.calls.push(request);r.wake?.();
 })]));
 const text=value=>r.outputs.push(value),trusted=JSON.parse(o.descriptor);
 const serve=r.expected.worker_pool_sha256?servePool:serveResident;
@@ -688,7 +688,7 @@ await serve(host,text,trusted,r.expected.parent,r.expected.owner,residentLifecyc
 const joined=await host.mcp__node_repl__js({code:`console.log(JSON.stringify(await globalThis.parkedResident.activation.recordResidentJoined(globalThis,nodeRepl.requestMeta,${J(r.expected.owner)})));`,timeout_ms:60000,title:"Record joined resident execution"});
 if(joined?.isError===true)throw Error("Native join barrier failed");
 text(joined);
-})().then(()=>{r.done=true;},e=>{r.error=String(e?.message||e);});
+})().then(()=>{r.done=true;r.wake?.();},e=>{r.error=String(e?.message||e);r.wake?.();});
 }else if(r.resumePoll&&reply===null){
 r.resumePoll=false;
 }else{
@@ -699,6 +699,15 @@ if(Object.hasOwn(reply,"error"))call.reject(Error(reply.error));else call.resolv
 }
 // Settle the continuation's microtasks, never wait on a host call inside REPL.
 await new Promise(resolve=>setImmediate(resolve));
+// A local asynchronous continuation (filesystem work or an observation delay)
+// can outlive one event-loop turn without having a host call ready yet. Wait
+// for its next call or terminal result instead of telling the outer driver
+// that an otherwise live relay has stalled. Outstanding host calls must still
+// return to the driver so it can deliver their replies.
+if(!r.pending.size&&!r.done&&!r.error){
+await new Promise(resolve=>{r.wake=resolve;});
+delete r.wake;
+}
 // Upgrade only calls still in the original closure's un-emitted queue.
 for(const request of r.calls){
 const call=r.pending.get(request.id);
@@ -1534,7 +1543,7 @@ return claimed;
 try{
 choice=await new Promise((resolve,reject)=>{
 let done=false,busy=false,again=false,deferred=false,bound,elapsed=false,outcome;
-const observation=setTimeout(()=>{elapsed=true;again=true;void check();},observationMs);
+const observation=observationMs===null?null:setTimeout(()=>{elapsed=true;again=true;void check();},observationMs);
 const abort=()=>{
 clearInterval(beat);
 withdrawal=retire();withdrawal.catch(()=>{});
@@ -1628,8 +1637,9 @@ throw Error("Canonical invocation must reserve admission first");
 }
 const a=o.admission??={expired:false,timer:null,work:null,controller:null,deadlineAt:null};
 if(a.deadlineAt!==null&&Date.now()>=a.deadlineAt)a.expire();
-if(a.expired||a.work)throw Error("Resident admission ended or occupied");
-const controller=new AbortController();a.controller=controller;
+if(a.expired||a.polling||(a.work&&(!a.retained||next!==undefined||a.ordinal!==ordinal)))
+throw Error("Resident admission ended or occupied");
+const controller=a.controller??new AbortController();a.controller=controller;
 a.expire=()=>{
 if(a.expired)return;
 a.expired=true;clearTimeout(a.timer);
@@ -1656,12 +1666,13 @@ a.failure.catch(()=>{}); // Preserved and joined by owner cleanup, never retried
 };
 clearTimeout(a.timer);a.deadlineAt=Date.now()+60000;
 a.timer=setTimeout(a.expire,60000);
+if(!a.work){
+a.ordinal=ordinal;a.retained=next===undefined&&workActive;
 a.work=(async()=>{
-// The native REPL serializes calls. Do not hold it for an idle 25-second
-// observation while a sibling needs it to send, save evidence or publish.
-// Only the outer serving loop chooses this bounded observation; it neither
-// renews admission in the background nor changes the command publication bound.
-if(next===undefined)return await residentNext(o.directory,ordinal,controller.signal,workActive?250:25000);
+// Yield the serialized native lane without withdrawing a sibling's waiter.
+// Only explicit owner calls renew the deadline; expiry still aborts and joins
+// this same waiter. A claimed command retains its existing publication bound.
+if(next===undefined)return await residentNext(o.directory,ordinal,controller.signal,a.retained?null:25000);
 if(next.sessionId!==o.socket.config.sessionId||next.command?.ordinal!==ordinal)
 throw Error("Resident command mismatch");
 // The selected immutable command must still exist. Never start another long
@@ -1677,15 +1688,25 @@ g.parkedDelivery=await o.socket.receive();
 controller.signal.throwIfAborted();
 return g.parkedDelivery;
 })();
+a.work.catch(()=>{}); // Retained failures are consumed on the next owner call.
+}
+a.polling=true;
+let pending=false,pollTimer;
 try{
-const result=await a.work;
+const result=a.retained?await Promise.race([a.work,new Promise(resolve=>{
+pollTimer=setTimeout(()=>resolve(null),250);
+})]):await a.work;
+pending=result===null;
 controller.signal.throwIfAborted();
 if(o.credentials)await cli(["resident","check",J(o.credentials)]);
 // Pro uses its own budgets. A stop still needs owner cleanup, so retain its
 // detector until cleanup joins us and closes the socket.
 if(next!==undefined){clearTimeout(a.timer);a.deadlineAt=null;}
-return result;
-}finally{a.work=null;a.controller=null;}
+return pending?{pending:true,sessionId:o.socket.config.sessionId}:result;
+}finally{
+clearTimeout(pollTimer);a.polling=false;
+if(!pending){a.work=null;a.controller=null;a.retained=false;}
+}
 }
 
 export async function stopResidentAdmission(o){

@@ -458,6 +458,30 @@ assert.notEqual(await f.reopen("failed-resident-packet"),old);
 const serving=f.serve();await f.idle(1);await f.stop();await serving;
 });
 
+for(const ending of ["expiry","stop"])
+test("retained sibling waiter preserves identity and withdraws on "+ending,async t=>{
+const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
+o.used=true;o.serveInvocation="fixture-owner";
+const next=(ordinal=1,meta=f.meta)=>o.activation.residentAdmission(f.g,meta,"fixture-owner",ordinal,undefined,true);
+assert.equal((await next()).pending,true);
+const work=o.admission.work,marker=await fs.stat(f.waiting(1)),deadline=o.admission.deadlineAt;
+await assert.rejects(next(2),/ended or occupied/);
+await assert.rejects(next(1,{...f.meta,threadId:"foreign"}),/Wrong resident admission owner/);
+await assert.rejects(next(1,{...f.meta,"x-codex-turn-metadata":{turn_id:"foreign"}}),/Wrong resident admission owner/);
+assert.equal(o.admission.deadlineAt,deadline);
+assert.equal((await next()).pending,true);
+assert.equal(o.admission.work,work);
+assert.equal((await fs.stat(f.waiting(1))).ino,marker.ino);
+if(ending==="expiry"){
+o.admission.expire();await o.admission.failure;
+await missing(d+"/wake.sock");
+await assert.rejects(next(),/ended or occupied/);
+}else{
+await f.stop();assert.equal((await next()).stopped,true);
+}
+await missing(f.waiting(1));assert.deepEqual(f.s.sends,[]);
+});
+
 test("a returned stop keeps the detector until owner cleanup finishes",async t=>{
 const f=await fixture(t),d=await f.open(),o=f.g.parkedResident;
 o.used=true;o.serveInvocation="fixture-owner";
@@ -1339,6 +1363,51 @@ assert.equal((await fs.stat(rawPath)).mode&0o777,0o600);
 }finally{clearTimeout(timer);await f.stop();await serving;await tail;}
 });
 
+test("serialized host retains sibling admission between calls and assigns B before A completes",async t=>{
+const f=await fixture(t,"poolturn");await f.open();
+const native=f.tools.mcp__node_repl__js,read=f.tools.mcp__codex_app__read_thread;
+let tail=Promise.resolve(),releaseA,observedSlice;
+const heldA=new Promise(resolve=>{releaseA=resolve;});
+const slice=new Promise(resolve=>{observedSlice=resolve;});
+let aFinished=false;
+f.tools.mcp__codex_app__read_thread=async args=>{
+if(args.threadId===W&&f.s.poolSent?.has(W))await heldA;
+return read(args);
+};
+f.tools.mcp__node_repl__js=args=>{
+const result=tail.then(async()=>{
+const value=await native(args);
+if(args.code.includes("activation.residentAdmission(")&&args.code.includes(",undefined,true")){
+// Pause the serialized lane after the bounded observation returned. Clients
+// must still be able to claim readiness while other native work owns the lane.
+observedSlice();await pause(600);
+}
+return value;
+});
+tail=result.catch(()=>{});return result;
+};
+const packet=await f.recovery(),serving=f.serve(packet.calls.serve);
+serving.catch(()=>{});
+let clientA,clientB;
+try{
+await f.idle(1);
+clientA=f.start(1,"overlap-A").then(v=>{aFinished=true;return v;});clientA.catch(()=>{});
+await Promise.race([slice,pause(10000).then(()=>{throw Error("no active admission slice");})]);
+// Fails deterministically with the old 250ms retire/reopen implementation.
+await fs.lstat(f.waiting(2));
+clientB=f.start(2,"overlap-B");clientB.catch(()=>{});
+assert.equal((await clientB).ok,true);
+assert.equal(aFinished,false,"B must finish while A remains held");
+const a=(await f.cli(["status","overlap-A"])).assignment;
+const b=(await f.cli(["status","overlap-B"])).assignment;
+assert.equal(a.worker_slot,"slot-0");assert.equal(b.worker_slot,"slot-1");
+assert.deepEqual(f.s.sends,["overlap-A","overlap-B"]);
+}finally{
+releaseA();await Promise.allSettled([clientA,clientB]);
+await f.stop();await serving;await tail;
+}
+});
+
 test("incomplete evidence batch never arms or sends",async t=>{
 const f=await fixture(t,"evidencepartial");await f.open();
 const serving=f.serve();await f.idle(1);
@@ -1367,7 +1436,7 @@ assert.deepEqual(f.s.sends,[]);
 assert.equal((await f.cli(["status","changed-owner"])).assignment.status,"prepared");
 });
 
-for(const scenario of ["retained","legacy queued","canonical changed","missing legacy call"])
+for(const scenario of ["retained","delayed local continuation","legacy queued","canonical changed","missing legacy call"])
 test("two armed pool calls across turn end: "+scenario,async t=>{
 const f=await fixture(t,"poolturn");await f.open();
 const a=await import(author),o=f.g.parkedResident;
@@ -1394,7 +1463,15 @@ pending.set(call.id,f.tools[claimed.tool](claimed.args).then(value=>({id:call.id
 if(held.length===2&&hold)return;
 assert(pending.size,"serving loop unexpectedly stalled");
 const reply=await Promise.race(pending.values());pending.delete(reply.id);
+if(!hold&&scenario==="delayed local continuation"){
+// Force a gap with no host calls while the live serving promise continues
+// asynchronously. One setImmediate is not a completion barrier.
+const entry=o.serveExistingRelay.pending.get(reply.id),resolve=entry.resolve;
+entry.resolve=value=>{setTimeout(()=>resolve(value),30);};
+}
 step=await a.serveExistingStep(f.g,f.meta,token,reply);
+if(!hold&&scenario==="delayed local continuation")
+assert(step.done||step.error||step.calls.length||pending.size,"live relay was reported stalled");
 f.out.push(...step.outputs);
 if(step.error)throw Error(step.error+" "+f.s.failureEvidence+" "+J(f.out));
 }
@@ -1443,9 +1520,20 @@ await assert.rejects(a.continueServeExisting(f.g,{threadId:P,"x-codex-turn-metad
 assert.throws(()=>a.claimRelayCall(f.g,{threadId:P,"x-codex-turn-metadata":{turn_id:originalBinding.turn}},token,held[0].id),/identity changed/);
 await assert.rejects(a.serveExistingStep(f.g,f.meta,token,{id:held[0].id,value:mcp({})}),/identity changed/);
 token="continued-relay";step=await a.serveExistingStep(f.g,f.meta,token,null);
+let recoveryReady;
+if(scenario==="delayed local continuation"){
+recoveryReady=Promise.all([clientA,clientB]).then(async()=>{
+await waitForFile(f.waiting(3));
 await f.stop();
+});
+}else await f.stop();
 for(let i=0;i<300&&!step.done;i++)await tick(false);
 assert(step.done);await Promise.all([clientA,clientB]);
+await recoveryReady;
+if(scenario==="delayed local continuation"){
+const owner=(await f.cli(["resident","inspect"])).owner;
+assert(owner.slots.every(slot=>slot.request===null&&slot.invocation===null),J(owner.slots));
+}
 assert.deepEqual(f.s.sends.sort(),["job-A","job-B"]);
 for(const rid of ["job-A","job-B"]){const receipt=(await f.cli(["status",rid])).assignment;assert.equal(receipt.submission_count,1);assert.equal(receipt.status,"complete");}
 assert.equal(relay.pending.size,0);

@@ -679,7 +679,10 @@ track(completed.result);
 const result=completed.result;
 const status=result?.observation||result?.state;
 if(result?.ok===true&&["published","acknowledged"].includes(status)){
-if(result.worker_slot&&pending===null&&!helperUncertain&&!nativeUncertain)
+// A sibling's in-progress helper call is not uncertainty about this completed
+// delivery. Use this runner's joined-helper evidence; end also validates the
+// exact invocation and terminal receipt under the canonical state lock.
+if(result.worker_slot&&result.pending_helper_session===null&&result.helper_quiescent===true&&!nativeUncertain)
 await command(["resident","end",JSON.stringify({...credentials,worker:result.worker_conversation_id,slot:result.worker_slot})]);
 }else if(result?.ok===true&&status==="pending"){
 // Observation budget ended with work still running. Keep the slot reserved
