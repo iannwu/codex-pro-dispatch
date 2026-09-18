@@ -32,6 +32,19 @@ onYield:{tool:"functions.wait",cell_id:"the actual returned serve cell ID",yield
 instruction:"Do not send a final response while serve is running. Share the session path in commentary once, then automatically call functions.wait on the original returned cell ID after every yield, in this same owner turn, until serve completes. Do not ask for periodic confirmation, send routine progress messages, replay serve, or start a replacement. Waiting is execution supervision, not readiness or send authorization.",
 onCompletion:"Verify the original serve outcome and cleanup evidence before final response. On failure preserve the cell ID, session and reservations; never infer permission to resend or replace."
 });
+const residentExecution=Object.freeze({
+version:1,executor:"functions.exec",continuation:"functions.wait",
+originalCellOnly:true,directNativeFallback:false
+});
+const residentOuterTools=["exec_command","write_stdin","mcp__node_repl__js",
+"mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread",
+"mcp__codex_app__navigate_to_codex_page"];
+function guardResidentBody(body){
+const guard=`if(typeof tools!=="object"||tools===null||typeof text!=="function"||${J(residentOuterTools)}.some(name=>typeof tools[name]!=="function"))throw Error("unsupported_listener_surface");`;
+const newline=body.indexOf("\n");
+return body.startsWith("// @exec:")&&newline!==-1?
+body.slice(0,newline+1)+guard+"\n"+body.slice(newline+1):guard+"\n"+body;
+}
 // Worker gates accept exactly the two user-confirmation markers the helper
 // writes; neither verifies a model. The literals stay inline because several
 // gate functions are serialized into packets and cannot see module scope.
@@ -266,12 +279,42 @@ if(await fs.realpath(path)!==path||!stat.isDirectory()||stat.uid!==process.getui
 (stat.mode&0o077)!==0)throw Error("Physical owner-only client directory required");
 }
 
+export function assertResidentOpenConfiguration(trusted,expected,status){
+const reject=()=>{throw Error("Resident packet configuration differs; no activation");};
+const sha=value=>typeof value==="string"&&/^[a-f0-9]{64}$/.test(value);
+if(!trusted||typeof trusted!=="object"||!expected||typeof expected!=="object"||
+status?.ok!==true||trusted.resident!==true||trusted.helper!==helper||
+trusted.configDir!==status.paths?.config_dir||trusted.stateDir!==status.paths?.state_dir)reject();
+const pool=status.worker_pool;
+if(pool!==null){
+if(!pool||!sha(pool.file_sha256)||!Array.isArray(pool.workers)||
+pool.workers.length<1||pool.workers.length>2||!Array.isArray(trusted.workers)||
+trusted.workers.length!==pool.workers.length||trusted.worker!==undefined||
+trusted.worker_pool_sha256!==pool.file_sha256||trusted.workerPoolSha256!==pool.file_sha256||
+expected.worker_pool_sha256!==pool.file_sha256||
+trusted.maxConcurrentRequests!==pool.workers.length)reject();
+for(let index=0;index<pool.workers.length;index++){
+const actual=trusted.workers[index],canonical=pool.workers[index];
+if(!actual||typeof actual!=="object"||Array.isArray(actual)||
+Object.keys(actual).sort().join(",")!=="conversation_id,slot"||
+!validId(canonical?.slot)||!validId(canonical?.conversation_id)||
+actual.slot!==canonical.slot||actual.conversation_id!==canonical.conversation_id)reject();
+}
+if(new Set(pool.workers.map(w=>w.slot)).size!==pool.workers.length||
+new Set(pool.workers.map(w=>w.conversation_id)).size!==pool.workers.length)reject();
+}else if(!validId(status.worker?.conversation_id)||
+trusted.worker!==status.worker.conversation_id||trusted.workers!==undefined||
+trusted.worker_pool_sha256!==undefined||trusted.workerPoolSha256!==undefined||
+expected.worker_pool_sha256!==undefined)reject();
+}
+
 // The canonical helper owns replacement. Session artifacts are evidence, not
 // an expanding list of exceptions that grant authority to another execution.
 export async function openResident(g,meta,trusted,expected,attempt,root){
 const turn=meta?.["x-codex-turn-metadata"]?.turn_id;
 if(meta?.threadId!==trusted.parent||typeof turn!=="string"||!turn)
 throw Error("Native resident identity mismatch");
+assertResidentOpenConfiguration(trusted,expected,await cli(["status","--current"]));
 await ownerSupervision.requireSupervision(g,meta,trusted);
 if(g.parkedOpenBusy)throw Error("Native open already in progress");
 if(g.parkedSocket!==undefined&&!g.parkedResident?.credentials)
@@ -811,8 +854,9 @@ return {id:call.id,value:await tools[call.tool](call.args)};
 if(!pending.size)throw Error("Serve-existing relay stalled; preserve session");
 reply=await Promise.race(pending.values());pending.delete(reply.id);
 }`;
-return {kind:continuation?"native_post_arm_continuation_packet":"native_serve_existing_packet",lifecycle:residentLifecycle,
-session:owner.session,generation:owner.generation,calls:continuation?{serve}:{qualify:buildSupervisionCall(trusted,hash),serve}};
+return {kind:continuation?"native_post_arm_continuation_packet":"native_serve_existing_packet",
+execution:residentExecution,lifecycle:residentLifecycle,session:owner.session,generation:owner.generation,
+calls:continuation?{serve:guardResidentBody(serve)}:{qualify:guardResidentBody(buildSupervisionCall(trusted,hash)),serve:guardResidentBody(serve)}};
 }
 
 function buildPoolServe(trusted,parent,attempt){
@@ -850,8 +894,10 @@ const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
 console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.requestMeta,${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
 }`;
 return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,workers:configured,
-trusted,pins,openAttempt:attempt,lifecycle:residentLifecycle,calls:{qualify:buildSupervisionCall(trusted,hash),open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident pool open"})+"));",
-serve:buildPoolServe(trusted,parent,attempt)}};
+trusted,pins,openAttempt:attempt,execution:residentExecution,lifecycle:residentLifecycle,
+calls:{qualify:guardResidentBody(buildSupervisionCall(trusted,hash)),
+open:guardResidentBody("text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident pool open"})+"));"),
+serve:guardResidentBody(buildPoolServe(trusted,parent,attempt))}};
 }
 
 async function residentPacket(broker,parent,worker,root){
@@ -879,7 +925,10 @@ console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.req
 ${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
 }`;
 return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,worker,trusted,pins,
-openAttempt:attempt,lifecycle:residentLifecycle,calls:{qualify:buildSupervisionCall(trusted,hash),open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));",serve:buildResidentServe(trusted,parent,attempt)}};
+openAttempt:attempt,execution:residentExecution,lifecycle:residentLifecycle,
+calls:{qualify:guardResidentBody(buildSupervisionCall(trusted,hash)),
+open:guardResidentBody("text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));"),
+serve:guardResidentBody(buildResidentServe(trusted,parent,attempt))}};
 }
 
 function buildResidentServe(trusted,parent,attempt){
@@ -1223,6 +1272,27 @@ throw Object.assign(Error("Input changed while reading"),{code:"EAGAIN"});
 if(used>limit)throw Error("Input exceeds size bound");
 return buffer.subarray(0,used);
 }finally{await h.close();}
+}
+
+export async function readResidentPacketCall(packetFile,stage,expectedPacketSha256){
+if(!["qualify","open","serve"].includes(stage)||
+typeof expectedPacketSha256!=="string"||!/^[a-f0-9]{64}$/.test(expectedPacketSha256))
+throw Error("Invalid resident packet selector");
+const raw=await privateBytes(packetFile,1048576);
+if(createHash("sha256").update(raw).digest("hex")!==expectedPacketSha256)
+throw Error("Resident packet digest differs");
+let decoded;
+try{decoded=new TextDecoder("utf-8",{fatal:true}).decode(raw);}catch{throw Error("Resident packet is not UTF-8");}
+let packet;
+try{packet=JSON.parse(decoded);}catch{throw Error("Invalid resident packet JSON");}
+const execution=packet?.execution;
+if(!["native_activation_packet","native_serve_existing_packet","native_post_arm_continuation_packet"].includes(packet?.kind)||
+J(execution)!==J(residentExecution)||typeof packet.calls?.[stage]!=="string"||!packet.calls[stage])
+throw Error("Unsupported resident packet call");
+const code=packet.calls[stage],bytes=Buffer.from(code,"utf8");
+return {kind:"resident_packet_call",tool:"functions.exec",arguments:{code},
+codeBytes:bytes.length,codeSha256:createHash("sha256").update(bytes).digest("hex"),
+continuation:"functions.wait",directNativeFallback:false};
 }
 
 function workerId(worker){
@@ -1815,6 +1885,8 @@ if(typeof process!=="undefined"&&process.argv[1]&&await fs.realpath(process.argv
 const [action,...args]=process.argv.slice(2);
 let result;
 if(action==="packet"&&args.length===3) result=await packet(...args);
+else if(action==="packet-call"&&args.length===3)
+result=await readResidentPacketCall(args[0],args[1],args[2]);
 else if(action==="resident-packet"&&[3,4].includes(args.length))
 result=await residentPacket(args[0],args[1],
   (args[2].startsWith("[")?JSON.parse(args[2]):args[2]),args[3]);

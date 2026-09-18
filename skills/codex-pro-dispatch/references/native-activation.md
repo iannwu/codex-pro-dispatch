@@ -29,6 +29,24 @@ Stop remains blocked until matching joined cleanup and no outstanding canonical
 reservation can be proved. Failure diagnostics may be reported in commentary;
 forced host interruption is not equivalent to successful joined cleanup.
 
+Resident packets declare `functions.exec` as their executor and `functions.wait`
+as their original-cell continuation. Confirm both tools exist in the Listener
+task itself before qualification. A delegated turn exposing only direct native
+tools is `unsupported_listener_surface`; stop before qualification or owner
+acquisition and never unwrap an outer body into `mcp__node_repl__js`.
+
+When transferring a generated body, save the complete packet once in a private
+mode-0700 directory as a mode-0600 file, hash its raw bytes, and select a stage
+without reconstructing it:
+
+    node "$ACT" packet-call "$PACKET" qualify "$PACKET_SHA256"
+    node "$ACT" packet-call "$PACKET" open "$PACKET_SHA256"
+    node "$ACT" packet-call "$PACKET" serve "$PACKET_SHA256"
+
+Pass the returned `arguments` unchanged to the declared executor. The selector
+never evaluates code or provides a direct-native fallback. A missing stage,
+changed digest, truncated result, or unavailable executor ends the attempt.
+
 
 ## Retained post-arm continuation after a turn ends
 
