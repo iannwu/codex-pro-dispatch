@@ -209,6 +209,19 @@ export async function stopDecision(event) {
       }
     }
     if (!owner || owner.parent !== event.session_id) return {};
+    // A schema-3 takeover may retain collect-only evidence before a new
+    // session exists. Evidence is not a serving execution to join. Keep this
+    // exception AFTER challenge processing and require a stable, unbound owner.
+    if (owner.version === 3 && owner.session === null && owner.inflight == null &&
+        status.active_assignment === null && Array.isArray(owner.slots) &&
+        owner.slots.every(slot => slot.invocation === null &&
+          ((slot.phase === 'idle' && slot.request === null) ||
+           (slot.phase === 'collect_only' && id(slot.request))))) {
+      const current = await authority();
+      if (!same(current.owner, owner) || current.status.active_assignment !== null ||
+          !same(current.status.paths, status.paths)) fail();
+      return {}; // Finalization only; no admission, collection, or send authority.
+    }
     if (owner.inflight != null || owner.slots?.some(slot => slot.request !== null || slot.invocation !== null) ||
         status.active_assignment != null) return block(waitReason);
     const session = owner.session;

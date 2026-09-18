@@ -343,3 +343,175 @@ test('a host missing Stop turn metadata cannot qualify, but does not trap unrela
   assert.deepEqual(await f.hook(noTurn), {});
   await assert.rejects(f.guard.requireSupervision(g, meta, f.trusted));
 });
+
+
+// Issue 20: finalization of an unbound takeover is not completion of old work.
+async function unboundTakeover(t) {
+  const f = await fixture(t, false);
+  const owner = f.authority.owner;
+  owner.generation = 24;
+  owner.owner = 'replacement-owner';
+  owner.session = null;
+  Object.assign(owner.slots[0], {request: rid, invocation: null, phase: 'collect_only'});
+  await f.update();
+  return f;
+}
+
+// Feed different canonical snapshots to successive read-only helper calls.
+// Only test instrumentation writes the counter, outside the canonical state.
+async function changeAfterFirstSnapshot(f, change) {
+  const scripts = join(f.root, 'skills/codex-pro-dispatch/scripts');
+  const after = structuredClone(f.authority);
+  change(after);
+  await save(join(scripts, 'fixture-after.json'), after);
+  await fs.writeFile(join(scripts, 'pro-dispatch'), `import json, pathlib, sys
+p=pathlib.Path(__file__).parent
+args=sys.argv[1:]
+if args not in [['status','--current'],['resident','inspect']]: raise SystemExit('Mutation attempted')
+c=p/'read-count'
+n=int(c.read_text())+1 if c.exists() else 1
+c.write_text(str(n))
+v=json.loads((p/('fixture-after.json' if n>=3 else 'fixture-authority.json')).read_text())
+print(json.dumps(v['status'] if args==['status','--current'] else {'ok':True,'owner':v['owner']}))
+`);
+}
+
+test('unbound takeover can finalize repeatedly without changing collect-only evidence', async t => {
+  const f = await unboundTakeover(t);
+  const before = await f.snapshot();
+  const authorityBytes = await fs.readFile(join(f.root, 'skills/codex-pro-dispatch/scripts/fixture-authority.json'));
+  for (const stop_hook_active of [false, true, true])
+    assert.deepEqual(await f.hook({...event, stop_hook_active}), {});
+  assert.deepEqual(await f.snapshot(), before);
+  assert.deepEqual(await fs.readFile(join(f.root, 'skills/codex-pro-dispatch/scripts/fixture-authority.json')), authorityBytes);
+});
+
+test('unbound takeover supports all-idle and two collect-only slots', async t => {
+  const f = await unboundTakeover(t);
+  Object.assign(f.authority.owner.slots[1], {request: 'retained-sibling', phase: 'collect_only'});
+  await f.update();
+  assert.deepEqual(await f.hook(), {});
+  for (const slot of f.authority.owner.slots) Object.assign(slot, {request: null, phase: 'idle'});
+  await f.update();
+  assert.deepEqual(await f.hook(), {});
+});
+
+test('unbound takeover never bypasses a live active assignment', async t => {
+  const f = await unboundTakeover(t);
+  f.authority.status.active_assignment = {assignment_id: rid, status: 'armed'};
+  await f.update();
+  const before = await f.snapshot();
+  assert.equal((await f.hook()).decision, 'block');
+  assert.deepEqual(await f.snapshot(), before);
+});
+
+test('unbound takeover never bypasses legacy inflight or a pool invocation', async t => {
+  const f = await unboundTakeover(t);
+  f.authority.owner.inflight = {request: rid, invocation: 'live-legacy'};
+  await f.update();
+  assert.equal((await f.hook()).decision, 'block');
+  delete f.authority.owner.inflight;
+  Object.assign(f.authority.owner.slots[0], {phase: 'running', invocation: {request: rid, invocation: 'live-pool'}});
+  await f.update();
+  assert.equal((await f.hook()).decision, 'block');
+});
+
+test('unbound takeover exception requires explicit null session and active-assignment evidence', async t => {
+  const f = await unboundTakeover(t);
+  for (const session of [undefined, false, 0, '']) {
+    f.authority.owner.session = session;
+    await f.update();
+    assert.equal((await f.hook()).decision, 'block', String(session));
+  }
+  f.authority.owner.session = null;
+  delete f.authority.status.active_assignment;
+  await f.update();
+  assert.equal((await f.hook()).decision, 'block');
+});
+
+test('unbound takeover exception does not release non-collect-only phases', async t => {
+  const f = await unboundTakeover(t);
+  for (const phase of ['reserved', 'running', 'cancel_pending']) {
+    f.authority.owner.slots[0].phase = phase;
+    await f.update();
+    assert.equal((await f.hook()).decision, 'block', phase);
+  }
+});
+
+test('unbound takeover exception is not applied to a bound collect-only session', async t => {
+  const f = await fixture(t, false);
+  Object.assign(f.authority.owner.slots[0], {request: rid, phase: 'collect_only'});
+  await f.update();
+  assert.equal((await f.hook()).decision, 'block');
+  await f.joined();
+  assert.equal((await f.hook()).decision, 'block');
+});
+
+test('unbound takeover still blocks a pending qualification challenge first', async t => {
+  const f = await unboundTakeover(t);
+  const g = {};
+  await f.guard.prepareSupervision(g, meta, f.trusted);
+  await assert.rejects(f.guard.requireSupervision(g, meta, f.trusted));
+  const before = await f.snapshot();
+  const waiting = f.guard.waitSupervision(g, meta, f.trusted);
+  const decision = await f.hook({...event, stop_hook_active: true});
+  assert.equal(decision.decision, 'block');
+  assert.match(decision.reason, /qualification cell/);
+  await waiting;
+  await f.guard.requireSupervision(g, meta, f.trusted);
+  const observed = await f.snapshot();
+  assert.deepEqual(Object.keys(observed).filter(key => !(key in before)),
+    ['/state/resident-supervision/' + sha(parent + '\0' + turn) + '.observed.json']);
+  for (const [path, value] of Object.entries(before)) assert.equal(observed[path], value);
+  assert.deepEqual(await f.hook({...event, stop_hook_active: true}), {});
+  assert.deepEqual(await f.snapshot(), observed);
+});
+
+test('unbound takeover cannot bypass a malformed or mismatched qualification record', async t => {
+  const f = await unboundTakeover(t);
+  const g = {};
+  await f.guard.prepareSupervision(g, meta, f.trusted);
+  const path = join(f.root, 'state/resident-supervision', sha(parent + '\0' + turn));
+  await fs.writeFile(path + '.json', 'bad JSON');
+  assert.equal((await f.hook()).decision, 'block');
+  await save(path + '.json', g.parkedSupervision);
+  await save(path + '.observed.json', {...g.parkedSupervision, nonce: '0'.repeat(32)});
+  assert.equal((await f.hook()).decision, 'block');
+});
+
+test('unbound takeover permits later qualification without reusing the earlier turn proof', async t => {
+  const f = await unboundTakeover(t);
+  const g = {};
+  await f.guard.prepareSupervision(g, meta, f.trusted);
+  await f.hook();
+  assert.deepEqual(await f.hook(), {});
+  const laterTurn = 'later-qualified-activation';
+  const later = {...meta, 'x-codex-turn-metadata': {turn_id: laterTurn}};
+  await assert.rejects(f.guard.requireSupervision(g, later, f.trusted));
+  const next = {};
+  await f.guard.prepareSupervision(next, later, f.trusted);
+  assert.equal((await f.hook({...event, turn_id: laterTurn})).decision, 'block');
+  await f.guard.waitSupervision(next, later, f.trusted);
+  await f.guard.requireSupervision(next, later, f.trusted);
+});
+
+test('unbound takeover rechecks owner generation, session, and invocation before allowing finalization', async t => {
+  const f = await unboundTakeover(t);
+  await changeAfterFirstSnapshot(f, value => {
+    value.owner.generation++;
+    value.owner.session = {directory: join(f.root, 'session'), session_id: 'a'.repeat(32), descriptor_sha256: 'c'.repeat(64)};
+    Object.assign(value.owner.slots[0], {phase: 'running', invocation: {request: rid, invocation: 'new-serving'}});
+  });
+  assert.equal((await f.hook()).decision, 'block');
+});
+
+test('unbound takeover rechecks active assignment and canonical paths', async t => {
+  for (const change of [
+    value => { value.status.active_assignment = {assignment_id: rid}; },
+    value => { value.status.paths.state_dir += '-other'; }
+  ]) {
+    const f = await unboundTakeover(t);
+    await changeAfterFirstSnapshot(f, change);
+    assert.equal((await f.hook()).decision, 'block');
+  }
+});
