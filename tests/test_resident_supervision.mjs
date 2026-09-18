@@ -11,10 +11,10 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const relative = 'skills/codex-pro-dispatch/scripts/resident-supervision.mjs';
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const encode = value => JSON.stringify(value);
-const rid = 'pro-436-m4-20260918';
+const rid = 'incident-armed-A';
 const parent = 'listener-parent';
 const turn = 'owner-turn';
-const worker = '6aa64f88-74f8-83e8-8692-da6063dfc556';
+const worker = 'worker-pro-a';
 const event = {hook_event_name: 'Stop', session_id: parent, turn_id: turn, stop_hook_active: false};
 const meta = {threadId: parent, 'x-codex-turn-metadata': {turn_id: turn}};
 
@@ -48,7 +48,7 @@ async function fixture(t, active = true) {
   // helper permits only its two existing read operations and no mutations.
   await fs.writeFile(join(scripts, 'pro-dispatch'), `import json, pathlib, sys\nv=json.loads(pathlib.Path(__file__).with_name('fixture-authority.json').read_text())\na=sys.argv[1:]\nif a==['status','--current']: print(json.dumps(v['status']))\nelif a==['resident','inspect']: print(json.dumps({'ok':True,'owner':v['owner']}))\nelse: raise SystemExit('Mutation attempted')\n`);
   await save(join(root, 'state/assignment.json'), {assignment_id: rid, status: 'armed', no_resend: true, submission_count: 0});
-  await save(join(root, 'session/command-2.json'), {requestId: 'ke486-design-20260918-a', ordinal: 2});
+  await save(join(root, 'session/command-2.json'), {requestId: 'incident-unobserved-B', ordinal: 2});
   const guard = await import(pathToFileURL(join(root, relative)).href);
   const trusted = {parent, configDir: status.paths.config_dir, stateDir: status.paths.state_dir};
   async function update() { await save(recordPath, authority); }
