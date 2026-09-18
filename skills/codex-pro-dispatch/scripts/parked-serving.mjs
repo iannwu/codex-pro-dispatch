@@ -400,12 +400,19 @@ console.log(JSON.stringify({verified:true}));
         const sent = await tools.mcp__codex_app__send_message_to_thread({
           threadId: workerId(), prompt: sendPrompt
         });
-        await evidence(JSON.stringify({
+        const sendEvidence = await evidence(JSON.stringify({
           operation: "send_message_to_thread", request_id: requestId, phase,
           worker_conversation_id: workerId(), returnedAt: Date.now(),
           result: sent
         }));
         acknowledged(sent);
+        // A durable tool acknowledgment is diagnostic evidence, not outbound read-back.
+        // Leave submitted/count ownership with the existing core validator.
+        const acknowledgment = {kind: "native_send_acknowledged", request_id: requestId,
+          worker_conversation_id: workerId(), evidence_file: sendEvidence,
+          no_resend: true, outbound_readback_verified: false};
+        trace.push(acknowledgment);
+        if (typeof text === "function") text(acknowledgment);
       } else {
         potentiallyArmed = true;
       }

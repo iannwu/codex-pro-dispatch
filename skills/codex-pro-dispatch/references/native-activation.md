@@ -1,5 +1,35 @@
 # Trusted native activation
 
+## Required resident Stop qualification
+
+Fresh resident activation and unused serve-existing now require the trusted
+`.codex/hooks.json` project hook or packaged `hooks/hooks.json` plugin hook and `calls.qualify`
+before `calls.open` or `calls.serve`. Execute that decoded call verbatim in the
+outer `functions.exec`. Wait for `resident_supervision_probe_required`, then
+attempt one final response while this **qualification** cell is pending. The
+installed synchronous Stop hook must block it. Follow its instruction to wait
+on this same cell until it completes; never replay it. Only successful native
+verification in the same task and turn permits activation. The preflight opens
+no socket and creates no admission, reservation, arm, or native send.
+
+A missing/untrusted hook, failed cell, changed native turn, or changed guard
+source means **no resident availability**. Do not create an attestation by hand.
+Qualification records are restrictive evidence under the existing canonical
+state directory, not an owner, lease, or send authority. They never renew the
+60-second admission safety detector.
+
+Retained post-arm continuation requires a qualification already observed by
+this native runtime and still runs every original continuation/lease check.
+Never run a fresh qualification probe over an active serving invocation. An
+already expired legacy session is not upgraded or repaired by these edits.
+Standalone collect-only recovery retains its existing canonical restrictions.
+
+After qualification, supervise the original serve cell after every yield.
+Stop remains blocked until matching joined cleanup and no outstanding canonical
+reservation can be proved. Failure diagnostics may be reported in commentary;
+forced host interruption is not equivalent to successful joined cleanup.
+
+
 ## Retained post-arm continuation after a turn ends
 
 For an explicitly requested later-turn continuation in the same owner task,

@@ -34,6 +34,12 @@ test("native handoff requires old context, real target and returned serve cleanu
   async mcp__node_repl__js(a){
    const lines=[];
    await new AF("globalThis","nodeRepl","console",a.code)(g,{requestMeta:meta}, {log:v=>lines.push(String(v))});
+   if(a.title==="Resident Stop qualification"&&a.code.includes("prepareResidentSupervision")){
+    const guard=await import(root+"skills/codex-pro-dispatch/scripts/resident-supervision.mjs");
+    const decision=await guard.stopDecision({hook_event_name:"Stop",session_id:meta.threadId,
+     turn_id:meta["x-codex-turn-metadata"].turn_id,stop_hook_active:false});
+    assert.equal(decision.decision,"block");
+   }
    if(hold&&a.code.includes("stopResidentAdmission(o)")){
     cleanupReturned=true;await heldCleanup;
    }
@@ -74,6 +80,7 @@ core.activate_worker_pool([dict(slot='slot-a',conversation_id='worker-a',label='
 resident.control('enroll',dict(generation=0,owner='fixture',parent=${J(P)},evidence_file=str(e),evidence_sha256=h),p)
 `]);
  const packet=await activation(["resident-pool-packet",P,P,J(recover?["worker-a","worker-b"]:["worker-a"]),d]);
+ await execute(packet.calls.qualify);
  await execute(packet.calls.open);
  const dir=g.parkedResident.directory;
  const barrier=dir+"/resident-joined.json";
@@ -81,7 +88,7 @@ resident.control('enroll',dict(generation=0,owner='fixture',parent=${J(P)},evide
  const canonicalBefore=await cli(["resident","inspect"]);
  const retainedSocket=g.parkedSocket,retainedBinding=g.parkedBinding;
  const servingPacket=recover?await activation(["resident-serve-existing-packet",dir]):packet;
- if(recover){assert(Buffer.byteLength(JSON.stringify(servingPacket))+1<8192);assert(Buffer.byteLength(servingPacket.calls.serve)<6144);}
+ if(recover){assert(Buffer.byteLength(JSON.stringify(servingPacket))+1<20000);assert(Buffer.byteLength(servingPacket.calls.serve)<6144);}
  serving=execute(servingPacket.calls.serve);serving.catch(()=>{});
  await until(async()=> (await fs.readdir(dir)).some(n=>n.startsWith("waiting-")));
  assert.equal(g.parkedSocket,retainedSocket);assert.equal(g.parkedBinding,retainedBinding);
@@ -121,6 +128,7 @@ resident.control('enroll',dict(generation=0,owner='fixture',parent=${J(P)},evide
  // A fresh native task can use ordinary open/serve after the committed handoff.
  g={};meta={threadId:N,"x-codex-turn-metadata":{turn_id:"replacement"}};
  const replacement=await activation(["resident-pool-packet",N,N,J(recover?["worker-a","worker-b"]:["worker-a"]),d]);
+ await execute(replacement.calls.qualify);
  await execute(replacement.calls.open);
  serving=execute(replacement.calls.serve);serving.catch(()=>{});
  await until(async()=> (await fs.readdir(g.parkedResident.directory)).some(n=>n.startsWith("waiting-")));

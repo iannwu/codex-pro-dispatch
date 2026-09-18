@@ -36,7 +36,8 @@ onCompletion:"Verify the original serve outcome and cleanup evidence before fina
 // writes; neither verifies a model. The literals stay inline because several
 // gate functions are serialized into packets and cannot see module scope.
 const pins={
-  "parked-runner.js":"310e6c48254a116a7df0587dc39aea12a51d140f6f4f77d34bf99f2979539d3a",
+"resident-supervision.mjs":"5e3e9b5b4c5c53bbbf9ea585b98d536fb5dca603c14418d547101cefb9bd1eb5",
+  "parked-runner.js":"071cee7b64b403484b053fc57e61731c359bd30e760941af99df5ed0f5382b07",
 "parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
 "parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
 };
@@ -48,10 +49,40 @@ createHash("sha256").update(raw).digest("hex")!==hash)
 throw Error("Pinned script mismatch: "+name);
 sources[name]=raw.toString("utf8");
 }
-const servingPath=join(dir,"parked-serving.mjs"),servingHash="bbb799f73b6d198d9c73a73f1d67af4979825e76820f17960431fe28f28506a5";
+const servingPath=join(dir,"parked-serving.mjs"),servingHash="e7de3649743e113d865fe9c7cb6debd69e45256094d953c9bcd738a7d47ed623";
 if(await fs.realpath(servingPath)!==servingPath||createHash("sha256").update(await fs.readFile(servingPath)).digest("hex")!==servingHash)
 throw Error("Pinned serving module mismatch");
 const {createRunner,servePool,serveResident}=await import(pathToFileURL(servingPath).href+"?sha256="+servingHash);
+const ownerSupervision=await import(pathToFileURL(join(dir,"resident-supervision.mjs")).href+"?sha256="+pins["resident-supervision.mjs"]);
+
+// This probe runs before opening a listener. A host that skips Stop, changes
+// native turn identity, or loses the original qualification cell stays closed.
+export async function prepareResidentSupervision(g,meta,trusted){
+return await ownerSupervision.prepareSupervision(g,meta,trusted);
+}
+export async function waitResidentSupervision(g,meta,trusted){
+return await ownerSupervision.waitSupervision(g,meta,trusted);
+}
+export async function requireResidentSupervision(g,meta,trusted){
+return await ownerSupervision.requireSupervision(g,meta,trusted);
+}
+function buildSupervisionCall(trusted,sourceHash){
+const path=fileURLToPath(import.meta.url),url=pathToFileURL(path).href+"?sha256="+sourceHash;
+const code=name=>`{
+const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(sourceHash)})throw Error("Activation pin changed");
+const a=await import(${J(url)});
+console.log(JSON.stringify(await a.${name}(globalThis,nodeRepl.requestMeta,${J(trusted)})));
+}`;
+const call=name=>`value(await tools.mcp__node_repl__js(${J({code:code(name),timeout_ms:60000,title:"Resident Stop qualification"})}))`;
+return `// @exec: {"yield_time_ms":1000}
+function value(r){if(r?.isError===true||r?.status==="failed"||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Supervision qualification failed; no availability");return JSON.parse(r.content[0].text);}
+text(${call("prepareResidentSupervision")});
+text({kind:"resident_supervision_probe_required",admissionObserved:false,instruction:"Only after this message appears and this qualification cell yields, attempt one final response to exercise the Stop hook. Its block must return you to functions.wait on this original cell. Do not open or serve until this cell completes successfully. A missing hook or changed native turn means no availability."});
+text(${call("waitResidentSupervision")});
+text(${call("requireResidentSupervision")});`;
+}
+
 
 function cli(args,timeout=30000,missingPath,input){
 return new Promise((resolve,reject)=>{
@@ -241,6 +272,7 @@ export async function openResident(g,meta,trusted,expected,attempt,root){
 const turn=meta?.["x-codex-turn-metadata"]?.turn_id;
 if(meta?.threadId!==trusted.parent||typeof turn!=="string"||!turn)
 throw Error("Native resident identity mismatch");
+await ownerSupervision.requireSupervision(g,meta,trusted);
 if(g.parkedOpenBusy)throw Error("Native open already in progress");
 if(g.parkedSocket!==undefined&&!g.parkedResident?.credentials)
 throw Error("Unfenced legacy owner requires quiescence proof");
@@ -496,6 +528,8 @@ return {kind:"native_takeover_packet",sendAuthorized:false,expected,calls:{takeo
 // This path retains the original native object and socket. It cannot recreate
 // a lost runtime. Failure after the synchronous fence is permanently consumed.
 export async function claimServeExisting(g,meta,expected,token){
+// Qualification precedes the original synchronous proof-and-fence section.
+await ownerSupervision.requireSupervision(g,meta,JSON.parse(g.parkedResident?.descriptor||"null"));
 const o=g.parkedResident,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
 const binding=o?.binding,socket=o?.socket;
 const retained=o&&Array.isArray(o.recovery)&&o.recovery.length>0&&
@@ -606,6 +640,8 @@ return call.request;
 }
 
 export async function continueServeExisting(g,meta,expected,token){
+// Retained feature proof is not a lease or native continuation authorization.
+await ownerSupervision.requireRetainedSupervision(g,meta,JSON.parse(g.parkedResident?.descriptor||"null"));
 const o=g.parkedResident,r=o?.serveExistingRelay;
 const turn=meta?.["x-codex-turn-metadata"]?.turn_id;
 const binding=o?.binding;
@@ -776,7 +812,7 @@ if(!pending.size)throw Error("Serve-existing relay stalled; preserve session");
 reply=await Promise.race(pending.values());pending.delete(reply.id);
 }`;
 return {kind:continuation?"native_post_arm_continuation_packet":"native_serve_existing_packet",lifecycle:residentLifecycle,
-session:owner.session,generation:owner.generation,calls:{serve}};
+session:owner.session,generation:owner.generation,calls:continuation?{serve}:{qualify:buildSupervisionCall(trusted,hash),serve}};
 }
 
 function buildPoolServe(trusted,parent,attempt){
@@ -814,7 +850,7 @@ const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
 console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.requestMeta,${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
 }`;
 return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,workers:configured,
-trusted,pins,openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident pool open"})+"));",
+trusted,pins,openAttempt:attempt,lifecycle:residentLifecycle,calls:{qualify:buildSupervisionCall(trusted,hash),open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident pool open"})+"));",
 serve:buildPoolServe(trusted,parent,attempt)}};
 }
 
@@ -843,7 +879,7 @@ console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.req
 ${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
 }`;
 return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,worker,trusted,pins,
-openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));",serve:buildResidentServe(trusted,parent,attempt)}};
+openAttempt:attempt,lifecycle:residentLifecycle,calls:{qualify:buildSupervisionCall(trusted,hash),open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));",serve:buildResidentServe(trusted,parent,attempt)}};
 }
 
 function buildResidentServe(trusted,parent,attempt){
