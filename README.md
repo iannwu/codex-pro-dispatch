@@ -6,7 +6,7 @@
 
 Dispatch work from Codex or Claude Code to ChatGPT through the official native Mac apps.
 
-**No browser control. No pop-up browsers. No computer-use automation.**
+**No browser control. No pop-ups. No routing issues. No computer-use takeover.**
 
 Codex Pro Dispatch supports:
 
