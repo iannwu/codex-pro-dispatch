@@ -2,6 +2,31 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## Unreleased
+
+## [1.3.0] - 2026-09-18
+
+- Add `worker set --confirm-worker`, which records `user-confirmed-worker`.
+  The user chooses any available model and reasoning effort in the dedicated
+  conversation; the helper still verifies no model. `--confirm-pro` remains a
+  legacy alias, existing `user-confirmed-pro` workers load unchanged, and
+  activation and queued-resume gates accept exactly those two markers.
+- Add an explicit one/two-worker pool, collector-only reopen recovery, and a
+  one-listener scheduler whose capacity matches the configured pool. Prepared,
+  never-armed recovery keeps its first-send path; armed work stays collect-only.
+  Explicit recover-start after physical-quiescence can fence a crash or reboot
+  that left no graceful transport-audit; missing audit is never unsent.
+  Automatic startup stays unsupported. Native overlap and listener replacement
+  were qualified on the release implementation; app reopen, laptop reboot, and
+  legacy migration remain environment-specific recovery gates.
+- Move resident admission into bounded native calls instead of an independently
+  living waiter process. Owner nonrenewal withdraws readiness and closes the
+  socket; it does not time out accepted Pro work or authorize a resend.
+- Keep owner-loss detection active across a returned stop until cleanup runs,
+  and allow ten seconds for each read-only post-claim authority check.
+- Preserve the existing guarded recovery rules. Forced kernel termination
+  and automatic startup remain unqualified. Live reboot remains a native gate.
+
 ## [1.3.0-rc.1] - 2026-09-14
 
 Local release candidate. The live native acceptance matrix is still pending;
@@ -16,6 +41,30 @@ this is not a stable or public release.
   and at-most-once sending.
 - Add client setup, native lifecycle, compatibility, packaging, and admission
   regression coverage for the candidate.
+- Preserve every native tool envelope with its operation identity before
+  decoding, verify ambiguous evidence writes byte-for-byte and stop when
+  persistence is unconfirmed, accept only the two evidenced send
+  acknowledgment shapes without inferring a submission, reconcile unresolved
+  post-arm receipts to `indeterminate` from resident failure finalization,
+  recover a lost serve-claim acknowledgment through an invocation-bound
+  ownership token, close a failed residence as `resident_failed` with a
+  persisted failure summary and the immutable transport reason reported
+  separately, refuse further admission after an unresolved delivery, and let
+  collect-only observation publish an already-complete receipt whose queue
+  history was never staged.
+- Make resident readiness explicit and claimed: `resident-next` proves it is
+  waiting for the exact next ordinal with a heartbeat marker that a resident
+  rendezvous atomically claims as its command ticket, while the waiter retires
+  it atomically on return. A client that finds no live waiter, stale
+  readiness, or a waiter that returned before the claim publishes nothing, so
+  nothing is burned and the same request can be submitted once service is
+  actually waiting; a waiter whose readiness was claimed stays to observe that
+  publication.
+- Add `failed-resident-packet`, the explicit replacement for a residence that
+  failed without capturing a request or holding a delivery: it proves every
+  unobserved command expired and absent from canonical state, binds to the
+  same retained owner, task and worker, consumes the once-only replacement
+  marker, preserves all old evidence and never replays those requests.
 
 ## [1.2.2] - 2026-09-05
 

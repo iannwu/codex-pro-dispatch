@@ -22,7 +22,8 @@ class ClaudeRegistrationTests(unittest.TestCase):
                               capture_output=True, text=True, timeout=10)
 
     def install_source(self):
-        for name in ('SKILL.md', 'scripts/pro-dispatch', 'scripts/parked-activation.mjs'):
+        for name in ('SKILL.md', 'scripts/pro-dispatch', 'scripts/parked-activation.mjs',
+                     'scripts/parked-serving.mjs'):
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture, must never execute\n')
@@ -37,6 +38,14 @@ class ClaudeRegistrationTests(unittest.TestCase):
         self.source.mkdir(parents=True)
         (self.source / 'SKILL.md').write_text('partial')
         self.assertNotEqual(self.run_script().returncode, 0)
+        self.assertFalse(self.target.parent.exists())
+
+    def test_missing_serving_module_refused(self):
+        self.install_source()
+        (self.source / 'scripts/parked-serving.mjs').unlink()
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('missing or incomplete', result.stderr)
         self.assertFalse(self.target.parent.exists())
 
     def test_install_repeat_and_remove_preserve_source(self):

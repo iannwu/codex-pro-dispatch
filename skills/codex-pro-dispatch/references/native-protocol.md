@@ -23,9 +23,11 @@ Do not treat these assumptions as satisfied automatically. Complete the six-capa
 ## Worker setup
 
 1. The user opens one dedicated Chat conversation.
-2. The user visibly selects Pro.
-3. Resolve and save its stable conversation ID.
-4. Treat the model as `user-confirmed-pro`, not machine verified.
+2. The user chooses the model and reasoning effort in that conversation.
+3. Resolve and save its stable conversation ID with `worker set --confirm-worker`.
+4. The stored marker (`user-confirmed-worker`, or `user-confirmed-pro` from a
+   legacy `--confirm-pro` setup) records the user's confirmation of the
+   conversation, not a machine-verified model.
 
 A worker title is a label only. Conversation identity comes from the stable ID.
 

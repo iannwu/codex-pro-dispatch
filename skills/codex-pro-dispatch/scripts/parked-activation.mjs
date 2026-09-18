@@ -23,10 +23,22 @@ const dir=await fs.realpath(dirname(fileURLToPath(import.meta.url)));
 // owned by the same user as its private session files.
 const ownerUid=typeof process==="undefined"?(await fs.stat(dir)).uid:process.getuid();
 const helper=join(dir,"pro-dispatch"),J=JSON.stringify;
+// A yielded exec cell is not a daemon. Its native calls belong to this owner
+// turn. Carry the continuation obligation in both the packet and the first
+// serve output, so the owner cannot mistake a startup receipt for completion.
+const residentLifecycle=Object.freeze({
+mode:"active_owner_turn",detachedSupported:false,
+onYield:{tool:"functions.wait",cell_id:"the actual returned serve cell ID",yield_time_ms:60000},
+instruction:"Do not send a final response while serve is running. Share the session path in commentary once, then automatically call functions.wait on the original returned cell ID after every yield, in this same owner turn, until serve completes. Do not ask for periodic confirmation, send routine progress messages, replay serve, or start a replacement. Waiting is execution supervision, not readiness or send authorization.",
+onCompletion:"Verify the original serve outcome and cleanup evidence before final response. On failure preserve the cell ID, session and reservations; never infer permission to resend or replace."
+});
+// Worker gates accept exactly the two user-confirmation markers the helper
+// writes; neither verifies a model. The literals stay inline because several
+// gate functions are serialized into packets and cannot see module scope.
 const pins={
-  "parked-runner.js":"e9731cc362f7929cf9993bb256554a2377e089edc780d457ef7306c6de211a44",
-"parked-socket.mjs":"cdb435ff84dbb13774b0e69dde77c1b8da4b11819500f87ffb313c26549480a2",
-"parked-client.mjs":"f77698abac3f59ba0da48a39dfe6a4d8e3583f26b8d16b5e58975be2ecb22d27"
+  "parked-runner.js":"310e6c48254a116a7df0587dc39aea12a51d140f6f4f77d34bf99f2979539d3a",
+"parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
+"parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
 };
 const sources={};
 for(const [name,hash] of Object.entries(pins)){
@@ -36,6 +48,11 @@ createHash("sha256").update(raw).digest("hex")!==hash)
 throw Error("Pinned script mismatch: "+name);
 sources[name]=raw.toString("utf8");
 }
+const servingPath=join(dir,"parked-serving.mjs"),servingHash="bbb799f73b6d198d9c73a73f1d67af4979825e76820f17960431fe28f28506a5";
+if(await fs.realpath(servingPath)!==servingPath||createHash("sha256").update(await fs.readFile(servingPath)).digest("hex")!==servingHash)
+throw Error("Pinned serving module mismatch");
+const {createRunner,servePool,serveResident}=await import(pathToFileURL(servingPath).href+"?sha256="+servingHash);
+
 function cli(args,timeout=30000,missingPath,input){
 return new Promise((resolve,reject)=>{
 const child=execFile("python3",[helper,...args],{
@@ -80,7 +97,7 @@ v.assignment_absent!==true||v.send_authorized!==false||
 v.request_id!==r.requestId||v.fingerprint!==r.fingerprint||
 v.client_session_id!==r.clientSessionId||v.raw_prompt_sha256!==r.promptSha256||
 v.worker_conversation_id!==c.worker||
-v.worker_model_confirmation!=="user-confirmed-pro"||
+!["user-confirmed-worker","user-confirmed-pro"].includes(v.worker_model_confirmation)||
 v.paths?.config_dir!==c.configDir||v.paths?.state_dir!==c.stateDir)
 throw Error("Canonical queued-resume proof does not match trusted session");
 }
@@ -193,7 +210,8 @@ if(missingPath)await cli(["status",r.unobserved.requestId],10000,missingPath);
 const s=await cli(["status","--current"],10000),q=await cli(["queue","status"],10000);
 if(s.active_assignment!==null||s.active_cooldown!==null||
 !Array.isArray(q.requests)||q.requests.some(v=>v.state==="claimed")||
-s.worker?.conversation_id!==c.worker||s.worker?.model_confirmation!=="user-confirmed-pro"||
+s.worker?.conversation_id!==c.worker||
+!["user-confirmed-worker","user-confirmed-pro"].includes(s.worker?.model_confirmation)||
 s.paths?.config_dir!==c.configDir||s.paths?.state_dir!==c.stateDir)
 throw Error("Terminal replacement authority mismatch");
 const rows=q.requests.filter(x=>x.request_id===r.requestId);
@@ -211,116 +229,626 @@ await absent(c.stateDir+"/native-client");
 return JSON.stringify([v,a]);
 }
 
-async function residentClosureCheck(directory,saved,audit,c,preclose=false){
-const cancelled=audit.reason==="resident_start_cancelled";
-if(saved.resident!==true||saved.leaseMs!==null||saved.expiresAt!==null||
-(!cancelled&&audit.reason!=="resident_stopped")||audit.sessionId!==saved.sessionId||
-!Array.isArray(audit.events)||audit.events.length%2!==0||(cancelled&&audit.events.length!==0))
-throw Error("Not a clean resident closure");
-const allowed=preclose?["session.json","wake.sock"]:["session.json","transport-audit.json","resident-stop","resident-stop.json"];
-const receipts=[],seen=new Set();
-if(cancelled){
-try{
-const raw=await privateBytes(directory+"/command-1.json",4096),v=JSON.parse(raw.toString("utf8"));
-const prompt=await privateBytes(directory+"/command-1/prompt.txt",4194304);
-const {createHash}=await import("node:crypto");
-if(v.sessionId!==saved.sessionId||v.ordinal!==1||
-typeof v.requestId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v.requestId)||
-!Number.isSafeInteger(v.deadlineAt)||v.deadlineAt>=Date.now()||
-createHash("sha256").update(prompt).digest("hex")!==v.promptSha256||
-(await fs.readdir(directory+"/command-1")).join(",")!=="prompt.txt")
-throw Error("Unserved request evidence mismatch");
-const missingPath=c.stateDir+"/assignments/"+v.requestId+".json";
-await cli(["status",v.requestId],10000,missingPath);
-await absent(missingPath);
-const q=await cli(["queue","status"]);
-if(!Array.isArray(q.requests)||q.requests.some(r=>r.request_id===v.requestId))
-throw Error("Unserved request entered queue");
-allowed.push("command-1","command-1.json");
-}catch(e){
-if(e.code!=="ENOENT")throw e;
-// Only a completely absent command is eligible without command proof.
-await absent(directory+"/command-1.json");
-await absent(directory+"/command-1");
-}
-}
-for(let i=0;i<audit.events.length;i+=2){
-const a=audit.events[i],b=audit.events[i+1],n=i/2+1;
-if(a.name!=="accepted"||a.operation!=="run"||b.name!=="finished"||
-b.disposition!=="published"||a.callId!==b.callId||a.requestId!==b.requestId||
-seen.has(a.requestId))throw Error("Unresolved resident delivery");
-seen.add(a.requestId);
-const base=directory+"/command-"+n;
-const command=await privateBytes(base+".json",4096);
-const observed=await privateBytes(directory+"/command-observed-"+n+".json",4096);
-const ready=JSON.parse((await privateBytes(directory+"/ready-"+n+".json",4096)).toString("utf8"));
-const v=JSON.parse(command.toString("utf8"));
-const prompt=await privateBytes(base+"/prompt.txt",4194304);
-const {createHash}=await import("node:crypto");
-if(!command.equals(observed)||v.sessionId!==saved.sessionId||v.ordinal!==n||
-v.requestId!==a.requestId||ready.sessionId!==saved.sessionId||ready.ordinal!==n||
-createHash("sha256").update(prompt).digest("hex")!==v.promptSha256||
-(await fs.readdir(base)).join(",")!=="prompt.txt")throw Error("Resident command evidence mismatch");
-const assignment=(await cli(["status",a.requestId])).assignment;
-const queued=await cli(["queue","status",a.requestId]);
-const text=new TextDecoder("utf-8",{fatal:true,ignoreBOM:true}).decode(prompt);
-const fingerprint=createHash("sha256").update(JSON.stringify([text,v.clientSessionId])
-.replace(/[\u007f-\uffff]/g,ch=>"\\u"+ch.charCodeAt(0).toString(16).padStart(4,"0"))).digest("hex");
-if(queued.fingerprint!==fingerprint)throw Error("Resident prompt differs from canonical request");
-receipts.push(await terminalCheck({requestId:a.requestId,clientSessionId:v.clientSessionId,
-fingerprint:queued.fingerprint,oldWorker:saved.worker,
-sentPromptSha256:assignment?.sent_prompt_sha256},c));
-allowed.push("command-"+n,"command-"+n+".json","command-observed-"+n+".json","ready-"+n+".json");
-}
-const names=await fs.readdir(directory);
-if(names.length!==allowed.length||names.some(n=>!allowed.includes(n)))
-throw Error("Unproven resident artifacts; preserve evidence");
-if(!preclose){
-const stop=JSON.parse((await privateBytes(directory+"/resident-stop.json",4096)).toString("utf8"));
-if(stop.sessionId!==saved.sessionId||(await fs.readdir(directory+"/resident-stop")).length)
-throw Error("Resident stop evidence mismatch");
-}
-const current=await cli(["status","--current"]),queue=await cli(["queue","status"]);
-if(current.active_assignment!==null||current.active_cooldown!==null||
-current.worker?.conversation_id!==c.worker||current.worker?.model_confirmation!=="user-confirmed-pro"||
-current.paths?.config_dir!==c.configDir||current.paths?.state_dir!==c.stateDir||
-!Array.isArray(queue.requests)||queue.requests.some(r=>r.state==="claimed"))
-throw Error("Resident replacement authority changed");
-return JSON.stringify(receipts);
-}
-
-export async function cancelUnstartedResident(g,meta){
-const o=g.parkedResident,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
-function check(){
-if(!o||o!==g.parkedResident||o.used!==false||o.socket!==g.parkedSocket||
-o.binding!==g.parkedBinding||g.parkedDelivery!==null||
-meta?.threadId!==o.binding?.broker||meta.threadId!==o.socket.config.parent||
-typeof turn!=="string"||!turn||turn===o.binding.turn||
-o.descriptor!==JSON.stringify(o.socket.config))throw Error("Not an interrupted unserved owner");
-}
-check();
-if(g.parkedOpenBusy)throw Error("Native open already in progress");
-g.parkedOpenBusy=true;
-try{
-const saved=JSON.parse((await privateBytes(o.directory+"/session.json",16384)).toString("utf8"));
-if(JSON.stringify(saved)!==o.descriptor||saved.helper!==helper)
-throw Error("Unserved descriptor mismatch");
-const audit={sessionId:saved.sessionId,reason:"resident_start_cancelled",events:[]};
-await residentClosureCheck(o.directory,saved,audit,saved,true);
-check();
-await publishResidentStop(o.directory,saved.sessionId);
-await o.socket.close("resident_start_cancelled");
-await absent(o.directory+"/wake.sock");
-const actual=JSON.parse((await privateBytes(o.directory+"/transport-audit.json",16384)).toString("utf8"));
-await residentClosureCheck(o.directory,saved,actual,saved);
-return {closed:true,sessionId:saved.sessionId,reason:actual.reason};
-}finally{g.parkedOpenBusy=false;}
-}
-
 async function privateDirectory(path){
 const stat=await fs.lstat(path);
 if(await fs.realpath(path)!==path||!stat.isDirectory()||stat.uid!==process.getuid()||
 (stat.mode&0o077)!==0)throw Error("Physical owner-only client directory required");
+}
+
+// The canonical helper owns replacement. Session artifacts are evidence, not
+// an expanding list of exceptions that grant authority to another execution.
+export async function openResident(g,meta,trusted,expected,attempt,root){
+const turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(meta?.threadId!==trusted.parent||typeof turn!=="string"||!turn)
+throw Error("Native resident identity mismatch");
+if(g.parkedOpenBusy)throw Error("Native open already in progress");
+if(g.parkedSocket!==undefined&&!g.parkedResident?.credentials)
+throw Error("Unfenced legacy owner requires quiescence proof");
+g.parkedOpenBusy=true;
+let fresh;
+try{
+const startCredentials={...expected,owner:attempt,parent:trusted.parent};
+if(trusted.worker_pool_sha256){
+startCredentials.worker_pool_sha256=trusted.worker_pool_sha256;
+}else startCredentials.worker=trusted.worker;
+const acquired=await cli(["resident","start",J(startCredentials)]);
+if(!["ready","collect_only"].includes(acquired.state))return acquired;
+const credentials=acquired.owner;
+// Replacement already excludes new reservations by the old generation.
+// Join only this runtime's old admission, never touch another runtime's files.
+if(g.parkedResident){
+await stopResidentAdmission(g.parkedResident);
+await g.parkedResident.socket.close("owner_replaced");
+}
+const directory=await fs.realpath(await fs.mkdtemp(root.replace(/\/$/,"")+"/pro-session-"));
+await fs.chmod(directory,448);
+fresh=await (await import("./parked-socket.mjs")).openSession(directory,trusted);
+await cli(["resident","bind-session",J({...credentials,session:{directory,
+session_id:fresh.config.sessionId,descriptor_sha256:createHash("sha256").update(J(fresh.config)).digest("hex")}})]);
+g.parkedSocket=fresh;g.parkedBinding=Object.freeze({broker:trusted.parent,turn});
+g.parkedDelivery=null;
+g.parkedResident={socket:fresh,binding:g.parkedBinding,directory,attempt,used:false,
+descriptor:J(fresh.config),credentials,recover:acquired.request_id,recovery:acquired.request_ids||[],
+preparedRecovery:acquired.prepared_ids||[],
+recoveryBindings:acquired.recovery_bindings||{},
+collectOnly:acquired.state==="collect_only",activation:{residentAdmission,stopResidentAdmission,recordResidentFailure,waitResidentStop,recordResidentJoined}};
+return {state:acquired.state,directory,sessionId:fresh.config.sessionId,
+credentials,request_id:acquired.request_id,phase:"listener_open_not_yet_waiting",
+admissionObserved:false,lifecycle:residentLifecycle};
+}catch(e){if(fresh)await fresh.close("open_failed");throw e;}
+finally{g.parkedOpenBusy=false;}
+}
+
+export function poolRecoveryPlan(owner,capacity){
+const collect=Array.isArray(owner?.recovery)?[...owner.recovery]:[];
+const sendable=Array.isArray(owner?.preparedRecovery)?[...owner.preparedRecovery]:[];
+if(collect.some(id=>sendable.includes(id)))
+throw Error("Prepared recovery cannot be collector-only");
+return capacity===undefined?{collect,sendable}:{collect,sendable,capacity};
+}
+
+export async function recoverPoolRequests(plan,hooks){
+let pendingCollect=0;
+if(plan.collect.length){
+await hooks.openCollector();
+try{
+for(const request of plan.collect){
+const result=await hooks.collect(request);
+const status=result?.observation||result?.state;
+// Collect-only ownership stays unresolved even when no native send is observed.
+if(status==="pending"||status==="not_submitted"){
+pendingCollect++;
+continue;
+}
+if(result?.ok!==true||!["published","acknowledged"].includes(status))
+throw Error("Recovery remains collect-only; preserve request");
+await hooks.endCollected(request,result);
+}
+}finally{await hooks.closeCollector();}
+}
+for(const request of plan.sendable){
+const result=await hooks.sendPrepared(request);
+if(result?.observation==="not_submitted")
+throw Error("Prepared recovery did not perform its eligible first send");
+const status=result?.observation||result?.state;
+if(result?.ok===true&&["published","acknowledged"].includes(status))
+await hooks.endPrepared(request,result);
+else if(status!=="pending")
+throw Error("Prepared recovery unresolved; retain invocation");
+}
+if(pendingCollect>=(plan.capacity??1))
+throw Error("Recovery remains collect-only; preserve request");
+}
+
+export async function waitResidentStop(owner){
+const directory=owner?.directory,sessionId=owner?.socket?.config?.sessionId;
+if(typeof directory!=="string"||typeof sessionId!=="string")
+throw Error("Resident stop wait requires the bound session");
+const waiting=waitRecord(directory,"resident-stop.json",v=>{
+if(!v||Object.keys(v).join(",")!=="sessionId"||v.sessionId!==sessionId)
+throw Error("Invalid stop");
+},600000);
+try{
+await waiting.promise;
+return {stopped:true};
+}finally{waiting.cancel();}
+}
+
+function handoffOwner(g,meta,expected){
+const o=g.parkedResident;
+if(!o||meta?.threadId!==o.credentials?.parent||g.parkedSocket!==o.socket||
+g.parkedBinding!==o.binding||!o.used||
+!['generation','owner','parent','worker_pool_sha256'].every(k=>o.credentials[k]===expected[k]))
+throw Error("Native handoff owner identity mismatch");
+return o;
+}
+
+export async function recordResidentJoined(g,meta,attempt){
+const o=handoffOwner(g,meta,g.parkedResident?.credentials??{});
+if(o.attempt!==attempt||typeof o.serveInvocation!=="string"||!o.serveInvocation)
+throw Error("Native serving invocation differs");
+const audit=JSON.parse((await privateBytes(o.directory+"/transport-audit.json",1048576)).toString("utf8"));
+if(audit.sessionId!==o.socket.config.sessionId||audit.reason!=="resident_stopped")
+throw Error("Graceful serving completion required");
+await absent(o.directory+"/wake.sock");
+if((await fs.readdir(o.directory)).some(n=>n.startsWith("waiting-")))throw Error("Waiter still active");
+const joined={generation:o.credentials.generation,owner:o.credentials.owner,parent:o.credentials.parent,
+sessionId:o.socket.config.sessionId,invocation:o.serveInvocation};
+const marker=await fs.open(o.directory+"/resident-joined.json","wx",384);
+try{await marker.writeFile(J(joined));await marker.sync();}finally{await marker.close();}
+const directory=await fs.open(o.directory,"r");
+try{await directory.sync();}finally{await directory.close();}
+o.serveJoined=Object.freeze(joined);
+return {kind:"resident_joined",sessionId:joined.sessionId,sendAuthorized:false};
+}
+
+function joinedServe(code,attempt){
+// Only this continuation can write the barrier, after the whole serving
+// function (including its finally/cleanup) has returned successfully.
+return `// @exec: {"yield_time_ms":1000}
+await (async()=>{\n${code}\n})();
+const joined=await tools.mcp__node_repl__js(${J({code:`console.log(JSON.stringify(await globalThis.parkedResident.activation.recordResidentJoined(globalThis,nodeRepl.requestMeta,${J(attempt)})));`,timeout_ms:60000,title:"Record joined resident execution"})});
+if(joined?.isError===true)throw Error("Native join barrier failed");
+text(joined);`;
+}
+
+export async function verifyHandoffContext(g,meta,expected){
+const o=handoffOwner(g,meta,expected);
+if(!o.serveJoined)throw Error("Original serving function has not joined");
+const raw=await privateBytes(o.directory+"/resident-joined.json",16384);
+if(raw.toString("utf8")!==J(o.serveJoined))throw Error("Native join barrier changed");
+return {parent:o.credentials.parent,sessionId:o.socket.config.sessionId};
+}
+
+export async function commitNativeHandoff(g,meta,expected,target){
+await verifyHandoffContext(g,meta,expected);
+if(target?.schemaVersion!==1||target.thread?.kind!=="codex"||target.thread?.hostId!=="local"||
+target.thread?.id!==expected.new_parent)throw Error("Replacement native task was not verified");
+const o=g.parkedResident;
+// There is deliberately no public CLI commit path. This private bridge runs
+// only after the native gate. It uses the existing Python lock and validator.
+const code=`import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${J(join(dir,"../../../src"))})\nfrom codex_pro_dispatch import core,resident\np=json.load(sys.stdin)\npaths=core.RuntimePaths(Path(p['config']),Path(p['state']))\nprint(json.dumps(resident._handoff_from_native(paths,p['credentials'])))`;
+return await new Promise((resolve,reject)=>{
+const child=execFile("python3",["-c",code],{timeout:30000,maxBuffer:1048576},(error,out,err)=>{
+if(error)return reject(Error(err||"Native handoff commit failed"));
+try{resolve(JSON.parse(out));}catch(e){reject(e);}
+});
+child.stdin.on("error",reject);
+child.stdin.end(J({config:o.socket.config.configDir,state:o.socket.config.stateDir,credentials:expected}));
+});
+}
+
+export function buildHandoffCall(expected,sourceHash){
+if(!/^[a-f0-9]{64}$/.test(sourceHash))throw Error("Pinned native handoff source required");
+const modulePath=join(dir,"parked-activation.mjs");
+const moduleUrl=pathToFileURL(modulePath).href+"?sha256="+sourceHash;
+const header=`const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(modulePath)})!==${J(modulePath)}||crypto.createHash("sha256").update(await fs.readFile(${J(modulePath)})).digest("hex")!==${J(sourceHash)})throw Error("Activation pin changed");
+const a=await import(${J(moduleUrl)});`;
+const native=code=>J({code,timeout_ms:60000,title:"Native listener handoff"});
+return `function value(r){if(r?.isError||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Invalid native handoff result");return JSON.parse(r.content[0].text);}
+value(await tools.mcp__node_repl__js(${native(`{${header}console.log(JSON.stringify(await a.verifyHandoffContext(globalThis,nodeRepl.requestMeta,${J(expected)})));}`)}));
+const target=value(await tools.mcp__codex_app__read_thread({threadId:${J(expected.new_parent)},turnLimit:1,includeOutputs:false}));
+if(target.schemaVersion!==1||target.thread?.id!==${J(expected.new_parent)}||target.thread?.kind!=="codex"||target.thread?.hostId!=="local")throw Error("Replacement native task does not exist locally");
+const checked={schemaVersion:1,thread:{id:target.thread.id,kind:target.thread.kind,hostId:target.thread.hostId}};
+text(value(await tools.mcp__node_repl__js({code:'{'+${J(header)}+'console.log(JSON.stringify(await a.commitNativeHandoff(globalThis,nodeRepl.requestMeta,'+${J(J(expected))}+','+JSON.stringify(checked)+')));}',timeout_ms:60000,title:"Commit native listener handoff"})));`;
+}
+
+async function handoffPacket(newParent){
+if(typeof newParent!=="string"||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(newParent))
+throw Error("Native replacement task ID required");
+const v=(await cli(["resident","inspect"])).owner;
+if(v?.version!==3||v.parent===newParent)throw Error("Different replacement task and schema-3 owner required");
+const expected={generation:v.generation,owner:v.owner,parent:v.parent,worker_pool_sha256:v.worker_pool_sha256,new_parent:newParent};
+const sourceHash=createHash("sha256").update(await fs.readFile(fileURLToPath(import.meta.url))).digest("hex");
+return {kind:"native_handoff_packet",sendAuthorized:false,calls:{handoff:buildHandoffCall(expected,sourceHash)}};
+}
+
+export async function captureTakeoverIdentity(g,meta,expected){
+const replacement=meta?.threadId,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(typeof replacement!=="string"||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(replacement)||
+typeof turn!=="string"||!turn)throw Error("identity_invalid");
+if(replacement===expected?.parent)return {outcome:"already_owner"};
+g.parkedTakeover=Object.freeze({replacement,turn,expected});
+return {replacement_task_id:replacement};
+}
+
+export async function commitNativeTakeover(g,meta,expected,raw,tmpDir){
+const saved=g.parkedTakeover,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(!saved||saved.replacement!==meta?.threadId||saved.turn!==turn||J(saved.expected)!==J(expected))
+throw Error("identity_invalid");
+if(typeof raw!=="string")throw Error("old_owner_unreadable");
+if(typeof tmpDir!=="string"||!tmpDir.startsWith("/"))throw Error("identity_invalid");
+const directory=await fs.mkdtemp(tmpDir.replace(/\/$/,"")+"/pro-takeover-");
+await fs.chmod(directory,448);
+const evidence=join(directory,"owner-read.json");
+const file=await fs.open(evidence,"wx",384);
+try{await file.writeFile(raw,"utf8");await file.sync();}finally{await file.close();}
+const folder=await fs.open(directory,"r");try{await folder.sync();}finally{await folder.close();}
+const code=`import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${J(join(dir,"../../../src"))})\nfrom codex_pro_dispatch import core,resident\np=json.load(sys.stdin)\npaths=core.RuntimePaths(Path(p['config']),Path(p['state']))\nprint(json.dumps(resident._takeover_from_native(paths,p['packet'])))`;
+return await new Promise(resolve=>{
+const child=execFile("python3",["-c",code],{timeout:30000,maxBuffer:1048576},(error,out,err)=>{
+if(error){resolve({ok:false,outcome:"commit_unknown",error:String(err||error.message||error)});return;}
+try{resolve(JSON.parse(out));}catch(e){resolve({ok:false,outcome:"commit_unknown",error:String(e.message||e)});}
+});
+child.stdin.on("error",e=>resolve({ok:false,outcome:"commit_unknown",error:String(e.message||e)}));
+child.stdin.end(J({config:expected.configDir,state:expected.stateDir,packet:{schema_version:1,replacement_task_id:saved.replacement,
+expected:{generation:expected.generation,owner:expected.owner,parent:expected.parent,worker_pool_sha256:expected.worker_pool_sha256},owner_read_text:raw,evidence_path:evidence}}));
+});
+}
+
+export function buildTakeoverCall(expected,sourceHash){
+if(!/^[a-f0-9]{64}$/.test(sourceHash))throw Error("Pinned native takeover source required");
+const modulePath=join(dir,"parked-activation.mjs"),moduleUrl=pathToFileURL(modulePath).href+"?sha256="+sourceHash;
+const header=`const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(modulePath)})!==${J(modulePath)}||crypto.createHash("sha256").update(await fs.readFile(${J(modulePath)})).digest("hex")!==${J(sourceHash)})throw Error("Activation pin changed");
+const a=await import(${J(moduleUrl)});`;
+const native=(code,title)=>J({code,timeout_ms:60000,title});
+return `function value(r){if(r?.isError||r?.content?.length!==1||r.content[0].type!=="text")throw Error("identity_invalid");return JSON.parse(r.content[0].text);}
+try{
+const identity=value(await tools.mcp__node_repl__js(${native(`{${header}console.log(JSON.stringify(await a.captureTakeoverIdentity(globalThis,nodeRepl.requestMeta,${J(expected)})));}`,"Capture takeover identity")}));
+if(identity.outcome==="already_owner"){text(identity);}else{
+let read;
+try{read=await tools.mcp__codex_app__read_thread({threadId:${J(expected.parent)},turnLimit:1,includeOutputs:false});}
+catch(e){read={isError:true,error:String(e?.message||e)};}
+const exactKeys=(v,keys)=>v!==null&&typeof v==="object"&&!Array.isArray(v)&&Object.keys(v).sort().join(",")===keys;
+const deleted=exactKeys(read,"content,isError")&&read.isError===true&&Array.isArray(read.content)&&read.content.length===1&&
+exactKeys(read.content[0],"text,type")&&read.content[0].type==="text"&&
+read.content[0].text===${J("No Codex thread found for threadId: "+expected.parent+". Hosts without a readable match: local")};
+let unreadable=read?.isError||read?.truncated===true||read?.textTruncated===true||read?.content?.length!==1||read.content[0]?.type!=="text"||typeof read.content[0]?.text!=="string";
+if(!unreadable){try{const parsed=JSON.parse(read.content[0].text);if(parsed&&Object.hasOwn(parsed,"owner_read_failure"))unreadable=true;}catch{unreadable=true;}}
+if(!deleted&&unreadable){text({ok:false,outcome:"old_owner_unreadable",send_authorized:false});}else{
+const raw=deleted?JSON.stringify({owner_read_failure:read}):read.content[0].text;
+const commitCode='{'+${J(header)}+'console.log(JSON.stringify(await a.commitNativeTakeover(globalThis,nodeRepl.requestMeta,'+${J(J(expected))}+','+JSON.stringify(raw)+',nodeRepl.tmpDir)));}';
+text(value(await tools.mcp__node_repl__js({code:commitCode,timeout_ms:60000,title:"Commit takeover"})));}}}catch(e){if(!String(e?.message||e).includes("identity_invalid"))throw e;text({ok:false,outcome:"identity_invalid",send_authorized:false});}`;
+}
+
+async function takeoverPacket(){
+const status=await cli(["status","--current"]),v=(await cli(["resident","inspect"])).owner;
+if(v?.version!==3)throw Error("Takeover requires a schema-3 resident owner");
+const expected={generation:v.generation,owner:v.owner,parent:v.parent,worker_pool_sha256:v.worker_pool_sha256,
+configDir:status.paths?.config_dir,stateDir:status.paths?.state_dir};
+if(typeof expected.configDir!=="string"||typeof expected.stateDir!=="string")throw Error("Current status lacks canonical paths");
+const sourceHash=createHash("sha256").update(await fs.readFile(fileURLToPath(import.meta.url))).digest("hex");
+return {kind:"native_takeover_packet",sendAuthorized:false,expected,calls:{takeover:buildTakeoverCall(expected,sourceHash)}};
+}
+
+// This path retains the original native object and socket. It cannot recreate
+// a lost runtime. Failure after the synchronous fence is permanently consumed.
+export async function claimServeExisting(g,meta,expected,token){
+const o=g.parkedResident,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+const binding=o?.binding,socket=o?.socket;
+const retained=o&&Array.isArray(o.recovery)&&o.recovery.length>0&&
+new Set(o.recovery).size===o.recovery.length&&o.recovery.every(r=>typeof r==="string"&&r)&&
+o.recover===o.recovery[0]&&typeof o.collectOnly==="boolean";
+if(!o||!["socket","binding","directory","attempt","used","descriptor","credentials",
+"recover","recovery","preparedRecovery","recoveryBindings","collectOnly","activation"].every(k=>Object.hasOwn(o,k))||
+g.parkedOpenBusy!==false||g.parkedSocket!==o.socket||
+g.parkedBinding!==o.binding||g.parkedDelivery!==null||
+meta?.threadId!==expected.parent||o.binding?.broker!==expected.parent||
+typeof turn!=="string"||!turn||
+typeof o.binding.turn!=="string"||!o.binding.turn||
+o.used!==false||o.serveInvocation!==undefined||o.serveExistingClaim!==undefined||
+o.serveExistingRelay!==undefined||o.unusedReplacement!==undefined||
+o.admission!==undefined||o.failureRecord!==undefined||o.failureFinalRecord!==undefined||
+o.serveJoined!==undefined||(!retained&&(o.collectOnly!==false||o.recover!=null))||
+!Array.isArray(o.recovery)||(!retained&&o.recovery.length)||
+!Array.isArray(o.preparedRecovery)||o.preparedRecovery.length||
+!o.recoveryBindings||typeof o.recoveryBindings!=="object"||Array.isArray(o.recoveryBindings)||
+(!retained&&Object.keys(o.recoveryBindings).length)||
+!["residentAdmission","stopResidentAdmission","recordResidentFailure","waitResidentStop","recordResidentJoined"].every(k=>typeof o.activation?.[k]==="function")||
+!o.socket||typeof o.socket.receive!=="function"||typeof o.socket.close!=="function"||
+J(o.socket.config)!==o.descriptor||o.directory!==expected.session.directory||
+o.socket.config.sessionId!==expected.session.session_id||
+o.attempt!==expected.owner||
+!["generation","owner","parent",...(expected.worker_pool_sha256?["worker_pool_sha256"]:["worker"])].every(k=>o.credentials?.[k]===expected[k])||
+createHash("sha256").update(o.descriptor).digest("hex")!==expected.session.descriptor_sha256)
+throw Error("Serve-existing native proof failed; preserve session");
+// No await before fencing: a second recovery or original serve cannot race us.
+o.used=true;o.serveExistingClaim=token;
+const claim=await cli(["resident","claim-serve-existing",J(expected)]);
+// Canonical receipt validation never grants a resend. Require the retained
+// native plan to match it exactly before starting the existing collector.
+const plan=claim.recovery;
+if(retained ? !plan||J(o.recovery)!==J(plan.request_ids)||o.recover!==plan.request_id||
+J(o.preparedRecovery)!==J(plan.prepared_ids)||
+J(Object.keys(o.recoveryBindings).sort())!==J(Object.keys(plan.recovery_bindings).sort())||
+o.recovery.some(r=>J(Object.entries(o.recoveryBindings[r]??{}).sort())!==J(Object.entries(plan.recovery_bindings[r]).sort()))
+: plan!==undefined)throw Error("Serve-existing recovery proof differs; preserve claim");
+// Open creates no receive waiter. The pinned socket only records request
+// events after receive(), which permanently writes ready-N. The canonical
+// claim checks the exact pristine inventory, including absence of ready-N.
+if(g.parkedResident!==o||g.parkedSocket!==socket||o.socket!==socket||g.parkedBinding!==binding||o.binding!==binding||
+meta?.threadId!==expected.parent||meta?.["x-codex-turn-metadata"]?.turn_id!==turn||
+o.used!==true||o.serveExistingClaim!==token||o.serveInvocation!==undefined||o.admission!==undefined||
+g.parkedDelivery!==null||J(o.socket.config)!==o.descriptor)
+throw Error("Serve-existing native proof changed; preserve claim");
+// Only a successfully fenced, pristine same-task claim may bind a later turn.
+// The original frozen binding is never mutated; all subsequent calls must
+// match the new turn, and a lost reply still leaves this claim consumed.
+if(turn!==binding.turn)o.binding=g.parkedBinding=Object.freeze({broker:expected.parent,turn});
+o.serveExistingRelay={token,binding:o.binding,socket:o.socket,expected,started:false};
+return {claimed:true};
+}
+
+// A retained claim owns one continuation on the native object. Module imports
+// may be fresh on every host call. Replies settle each emitted
+// host call once. Lost/duplicate replies cannot restart or recreate that loop.
+export async function replaceUnusedServing(g,meta,expected,token){
+const o=g.parkedResident,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(!o||meta?.threadId!==expected.parent||o.binding?.broker!==expected.parent||
+!["socket","binding","directory","attempt","used","descriptor","credentials","recover","recovery","preparedRecovery","recoveryBindings","collectOnly","activation"].every(k=>Object.hasOwn(o,k))||
+typeof turn!=="string"||!turn||g.parkedBinding!==o.binding||
+g.parkedSocket!==o.socket||g.parkedOpenBusy!==false||g.parkedDelivery!==null||
+o.used!==true||typeof o.serveExistingClaim!=="string"||!o.serveExistingClaim||
+o.unusedReplacement!==undefined||o.serveInvocation!==undefined||
+o.admission!==undefined||o.failureRecord!==undefined||o.failureFinalRecord!==undefined||
+o.serveJoined!==undefined||o.collectOnly!==false||o.recover!=null||
+!Array.isArray(o.recovery)||o.recovery.length||!Array.isArray(o.preparedRecovery)||o.preparedRecovery.length||
+!o.recoveryBindings||typeof o.recoveryBindings!=="object"||Array.isArray(o.recoveryBindings)||Object.keys(o.recoveryBindings).length||
+(o.serveExistingRelay!==undefined&&(!o.serveExistingRelay||o.serveExistingRelay.started!==false||
+o.serveExistingRelay.token!==o.serveExistingClaim||o.serveExistingRelay.socket!==o.socket||o.serveExistingRelay.binding!==o.binding))||
+typeof o.socket?.close!=="function"||typeof o.socket?.receive!=="function"||
+J(o.socket.config)!==o.descriptor||o.directory!==expected.session.directory||
+o.socket.config.sessionId!==expected.session.session_id||o.attempt!==expected.owner||
+!["generation","owner","parent",...(expected.worker_pool_sha256?["worker_pool_sha256"]:["worker"])].every(k=>o.credentials?.[k]===expected[k])||
+createHash("sha256").update(o.descriptor).digest("hex")!==expected.session.descriptor_sha256)
+throw Error("Unused replacement native proof failed; preserve session");
+const socket=o.socket,binding=o.binding;
+// Synchronous permanent fence also rejects a delayed original serve body.
+o.unusedReplacement=token;o.serveInvocation="unused-replacement:"+token;
+const result=await cli(["resident","replace-unused-serving",J(expected)]);
+if(result?.replaced!==true||g.parkedResident!==o||g.parkedSocket!==socket||
+o.socket!==socket||g.parkedBinding!==binding||o.binding!==binding||
+meta?.threadId!==expected.parent||meta?.["x-codex-turn-metadata"]?.turn_id!==turn)
+throw Error("Unused replacement result uncertain; preserve evidence");
+await socket.close("unused_serving_replaced");
+return {replaced:true,sendAuthorized:false};
+}
+
+function retainedRelay(g,meta,token){
+const o=g.parkedResident,r=o?.serveExistingRelay;
+if(!r||r.token!==token||o.serveExistingClaim!==token||o.used!==true||
+o.unusedReplacement!==undefined||r.continuing!==undefined||
+g.parkedSocket!==r.socket||o.socket!==r.socket||g.parkedBinding!==r.binding||o.binding!==r.binding||
+meta?.threadId!==r.expected.parent||meta?.["x-codex-turn-metadata"]?.turn_id!==r.binding.turn)
+throw Error("Serve-existing relay identity changed; preserve claim");
+return r;
+}
+
+// Consume before crossing the outer host boundary. A lost send reply never
+// makes that call dispatchable again, including across turn changes.
+export function claimRelayCall(g,meta,token,id){
+const r=retainedRelay(g,meta,token),call=r.pending?.get(id);
+if(!call||call.dispatched)throw Error("Relay call already consumed or unknown");
+call.dispatched=true;
+return call.request;
+}
+
+export async function continueServeExisting(g,meta,expected,token){
+const o=g.parkedResident,r=o?.serveExistingRelay;
+const turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+const binding=o?.binding;
+if(!r||!r.started||r.done||r.error||r.continuing!==undefined||
+!expected.worker_pool_sha256||J(r.expected)!==J(expected)||
+o.used!==true||o.serveExistingClaim!==r.token||o.unusedReplacement!==undefined||
+o.failureRecord!==undefined||o.failureFinalRecord!==undefined||o.serveJoined!==undefined||
+g.parkedOpenBusy!==false||g.parkedDelivery!==null||
+meta?.threadId!==expected.parent||binding?.broker!==expected.parent||
+typeof turn!=="string"||!turn||turn===binding.turn||r.retiredTurns?.has(turn)||
+g.parkedBinding!==binding||r.binding!==binding||
+g.parkedSocket!==o.socket||r.socket!==o.socket||
+o.attempt!==expected.owner||o.directory!==expected.session.directory||
+o.socket.config.sessionId!==expected.session.session_id||J(o.socket.config)!==o.descriptor||
+createHash("sha256").update(o.descriptor).digest("hex")!==expected.session.descriptor_sha256||
+!["generation","owner","parent","worker_pool_sha256"].every(k=>o.credentials?.[k]===expected[k])||
+typeof o.serveInvocation!=="string"||!o.serveInvocation||
+!(r.pending instanceof Map)||r.pending.size<1||r.pending.size>2)
+throw Error("Post-arm continuation proof failed; preserve relay");
+// This is the exact read-only guard generated by servePool.checked, not an
+// arbitrary REPL call or a title-based allowlist. No lost side effect is replayed.
+const code=`{const o=globalThis.parkedResident;
+if(nodeRepl.requestMeta?.threadId!==${J(expected.parent)}||o?.attempt!==${J(expected.owner)}||
+o.socket!==globalThis.parkedSocket||JSON.stringify(o.socket.config)!==o.descriptor)
+throw Error("Resident owner changed");if(o.binding!==globalThis.parkedBinding||nodeRepl.requestMeta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)throw Error("Native turn changed");console.log("{}");}`;
+// Older relays lack per-call dispatch metadata. They qualify only if every
+// pending call is still in the retained, never-emitted queue. Missing metadata
+// for an already-emitted call is uncertainty, not permission to reconstruct it.
+const calls=[...r.pending].map(([id,entry])=>({entry,request:entry.request??
+(r.calls.filter(c=>c.id===id).length===1?r.calls.find(c=>c.id===id):null)}));
+if(calls.some(c=>c.request?.tool!=="mcp__node_repl__js"||
+J(c.request.args)!==J({code,timeout_ms:60000,title:"Resident pool owner"})))
+throw Error("Outstanding call is not a retained owner check; collect-only recovery required");
+// Fence the old outer driver synchronously, including replies arriving while
+// canonical checks are in progress. Failure leaves this fence in place.
+r.continuing=token;
+const current=(await cli(["resident","check",J(o.credentials)])).owner;
+if(!current||!["generation","owner","parent","worker_pool_sha256"].every(k=>current[k]===expected[k])||
+J(current.session)!==J(expected.session))throw Error("Canonical continuation owner changed");
+const slots=current.slots?.filter(s=>s.request!==null);
+if(!slots||slots.length!==calls.length||slots.some(s=>
+s.invocation?.request!==s.request||
+!s.invocation?.invocation?.startsWith(o.serveInvocation+"-")||s.phase==="collect_only"))
+throw Error("Retained pool invocation differs; collect-only recovery required");
+for(const s of slots){
+const a=(await cli(["status",s.request])).assignment;
+if(a?.assignment_id!==s.request||a.parent_task_id!==expected.parent||
+a.worker_conversation_id!==s.worker_conversation_id||a.status!=="armed"||
+a.no_resend!==true||a.submission_count!==0)
+throw Error("Retained armed request differs; collect-only recovery required");
+}
+if(J((await cli(["resident","check",J(o.credentials)])).owner)!==J(current))
+throw Error("Canonical continuation state changed");
+if(g.parkedResident!==o||o.binding!==binding||g.parkedBinding!==binding||
+g.parkedSocket!==r.socket||r.continuing!==token||
+meta?.threadId!==expected.parent||meta?.["x-codex-turn-metadata"]?.turn_id!==turn||
+calls.some(c=>r.pending.get(c.request.id)!==c.entry))throw Error("Continuation proof changed");
+// Rebind the same promises, invocation and request identities. Never run serve
+// or rendezvous again. Only the interrupted read-only guards are reissued.
+o.binding=g.parkedBinding=r.binding=Object.freeze({broker:expected.parent,turn});
+o.serveExistingClaim=r.token=token;
+r.retiredTurns??=new Set();r.retiredTurns.add(binding.turn);
+r.calls=calls.map(c=>{c.entry.request=c.request;c.entry.dispatched=false;return c.request;});
+r.resumePoll=true;delete r.continuing;
+return {claimed:true,continued:true};
+}
+
+export async function serveExistingStep(g,meta,token,reply){
+const r=retainedRelay(g,meta,token),o=g.parkedResident;
+if(!r.started){
+if(reply!==null)throw Error("Unexpected relay reply");
+r.started=true;r.pending=new Map();r.calls=[];r.outputs=[];r.serial=0;r.done=false;
+const host=Object.fromEntries(["exec_command","write_stdin","mcp__node_repl__js","mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread","mcp__codex_app__navigate_to_codex_page"].map(tool=>[tool,args=>new Promise((resolve,reject)=>{
+const id=++r.serial,request={id,tool,args};r.pending.set(id,{resolve,reject,request,dispatched:false});r.calls.push(request);r.wake?.();
+})]));
+const text=value=>r.outputs.push(value),trusted=JSON.parse(o.descriptor);
+const serve=r.expected.worker_pool_sha256?servePool:serveResident;
+r.running=(async()=>{
+await serve(host,text,trusted,r.expected.parent,r.expected.owner,residentLifecycle,token,poolRecoveryPlan,recoverPoolRequests);
+const joined=await host.mcp__node_repl__js({code:`console.log(JSON.stringify(await globalThis.parkedResident.activation.recordResidentJoined(globalThis,nodeRepl.requestMeta,${J(r.expected.owner)})));`,timeout_ms:60000,title:"Record joined resident execution"});
+if(joined?.isError===true)throw Error("Native join barrier failed");
+text(joined);
+})().then(()=>{r.done=true;r.wake?.();},e=>{r.error=String(e?.message||e);r.wake?.();});
+}else if(r.resumePoll&&reply===null){
+r.resumePoll=false;
+}else{
+if(!reply||!r.pending.get(reply.id)?.dispatched||!Object.hasOwn(reply,"value")&&!Object.hasOwn(reply,"error"))
+throw Error("Unknown or consumed relay reply; preserve claim");
+const call=r.pending.get(reply.id);r.pending.delete(reply.id);
+if(Object.hasOwn(reply,"error"))call.reject(Error(reply.error));else call.resolve(reply.value);
+}
+// Settle the continuation's microtasks, never wait on a host call inside REPL.
+await new Promise(resolve=>setImmediate(resolve));
+// A local asynchronous continuation (filesystem work or an observation delay)
+// can outlive one event-loop turn without having a host call ready yet. Wait
+// for its next call or terminal result instead of telling the outer driver
+// that an otherwise live relay has stalled. Outstanding host calls must still
+// return to the driver so it can deliver their replies.
+if(!r.pending.size&&!r.done&&!r.error){
+await new Promise(resolve=>{r.wake=resolve;});
+delete r.wake;
+}
+// Upgrade only calls still in the original closure's un-emitted queue.
+for(const request of r.calls){
+const call=r.pending.get(request.id);
+if(!call)throw Error("Unbound retained relay call");
+if(call.request===undefined){call.request=request;call.dispatched=false;}
+}
+return {calls:r.calls.splice(0),outputs:r.outputs.splice(0),done:r.done,error:r.error??null};
+}
+
+async function serveExistingPacket(directory,replaceUnused=false,continuation=false){
+await privateDirectory(directory);
+const current=await cli(["resident","inspect"]),owner=current.owner;
+if(!owner?.session||owner.session.directory!==directory)
+throw Error("Bound resident session required");
+const raw=await privateBytes(directory+"/session.json",16384),trusted=JSON.parse(raw);
+if(createHash("sha256").update(raw).digest("hex")!==owner.session.descriptor_sha256||
+trusted.helper!==helper||trusted.parent!==owner.parent||trusted.resident!==true)
+throw Error("Bound resident descriptor differs");
+const expected={generation:owner.generation,owner:owner.owner,parent:owner.parent,
+...(owner.worker_pool_sha256?{worker_pool_sha256:owner.worker_pool_sha256}:{worker:owner.worker}),
+session:owner.session};
+const token=randomBytes(16).toString("hex");
+const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
+const code=`{try{
+const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
+const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
+console.log(JSON.stringify(await activation.${replaceUnused?"replaceUnusedServing":continuation?"continueServeExisting":"claimServeExisting"}(globalThis,nodeRepl.requestMeta,${J(expected)},${J(token)})));
+}catch(e){console.log(JSON.stringify({claimed:false,error:String(e?.message||e)}));}}`;
+if(replaceUnused)return {kind:"native_unused_replacement_packet",session:owner.session,generation:owner.generation,calls:{replace:`
+const raw=await tools.mcp__node_repl__js(${J({code,timeout_ms:60000,title:"Replace consumed unused serving session"})});
+if(raw?.isError===true||raw?.status==="failed"||raw?.content?.length!==1||raw.content[0].type!=="text")throw Error("Unused replacement uncertain; preserve evidence");
+const value=JSON.parse(raw.content[0].text);
+if(value?.replaced!==true)throw Error("Unused replacement rejected or uncertain: "+(value?.error||"missing receipt"));
+text(value);`}};
+const relayCode=`{try{const a=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});console.log(JSON.stringify(await a.serveExistingStep(globalThis,nodeRepl.requestMeta,${J(token)},REPLY)));}catch(e){console.log(JSON.stringify({calls:[],outputs:[],done:false,error:String(e?.message||e)}));}}`;
+const dispatchCode=`{const a=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});console.log(JSON.stringify(a.claimRelayCall(globalThis,nodeRepl.requestMeta,${J(token)},CALL_ID)));}`;
+const serve=`// @exec: {"yield_time_ms":1000}
+let claim;
+try{claim=await tools.mcp__node_repl__js(${J({code,timeout_ms:60000,title:"Guarded serve-existing claim"})});}
+catch{throw Error("Serve-existing claim uncertain: host call failed; preserve session");}
+if(claim?.isError===true||claim?.status==="failed"||claim?.content?.length!==1||claim.content[0].type!=="text")throw Error("Serve-existing claim uncertain: missing or failed host result; preserve session");
+let receipt;
+try{receipt=JSON.parse(claim.content[0].text);}catch{throw Error("Serve-existing claim uncertain: invalid host result; preserve session");}
+if(receipt?.claimed!==true)throw Error("Serve-existing claim rejected or uncertain; preserve session: "+(typeof receipt?.error==="string"?receipt.error:"missing claim receipt"));
+const pending=new Map(),allowed=new Set(["exec_command","write_stdin","mcp__node_repl__js","mcp__codex_app__read_thread","mcp__codex_app__send_message_to_thread","mcp__codex_app__navigate_to_codex_page"]);
+let reply=null;
+for(;;){
+const raw=await tools.mcp__node_repl__js({code:${J(relayCode)}.replace("REPLY",()=>JSON.stringify(reply)),timeout_ms:60000,title:"Serve-existing relay"});
+if(raw?.isError===true||raw?.status==="failed"||raw?.content?.length!==1||raw.content[0].type!=="text")throw Error("Serve-existing relay uncertain; preserve session");
+const step=JSON.parse(raw.content[0].text);
+for(const output of step.outputs)text(output);
+if(step.error)throw Error(step.error);
+if(step.done){if(pending.size)throw Error("Unjoined relay calls");break;}
+for(const call of step.calls){
+if(!allowed.has(call.tool)||pending.has(call.id))throw Error("Invalid relay call");
+pending.set(call.id,(async()=>{try{
+const claimed=await tools.mcp__node_repl__js({code:${J(dispatchCode)}.replace("CALL_ID",()=>JSON.stringify(call.id)),timeout_ms:60000,title:"Consume retained relay call"});
+if(claimed?.isError===true||claimed?.status==="failed"||claimed?.content?.length!==1||claimed.content[0].type!=="text")throw Error("Relay dispatch uncertain; preserve call");
+const bound=JSON.parse(claimed.content[0].text);
+if(JSON.stringify(bound)!==JSON.stringify(call))throw Error("Relay dispatch identity differs");
+return {id:call.id,value:await tools[call.tool](call.args)};
+}catch(e){return {id:call.id,error:String(e?.message||e)};}})());
+}
+if(!pending.size)throw Error("Serve-existing relay stalled; preserve session");
+reply=await Promise.race(pending.values());pending.delete(reply.id);
+}`;
+return {kind:continuation?"native_post_arm_continuation_packet":"native_serve_existing_packet",lifecycle:residentLifecycle,
+session:owner.session,generation:owner.generation,calls:{serve}};
+}
+
+function buildPoolServe(trusted,parent,attempt){
+const body=servePool.toString().replace("createRunner(tools,text)","("+createRunner.toString()+")(tools,text)");
+return joinedServe(`const poolRecoveryPlan=${poolRecoveryPlan.toString()},recoverPoolRequests=${recoverPoolRequests.toString()};\nawait (${body})(tools,text,${J(trusted)},${J(parent)},${J(attempt)},${J(residentLifecycle)},undefined,poolRecoveryPlan,recoverPoolRequests);`,attempt);
+}
+
+async function poolResidentPacket(broker,parent,workers,root){
+if(broker!==parent||!validId(broker)||!Array.isArray(workers)||
+workers.length<1||workers.length>2||
+workers.some(worker=>!validId(typeof worker==="string"?worker:worker?.conversation_id)))
+throw Error("One or two trusted worker IDs required");
+if(root===undefined)throw Error("Private client root required");
+await privateDirectory(root);
+const s=await cli(["status","--current"]),ownership=await cli(["resident","inspect"]);
+const configured=s.worker_pool?.workers;
+if(!Array.isArray(configured)||configured.length!==workers.length||
+configured.some((entry,index)=>entry.conversation_id!==
+(typeof workers[index]==="string"?workers[index]:workers[index].conversation_id)))
+throw Error("Production worker pool mismatch");
+if(!configured.every(entry=>["user-confirmed-worker","user-confirmed-pro"].includes(entry.model_confirmation)))
+throw Error("Production worker confirmation mismatch");
+const trusted={helper,configDir:s.paths.config_dir,stateDir:s.paths.state_dir,parent,
+workers:configured.map(entry=>({slot:entry.slot,conversation_id:entry.conversation_id})),
+worker_pool_sha256:s.worker_pool.file_sha256,workerPoolSha256:s.worker_pool.file_sha256,
+resident:true,maxConcurrentRequests:configured.length,
+leaseMs:null,idleMs:45000,replyMs:3900000,maxSnapshots:6,observationMs:50000,activeJobMs:3600000};
+const attempt=randomBytes(16).toString("hex"),expected={generation:ownership.owner?.generation??0,
+worker_pool_sha256:trusted.worker_pool_sha256};
+const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
+const open=`{
+const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
+const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
+console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.requestMeta,${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
+}`;
+return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,workers:configured,
+trusted,pins,openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident pool open"})+"));",
+serve:buildPoolServe(trusted,parent,attempt)}};
+}
+
+async function residentPacket(broker,parent,worker,root){
+if(Array.isArray(worker))return await poolResidentPacket(broker,parent,worker,root);
+if(broker!==parent||![broker,parent,worker].every(validId))throw Error("Trusted owner IDs required");
+if(root===undefined)throw Error("Private client root required");
+await privateDirectory(root);
+const s=await cli(["status","--current"]),ownership=await cli(["resident","inspect"]);
+if(Array.isArray(s.worker_pool?.workers)&&s.worker_pool.workers.length)
+throw Error("Worker pool is active; use the pool resident packet");
+if(s.worker?.conversation_id!==worker||
+!["user-confirmed-worker","user-confirmed-pro"].includes(s.worker?.model_confirmation))
+throw Error("Production worker mismatch");
+const trusted={helper,configDir:s.paths.config_dir,stateDir:s.paths.state_dir,parent,worker,
+resident:true,leaseMs:null,idleMs:45000,replyMs:3900000,maxSnapshots:6,
+observationMs:50000,activeJobMs:3600000};
+const attempt=randomBytes(16).toString("hex"),expected={generation:ownership.owner?.generation??0};
+const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
+const open=`{
+const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(path)})!==${J(path)}||
+crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
+const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
+console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.requestMeta,
+${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
+}`;
+return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,worker,trusted,pins,
+openAttempt:attempt,lifecycle:residentLifecycle,calls:{open:"text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident open"})+"));",serve:buildResidentServe(trusted,parent,attempt)}};
+}
+
+function buildResidentServe(trusted,parent,attempt){
+const body=serveResident.toString().replace("createRunner(tools,text)","("+createRunner.toString()+")(tools,text)");
+return joinedServe(`const poolRecoveryPlan=${poolRecoveryPlan.toString()},recoverPoolRequests=${recoverPoolRequests.toString()};\nawait (${body})(tools,text,${J(trusted)},${J(parent)},${J(attempt)},${J(residentLifecycle)},undefined,poolRecoveryPlan,recoverPoolRequests);`,attempt);
 }
 
 async function clientPreflight(path){
@@ -334,12 +862,7 @@ return {filesystemAccess:true,directory:path,sendAuthorized:false,
 meaning:"Run in the actual Claude session. Does not prove rendezvous permission or native readiness."};
 }
 
-async function packet(broker,parent,worker,closedDirectory,resume,terminal,resident=false,sessionRoot){
-if(sessionRoot!==undefined){
-if(!resident)throw Error("Client directory is resident-only");
-await privateDirectory(sessionRoot);
-}
-if(resident&&(broker!==parent||resume!==undefined))throw Error("Resident binding mismatch");
+async function packet(broker,parent,worker,closedDirectory,resume,terminal){
 if(terminal!==undefined){
 terminalExpectation(terminal);
 if(resume!==undefined||closedDirectory===undefined||broker!==parent)
@@ -353,7 +876,7 @@ if(s.active_assignment!==null||s.active_cooldown!==null||
 !Array.isArray(q.requests)||q.requests.some(r=>r.state==="claimed"))
 throw Error("Authority occupied or unavailable");
 if(s.worker?.conversation_id!==worker||
-s.worker?.model_confirmation!=="user-confirmed-pro")
+!["user-confirmed-worker","user-confirmed-pro"].includes(s.worker?.model_confirmation))
 throw Error("Production worker mismatch");
 for(const key of ["config_dir","state_dir"])
 if(typeof s.paths?.[key]!=="string"||await fs.realpath(s.paths[key])!==s.paths[key])
@@ -366,7 +889,6 @@ const trusted={
 helper,configDir:s.paths.config_dir,stateDir:s.paths.state_dir,parent,worker,
 leaseMs:7200000,idleMs:45000,replyMs:3900000,maxSnapshots:6,observationMs:50000,activeJobMs:3600000
 };
-if(resident)Object.assign(trusted,{resident:true,leaseMs:null});
 if(resume!==undefined){
 resumeExpectation(resume);
 if(closedDirectory===undefined)throw Error("Closed queued session required");
@@ -408,8 +930,6 @@ for(const [name,raw] of [
 ])evidenceSha256[name]=createHash("sha256").update(raw).digest("hex");
 if(evidenceSha256["command-1/prompt.txt"]!==recovery.promptSha256)
 throw Error("Closed-session private prompt snapshot differs");
-}else if(resident&&["resident_stopped","resident_start_cancelled"].includes(closed.reason)){
-await residentClosureCheck(closedDirectory,old,closed,trusted);
 }else if(closed.reason!=="idle_expired"||
 !Array.isArray(closed.events)||closed.events.length!==0){
 throw Error("Prior session is not a matching closed, unused listener");
@@ -420,7 +940,6 @@ previous={
 directory:closedDirectory,sessionId:old.sessionId,
 descriptorSha256:createHash("sha256").update(descriptor).digest("hex"),
 auditSha256:createHash("sha256").update(audit).digest("hex"),
-...(resident&&["resident_stopped","resident_start_cancelled"].includes(closed.reason)?{residentClosed:true,unserved:closed.reason==="resident_start_cancelled"}:{}),
 ...(resume===undefined?{}:{queuedResume:resume,evidenceSha256})
 };
 if(terminal!==undefined){
@@ -452,12 +971,6 @@ if(meta?.threadId!==${J(broker)}||typeof turn!=="string"||!turn)
 throw Error("Broker identity mismatch");
 const previous=${J(previous)},attempt=${J(openAttempt)};
 const prior=globalThis.parkedSocket,binding=globalThis.parkedBinding;
-const residentOwner=globalThis.parkedResident;
-if(previous?.residentClosed&&residentOwner===undefined)throw Error("Missing resident owner");
-if(${J(resident)}&&residentOwner!==undefined&&(!previous?.residentClosed||
-residentOwner.socket!==prior||residentOwner.binding!==binding||residentOwner.used!==!previous.unserved||
-residentOwner.directory!==previous.directory||residentOwner.descriptor!==JSON.stringify(prior.config)))
-throw Error("Owner exists");
 if(!previous&&(prior!==undefined||binding!==undefined||
 globalThis.parkedDelivery!==undefined))throw Error("Do not reopen session");
 if(previous&&(!prior||typeof prior.close!=="function"||
@@ -473,12 +986,11 @@ try{
 const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
 const {dirname}=await import("node:path"),{constants}=await import("node:fs");
 ${privateReader}
-${terminal===undefined&&!previous?.residentClosed?"":`const {execFile}=await import("node:child_process");
+${terminal===undefined?"":`const {execFile}=await import("node:child_process");
 const helper=${J(helper)};
 ${cli.toString()}
 ${absent.toString()}
-${terminalCheck.toString()}
-${residentClosureCheck.toString()}`}
+${terminalCheck.toString()}`}
 ${requireClosedQueued.toString()}
 ${requireLeaseInventory.toString()}
 async function missing(path){
@@ -515,9 +1027,7 @@ if(terminalLease)await requireLeaseInventory(previous.directory,saved,audit,r);
 if(previous.evidenceSha256["command-1/prompt.txt"]!==r.promptSha256)
 throw Error("Closed queued-session prompt proof differs");
 }
-if(previous.residentClosed){
-await residentClosureCheck(previous.directory,saved,audit,${J(trusted)});
-}else if(previous.queuedResume||previous.terminal){
+if(previous.queuedResume||previous.terminal){
 await verifyQueuedEvidence();
 }else if(audit.reason!=="idle_expired"||
 !Array.isArray(audit.events)||audit.events.length!==0){
@@ -539,10 +1049,6 @@ if(hash(await privateBytes(previous.directory+"/session.json",16384))!==previous
 throw Error("Descriptor changed during recovery");
 await verifyQueuedEvidence();
 await missing(previous.directory+"/wake.sock");
-if(previous.residentClosed){
-await residentClosureCheck(previous.directory,saved,audit,${J(trusted)});
-if(globalThis.parkedResident!==residentOwner)throw Error("Resident owner changed");
-}
 if(previous.terminal&&(globalThis.parkedSocket!==prior||
 globalThis.parkedBinding!==binding||globalThis.parkedDelivery!==null||
 JSON.stringify(prior.config)!==JSON.stringify(saved)))
@@ -567,10 +1073,7 @@ const parentDirectory=await fs.open(previous.directory,"r");
 try{await parentDirectory.sync();}finally{await parentDirectory.close();}
 }
 const module=await import(${J(pathToFileURL(socket).href)});
-const sessionRoot=${J(sessionRoot??null)}??nodeRepl.tmpDir;
-${privateDirectory.toString().replaceAll("process.getuid()",String(process.getuid()))}
-if(${J(sessionRoot!==undefined)})await privateDirectory(sessionRoot);
-const tmp=await fs.mkdtemp(sessionRoot.replace(/\\/$/,"")+"/pro-session-");
+const tmp=await fs.mkdtemp(nodeRepl.tmpDir.replace(/\\/$/,"")+"/pro-session-");
 await fs.chmod(tmp,0o700);
 const directory=await fs.realpath(tmp);
 let fresh;
@@ -584,10 +1087,6 @@ throw Error("Native state changed; preserve new session "+directory);
 globalThis.parkedBinding=Object.freeze({broker:${J(broker)},turn});
 globalThis.parkedDelivery=null;
 globalThis.parkedSocket=fresh;
-if(${J(resident)})globalThis.parkedResident={
-socket:fresh,binding:globalThis.parkedBinding,directory,attempt,used:false,
-descriptor:JSON.stringify(fresh.config)
-};
 console.log(JSON.stringify({directory,sessionId:globalThis.parkedSocket.config.sessionId,
 broker:${J(broker)},parent:${J(parent)},worker:${J(worker)},turn,
 replacedSessionId:previous?.sessionId??null,phase:"listener_open_not_yet_waiting"}));
@@ -622,135 +1121,6 @@ activationValue(${call(clear)});
 text((${runnerReceipt.toString()})(completed.result));
 `;
 let openPreflight="";
-const ownerGuard=`{${gate}
-const o=globalThis.parkedResident;
-if(o?.attempt!==${J(openAttempt)}||o.socket!==globalThis.parkedSocket||
-o.binding!==globalThis.parkedBinding||JSON.stringify(o.socket.config)!==o.descriptor)
-throw Error("Owner changed");
-}`;
-const quote=v=>"'"+String(v).replace(/'/g,"'\\''")+"'";
-const residentCommand=[process.execPath,fileURLToPath(import.meta.url)]
-.map(quote).join(" ");
-const serve=resident?`// @exec: {"yield_time_ms":1000}
-const host=tools;
-{
-function value(r){
-if(r?.isError===true||!Array.isArray(r?.content)||r.content.length!==1||
-r.content[0].type!=="text")throw Error("Invalid tool result");
-return JSON.parse(r.content[0].text);
-}
-const guard=${J(ownerGuard)},quote=${quote.toString()};
-async function native(code){
-return value(await host.mcp__node_repl__js({
-code:guard+code+guard,timeout_ms:60000,title:"Resident owner"
-}));
-}
-async function checked(fn,a){await native('console.log("{}");');return await fn(a);}
-const tools={
-exec_command:a=>checked(x=>host.exec_command(x),a),
-write_stdin:a=>checked(x=>host.write_stdin(x),a),
-mcp__codex_app__read_thread:a=>checked(x=>host.mcp__codex_app__read_thread(x),a),
-mcp__codex_app__send_message_to_thread:a=>checked(x=>host.mcp__codex_app__send_message_to_thread(x),a),
-mcp__codex_app__navigate_to_codex_page:a=>checked(x=>host.mcp__codex_app__navigate_to_codex_page(x),a),
-mcp__node_repl__js:a=>host.mcp__node_repl__js({...a,code:guard+a.code+guard})
-};
-${sources["parked-runner.js"].replace("globalThis.runParkedJob =","const runParkedJob =")
-.replace("globalThis.runParkedDelivery =","const runParkedDelivery =")}
-let claimed=false,pending=null;
-async function command(args){
-let r=await host.exec_command({
-cmd:${J(residentCommand)}+" "+args.map(quote).join(" "),
-login:false,tty:false,yield_time_ms:30000,max_output_tokens:4096
-}),out="";
-for(;;){
-out+=r.output||"";
-if(out.length>16384)throw Error("Oversize output");
-if(r.exit_code!==undefined){
-pending=null;
-if(r.exit_code!==0)throw Error("Helper failed: "+out);
-return JSON.parse(out);
-}
-if(pending===null){
-if(!Number.isInteger(r.session_id))throw Error("Missing helper ID");
-pending=r.session_id;
-}
-r=await host.write_stdin({session_id:pending,chars:"",
-yield_time_ms:30000,max_output_tokens:4096});
-}
-}
-try{
-const owner=await native(\`{
-const o=globalThis.parkedResident;
-if(o.used||globalThis.parkedDelivery!==null)throw Error("Serve consumed");
-o.used=true;
-console.log(JSON.stringify({directory:o.directory,sessionId:o.socket.config.sessionId}));
-}\`);
-claimed=true;
-for(let ordinal=1;ordinal<=64;ordinal++){
-const next=await command(["resident-next",owner.directory,ordinal]);
-if(next.sessionId!==owner.sessionId)throw Error("Session mismatch");
-if(next.stopped===true)break;
-await native('console.log("{}");');
-const ready=await command(["command-ready",owner.directory,ordinal,next.command.requestId,
-...(next.attempt?[next.attempt]:[])]);
-if(ready.commandReady!==true||ready.sessionId!==owner.sessionId||ready.ordinal!==ordinal||
-JSON.stringify(ready)!==JSON.stringify({commandReady:true,...next.command,meaning:ready.meaning}))
-throw Error("Command changed");
-const delivery=await native(\`{
-const fs=await import("node:fs/promises"),o=globalThis.parkedResident;
-try{await fs.lstat(o.directory+"/resident-stop.json");throw Error("Stop requested");}
-catch(e){if(e.code!=="ENOENT")throw e;}
-if(globalThis.parkedDelivery!==null||Date.now()>=\${JSON.stringify(ready.deadlineAt)})
-throw Error("Delivery held or gate expired");
-globalThis.parkedDelivery=await o.socket.receive();
-console.log(JSON.stringify(globalThis.parkedDelivery));
-}\`);
-if(!delivery||delivery.sessionId!==owner.sessionId||
-delivery.requestId!==ready.requestId||delivery.operation!=="run")
-throw Error("Delivery/gate mismatch");
-const completed=await runParkedDelivery({
-...${J(trusted)},sessionId:owner.sessionId,preflightConfirmed:true,restoreParent:false
-},delivery);
-const transport=value(completed.transport),result=completed.result;
-if(!["published","acknowledged"].includes(result.observation||result.state))
-text((${runnerReceipt.toString()})(result));
-if(!["published","acknowledged"].includes(result.observation||result.state)||
-result.ok!==true||result.pending_helper_session!=null||
-!["native_navigation_returned","not_requested"].includes(result.restoration?.status)||
-transport.closed!==false||transport.reservedRequestId!==null)break;
-await native(\`{
-if(globalThis.parkedDelivery?.callId!==\${JSON.stringify(delivery.callId)})
-throw Error("Delivery changed");
-globalThis.parkedDelivery=null;
-console.log("{}");
-}\`);
-}
-}finally{
-if(claimed){
-try{
-text(value(await host.mcp__node_repl__js({
-code:\`{
-const o=globalThis.parkedResident;
-if(nodeRepl.requestMeta?.threadId!==${J(broker)}||o?.attempt!==${J(openAttempt)}||
-o.used!==true||o.binding?.broker!==${J(broker)}||
-JSON.stringify(o.socket.config)!==o.descriptor)
-throw Error("Wrong cleanup owner");
-const fs=await import("node:fs/promises");
-${publishResidentStop.toString()}
-try{await publishResidentStop(o.directory,o.socket.config.sessionId);}
-catch(e){if(e.code!=="EEXIST")throw e;}
-finally{await o.socket.close("resident_stopped");}
-console.log(JSON.stringify({closed:true}));
-}\`,timeout_ms:60000,title:"Resident stop"
-})));
-}finally{
-if(pending!==null)text({session_id:pending,cleanup:await host.write_stdin({
-session_id:pending,chars:"",yield_time_ms:30000,max_output_tokens:4096})});
-}
-}
-}
-}
-`:undefined;
 if(resume!==undefined){
 const quote=v=>"'"+String(v).replace(/'/g,"'\\''")+"'";
 const cmd=["python3",helper,...queuedCheckArgs(resume,worker)].map(quote).join(" ");
@@ -764,7 +1134,7 @@ cmd,login:false,tty:false,yield_time_ms:30000,max_output_tokens:4096
 return {kind:"native_activation_packet",authorization:"required_separately",
 broker,parent,worker,trusted,pins,previous,openAttempt,calls:{
 open:header+openPreflight+"text("+call(open)+");\n",
-...(resident?{serve}:{receive:header+"text("+call(receive)+");\n",dispatch})
+receive:header+"text("+call(receive)+");\n",dispatch
 }};
 }
 async function ready(directory,ordinal){
@@ -773,28 +1143,14 @@ throw Error("Invalid ready ordinal");
 if((await fs.lstat(directory)).uid!==process.getuid()) throw Error("Wrong owner");
 const {loadSession}=await import("./parked-socket.mjs");
 const c=await loadSession(directory);
-return await new Promise((resolve,reject)=>{
-let done=false;
-const watcher=watch(directory,()=>void check());
-const timer=setTimeout(()=>end(Error("Readiness not observed")),25000);
-function end(error,value){
-if(done) return;
-done=true;clearTimeout(timer);watcher.close();
-error?reject(error):resolve(value);
-}
-async function check(){
-if(done) return;
-try{
+return await watchFile(directory,25000,"Readiness not observed",async()=>{
 if(c.resident!==true&&Date.now()>=c.expiresAt) throw Error("Session expired");
 await absent(directory+"/transport-audit.json");
 const v=JSON.parse(await fs.readFile(join(directory,"ready-"+ordinal+".json"),"utf8"));
 if(v.sessionId!==c.sessionId||v.ordinal!==ordinal) throw Error("Wrong readiness");
-end(null,{ready:true,sessionId:c.sessionId,ordinal,
-meaning:"not an admission guarantee"});
-}catch(e){if(e.code!=="ENOENT") end(e);}
-}
-watcher.on("error",e=>end(e));void check();
-});
+return {ready:true,sessionId:c.sessionId,ordinal,
+meaning:"not an admission guarantee"};
+}).promise;
 }
 const validId=v=>typeof v==="string"&&
   /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v);
@@ -833,10 +1189,32 @@ return buffer.subarray(0,used);
 }finally{await h.close();}
 }
 
+function workerId(worker){
+return typeof worker==="string"?worker:worker?.conversation_id;
+}
+function authorityWorkersMatch(s,c){
+if(Array.isArray(c.workers)&&c.workers.length){
+const configured=s.worker_pool?.workers||[];
+return configured.length===c.workers.length&&
+c.workers.every((worker,index)=>configured[index]?.conversation_id===workerId(worker))&&
+configured.every(entry=>["user-confirmed-worker","user-confirmed-pro"].includes(entry.model_confirmation));
+}
+return s.worker?.conversation_id===c.worker&&
+["user-confirmed-worker","user-confirmed-pro"].includes(s.worker?.model_confirmation);
+}
+function authorityOccupied(s,q,c){
+if(s.active_cooldown!==null)return true;
+const capacity=Array.isArray(c.workers)&&c.workers.length?c.workers.length:1;
+const active=Array.isArray(s.active_assignments)?s.active_assignments.length:
+(s.active_assignment?1:0);
+const claimed=Array.isArray(q.requests)?q.requests.filter(r=>r.state==="claimed").length:0;
+return active>=capacity||claimed>=capacity;
+}
+
 async function rendezvousSession(directory,ordinal,requestId){
 if(!Number.isInteger(ordinal)||ordinal<1||ordinal>64||!validId(requestId))
 throw Error("Invalid rendezvous identity");
-if((await fs.lstat(directory)).uid!==process.getuid())throw Error("Wrong session owner");
+if((await fs.lstat(directory)).uid!==ownerUid)throw Error("Wrong session owner");
 const {loadSession}=await import("./parked-socket.mjs");
 const c=await loadSession(directory);
 if(!/^[a-f0-9]{32}$/.test(c.sessionId)||!/^[a-f0-9]{48}$/.test(c.token)||
@@ -848,33 +1226,55 @@ await absent(directory+"/transport-audit.json");
 return c;
 }
 
-function waitRecord(directory,name,validate,ms){
-let cancel;
+export function watchFile(directory,ms,timeoutMessage,inspect,watchDirectory=watch){
+let cancel,retryTimer;
 const promise=new Promise((resolve,reject)=>{
-let done=false;
-const w=watch(directory,()=>void check());
-const timer=setTimeout(()=>end(Error("Rendezvous deadline; do not retry")),ms);
+let done=false,busy=false,again=false,deferred=false;
+const w=watchDirectory(directory,()=>{again=true;deferred=false;void check();});
+const timer=setTimeout(()=>end(Error(timeoutMessage)),ms);
 function end(error,value){
-if(done)return;done=true;clearTimeout(timer);w.close();
+if(done)return;done=true;clearTimeout(timer);clearTimeout(retryTimer);w.close();
 error?reject(error):resolve(value);
 }
 cancel=()=>end(Error("Rendezvous stopped"));
 async function check(){
-if(done)return;
+if(done||busy)return;
+busy=true;
+const eventDriven=again;
+again=false;
+let retry=false;
 try{
-await absent(directory+"/transport-audit.json");
-const value=JSON.parse((await privateBytes(directory+"/"+name,4096)).toString("utf8"));
-validate(value);end(null,value);
+const value=await inspect();
+if(value!==undefined)end(null,value);
 }catch(e){
-// Native ready files are written directly. Await another filesystem event
-// if a read caught their creation/write; never start a timer polling loop.
+// Native ready files are written directly. Recheck a coalesced create/write
+// from the same event (and at most one deferred follow-up). Never start a
+// timer polling loop, and never treat absence as unsent.
 if(e.code!=="ENOENT"&&e.code!=="EAGAIN"&&!(e instanceof SyntaxError))end(e);
+else retry=e.code==="EAGAIN"||e instanceof SyntaxError||eventDriven;
+}finally{
+busy=false;
+if(done)return;
+if(again){deferred=false;void check();return;}
+if(retry&&!deferred){
+deferred=true;
+retryTimer=setTimeout(()=>{retryTimer=undefined;void check();},25);
+}
 }
 }
 w.on("error",e=>end(e));void check();
 });
 promise.catch(()=>{});
 return {promise,cancel:()=>cancel?.()};
+}
+
+function waitRecord(directory,name,validate,ms){
+return watchFile(directory,ms,"Rendezvous deadline; do not retry",async()=>{
+await absent(directory+"/transport-audit.json");
+const value=JSON.parse((await privateBytes(directory+"/"+name,4096)).toString("utf8"));
+validate(value);
+return value;
+});
 }
 
 async function expiredCommand(directory,ordinal,requestId,c,attempt){
@@ -899,6 +1299,7 @@ return v;
 
 async function rendezvous(directory,ordinal,requestId,promptFile,clientSessionId,resume=false,attempt){
 const c=await rendezvousSession(directory,ordinal,requestId);
+const ownership=c.resident===true?await requireResidentOwnership(c,directory):null;
 const recovery=c.queuedResume;
 if(recovery!==undefined)resumeExpectation(recovery);
 if(resume){
@@ -929,9 +1330,8 @@ throw Error("Missing input validation receipt");
 }
 const s=await cli(["status", "--current"]),q=await cli(["queue","status"]);
 if(s.paths?.config_dir!==c.configDir||s.paths?.state_dir!==c.stateDir||
-s.worker?.conversation_id!==c.worker)throw Error("Rendezvous authority mismatch");
-if(s.active_assignment!==null||s.active_cooldown!==null||
-!Array.isArray(q.requests)||q.requests.some(r=>r.state==="claimed"))
+!authorityWorkersMatch(s,c))throw Error("Rendezvous authority mismatch");
+if(authorityOccupied(s,q,c)||!Array.isArray(q.requests))
 throw Error("Authority occupied; no command-ready signal");
 if(resume){
 if(c.helper!==helper)throw Error("Queued-resume helper differs");
@@ -943,7 +1343,9 @@ if(recovery&&!resume){
 const prior=q.requests.find(r=>r.request_id===recovery.requestId);
 if(!prior||!["published","acknowledged"].includes(prior.state)||
 prior.dispatch_status!=="complete"||prior.sent_verified!==true||
-prior.parent_task_id!==c.parent||prior.worker_conversation_id!==c.worker)
+prior.parent_task_id!==c.parent||
+!(Array.isArray(c.workers)?c.workers.some(w=>workerId(w)===prior.worker_conversation_id):
+prior.worker_conversation_id===c.worker))
 throw Error("Complete queued recovery before another request");
 }
 await absent(c.stateDir+"/native-client");
@@ -951,12 +1353,14 @@ await absent(directory+"/ready-"+ordinal+".json");
 await absent(directory+"/command-observed-"+ordinal+".json");
 const name="command-"+ordinal+(attempt===undefined?"":"-retry-"+attempt);
 await absent(directory+"/"+name+".json");
-const ticket=directory+"/"+name;
-await fs.mkdir(ticket,{mode:448}); // Exclusive attempt marker; never remove to retry.
+const ticket=directory+"/"+name; // Exclusive attempt marker; never remove to retry.
 const snapshot=ticket+"/prompt.txt";
+if(c.resident!==true){
+await fs.mkdir(ticket,{mode:448});
 if(!resume){
 await fs.writeFile(snapshot,raw,{flag:"wx",mode:384});
 await privateBytes(snapshot,4194304);
+}
 }
 const pickupDeadline=Date.now()+c.idleMs;
 const deadlineAt=c.resident===true?pickupDeadline:Math.min(c.expiresAt,pickupDeadline);
@@ -975,8 +1379,14 @@ if(Date.now()>=deadlineAt)throw Error("Command rendezvous expired");
 },Math.max(1,deadlineAt-Date.now()));
 try{
 // Register the native-ready watcher before announcing command readiness.
+if(ownership){
+const {generation,owner,parent,worker,worker_pool_sha256,session}=ownership.owner;
+await cli(["resident","admit",J({generation,owner,parent,worker,worker_pool_sha256,session,
+command:J(record),prompt_file:promptFile,retry:attempt!==undefined})]);
+}else{
 await fs.writeFile(ticket+"/ready.tmp",J(record),{flag:"wx",mode:384});
 await fs.rename(ticket+"/ready.tmp",directory+"/"+name+".json");
+}
 await waiting.promise;
 await absent(directory+"/transport-audit.json");
 // Every attempt shares one ordinal claim. Readiness alone grants nothing.
@@ -1019,26 +1429,153 @@ await publishResidentStop(directory,c.sessionId);
 return {stopRequested:true,sessionId:c.sessionId};
 }
 
-async function residentNext(directory,ordinal){
+// Readiness for ordinal N of one session is the empty owner-only directory
+// waiting-N.<sessionId>, whose mtime the native admission wait keeps fresh.
+// A rendezvous claims it by renaming it into its ticket; the waiter retires
+// it with rmdir. Both are atomic, so exactly one side wins: a retired waiter
+// leaves nothing to claim (no ticket exists), and a waiter that loses the
+// race sees ENOENT and stays responsible for observing that publication. A
+// killed waiter cannot retire; its marker goes stale within WAITER_FRESH_MS.
+const WAITER_FRESH_MS=5000;
+const waiterPath=(directory,ordinal,sessionId)=>directory+"/waiting-"+ordinal+"."+sessionId;
+const freshWaiter=(stat,now=Date.now())=>stat.isDirectory()&&stat.uid===ownerUid&&
+(stat.mode&511)===448&&now-stat.mtimeMs>=-1000&&now-stat.mtimeMs<=WAITER_FRESH_MS;
+
+async function requireResidentOwnership(c,directory){
+const ownership=await residentOwnership(c,directory);
+if(ownership.reason!=="current_owner")throw Error("Resident unavailable: "+ownership.reason+"; preserve session");
+return ownership;
+}
+
+async function residentOwnership(c,directory){
+if(c.helper!==helper)return {reason:"installed_helper_mismatch"};
+const s=await cli(["status","--current"]),v=await cli(["resident","inspect"]);
+const poolMode=Array.isArray(c.workers);
+if(s.paths?.config_dir!==c.configDir||s.paths?.state_dir!==c.stateDir||
+(poolMode?(s.worker_pool?.file_sha256!==c.worker_pool_sha256||
+!Array.isArray(s.worker_pool?.workers)||s.worker_pool.workers.length!==c.workers.length):
+s.worker?.conversation_id!==c.worker)) return {reason:"canonical_authority_mismatch"};
+const bound=v.owner?.session;
+if(!bound)return {reason:"unbound_owner"};
+if(bound.directory!==directory||bound.session_id!==c.sessionId||
+v.owner.parent!==c.parent||(poolMode?v.owner.worker_pool_sha256!==c.worker_pool_sha256:
+v.owner.worker!==c.worker))
+return {reason:"retired_owner"};
+const raw=await privateBytes(directory+"/session.json",16384);
+if(createHash("sha256").update(raw).digest("hex")!==bound.descriptor_sha256||
+J(JSON.parse(raw.toString("utf8")))!==J(c))return {reason:"descriptor_changed"};
+return {reason:"current_owner",owner:v.owner,status:s};
+}
+
+// A read-only snapshot, never a liveness guarantee or takeover permission.
+// Check explicit owner-provided paths. Do not discover authority by glob/mtime.
+async function residentStatus(directory){
+const base={kind:"resident_status",version:1,directory,maxConcurrentRequests:1,
+admissionObserved:false,sendAuthorized:false,replacementAuthorized:false};
+try{
+await privateDirectory(directory);
+const {loadSession}=await import("./parked-socket.mjs");
+  const c=await loadSession(directory);
+  if(c.resident!==true||!/^[a-f0-9]{32}$/.test(c.sessionId))throw Error("Not a resident session");
+  base.maxConcurrentRequests=c.maxConcurrentRequests||(Array.isArray(c.workers)?c.workers.length:1);
+  if(Array.isArray(c.workers)&&c.workers.length)base.workers=c.workers;
+base.sessionId=c.sessionId;
+const owned=await residentOwnership(c,directory);
+if(owned.reason!=="current_owner")return {...base,state:"unavailable",reason:owned.reason};
+base.generation=owned.owner.generation;
+const names=await fs.readdir(directory);
+if(names.includes("transport-audit.json")){
+const audit=JSON.parse((await privateBytes(directory+"/transport-audit.json",1048576)).toString("utf8"));
+if(audit.sessionId!==c.sessionId||typeof audit.reason!=="string"||!Array.isArray(audit.events)||
+names.includes("wake.sock"))throw Error("Conflicting closure evidence");
+return {...base,state:"closed_audited",reason:"matching_closure_audit"};
+}
+if(names.some(n=>["resident-stop","resident-stop.json","resident-failure.json","resident-failure-final.json"].includes(n)))
+return {...base,state:"unavailable",reason:"stop_or_failure_evidence"};
+const occupied=Array.isArray(base.workers)&&base.workers.length
+  ?(owned.owner.slots||[]).filter(slot=>slot.request!==null).length
+  :(owned.owner.inflight!==null||owned.status.active_assignment!==null?1:0);
+if(occupied>=base.maxConcurrentRequests)
+return {...base,state:"busy",reason:"request_or_invocation_reserved"};
+if(owned.status.active_cooldown!==null)return {...base,state:"unavailable",reason:"account_cooldown"};
+const markers=names.filter(n=>/^waiting-/.test(n));
+if(markers.length===0||!names.includes("wake.sock"))
+return {...base,state:"not_waiting",reason:"no_admission_observed"};
+const match=/^waiting-([1-9][0-9]*)\.([a-f0-9]{32})$/.exec(markers[0]);
+if(markers.length!==1||!match||Number(match[1])>64||match[2]!==c.sessionId)
+throw Error("Ambiguous resident readiness");
+const ordinal=Number(match[1]),marker=directory+"/"+markers[0];
+if(!(await fs.lstat(directory+"/wake.sock")).isSocket())throw Error("Invalid socket evidence");
+if(!freshWaiter(await fs.lstat(marker)))return {...base,state:"stale_readiness",reason:"waiter_not_fresh"};
+if((await fs.readdir(marker)).length||names.some(n=>
+n==="command-"+ordinal||n==="ready-"+ordinal+".json"||n==="command-observed-"+ordinal+".json"||
+new RegExp("^command-"+ordinal+"(?:-retry-[a-f0-9]{32})?[.]json$").test(n)))
+throw Error("Consumed or conflicting ordinal evidence");
+// Recheck canonical generation and waiter after observation. Final admission
+// still belongs to rendezvous' atomic claim and the helper's locked guards.
+const after=await residentOwnership(c,directory);
+const laterOccupied=Array.isArray(base.workers)&&base.workers.length
+  ?(after.owner.slots||[]).filter(slot=>slot.request!==null).length
+  :(after.owner.inflight!==null||after.status.active_assignment!==null?1:0);
+if(after.reason!=="current_owner"||laterOccupied>=base.maxConcurrentRequests||
+after.status.active_cooldown!==null||!freshWaiter(await fs.lstat(marker)))
+return {...base,state:"not_waiting",reason:"snapshot_changed"};
+return {...base,state:"admission_observed",reason:"current_owner_waiting",ordinal,admissionObserved:true};
+}catch(e){
+return {...base,state:e.code==="ENOENT"?"not_waiting":"malformed_preserve",
+reason:e.code==="ENOENT"?"evidence_missing_or_changed":"evidence_unverifiable"};
+}
+}
+
+async function residentNext(directory,ordinal,signal,observationMs=25000){
 const c=await rendezvousSession(directory,ordinal,"resident-next");
 if(c.resident!==true||c.helper!==helper)throw Error("Resident mismatch");
 await absent(directory+"/ready-"+ordinal+".json");
 await absent(directory+"/command-observed-"+ordinal+".json");
-const choice=await new Promise((resolve,reject)=>{
-let done=false,busy=false,again=false;
-function end(e,v){if(done)return;done=true;w.close();e?reject(e):resolve(v);}
+const marker=waiterPath(directory,ordinal,c.sessionId);
+await fs.mkdir(marker,{mode:448});
+const beat=setInterval(()=>fs.utimes(marker,new Date(),new Date()).catch(()=>{}),1000);
+let claimed=false,choice,withdrawal;
+async function retire(){
+if(!claimed)try{await fs.rmdir(marker);}catch(e){if(e.code!=="ENOENT")throw e;claimed=true;}
+return claimed;
+}
+try{
+choice=await new Promise((resolve,reject)=>{
+let done=false,busy=false,again=false,deferred=false,bound,elapsed=false,outcome;
+const observation=observationMs===null?null:setTimeout(()=>{elapsed=true;again=true;void check();},observationMs);
+const abort=()=>{
+clearInterval(beat);
+withdrawal=retire();withdrawal.catch(()=>{});
+end(signal.reason);
+};
+const settle=()=>{if(done&&!busy){const [e,v]=outcome;e?reject(e):resolve(v);}};
+function end(e,v){if(done)return;done=true;clearTimeout(bound);clearTimeout(observation);
+signal?.removeEventListener("abort",abort);w.close();outcome=[e,v];settle();}
 const w=watch(directory,()=>{again=true;void check();});
 w.on("error",e=>end(e));
+signal?.addEventListener("abort",abort,{once:true});
 async function check(){
 if(done||busy)return;busy=true;again=false;
+let torn=false;
 try{
+signal?.throwIfAborted();
 await absent(directory+"/transport-audit.json");
 try{
 const stop=JSON.parse((await privateBytes(directory+"/resident-stop.json",4096)).toString("utf8"));
 if(Object.keys(stop).join(",")!=="sessionId"||stop.sessionId!==c.sessionId)
 throw Error("Invalid stop");
-end(null,{stopped:true});return;
+// A claim that beat this stop holds the waiter here until its command appears.
+if(!await retire()){end(null,{stopped:true});return;}
 }catch(e){if(e.code!=="ENOENT")throw e;}
+// A bounded native observation returns idle only if retirement beat the
+// client's atomic claim. A winning claimant keeps the publication bound.
+if(elapsed&&!await retire()){end(null,{pending:true});return;}
+// The marker vanishing means a rendezvous claimed it (the watcher reports that
+// rename); its command must follow within the bound or the residence fails
+// with the claimed ticket kept as evidence.
+if(!claimed)try{await fs.lstat(marker);}catch(e){if(e.code!=="ENOENT")throw e;claimed=true;}
+if(claimed)bound??=setTimeout(()=>end(Error("Claimed readiness never published; preserve evidence")),WAITER_FRESH_MS);
 const pattern=new RegExp("^command-"+ordinal+"(?:-retry-([a-f0-9]{32}))?[.]json$");
 const found=[];
 for(const name of await fs.readdir(directory)){
@@ -1051,20 +1588,149 @@ if(v.deadlineAt>Date.now())found.push({v,attempt:match[1]});
 }
 if(found.length>1)throw Error("Ambiguous commands");
 if(found.length)end(null,found[0]);
-}catch(e){end(e);}
-finally{busy=false;if(again&&!done)void check();}
+}catch(e){
+if((e.code==="EAGAIN"||e instanceof SyntaxError)&&!deferred)torn=true;
+else end(e);
+}finally{
+busy=false;settle();
+if(done)return;
+if(again){deferred=false;void check();return;}
+if(torn){deferred=true;setImmediate(()=>void check());}
 }
-void check();
+}
+if(signal?.aborted)abort();else void check();
 });
-if(choice.stopped)return {...choice,sessionId:c.sessionId};
-const s=await cli(["status","--current"]),q=await cli(["queue","status"]);
+}finally{clearInterval(beat);await withdrawal;await retire();}
+signal?.throwIfAborted();
+if(choice.stopped||choice.pending)return {...choice,sessionId:c.sessionId};
+const s=await cli(["status","--current"],10000),q=await cli(["queue","status"],10000);
+// Same requestId in the queue is a duplicate rendezvous. Pool occupancy
+// already allows sibling queued work; native submit happens after ready-N.
 if(s.paths?.state_dir!==c.stateDir||s.paths?.config_dir!==c.configDir||
-s.worker?.conversation_id!==c.worker||s.worker?.model_confirmation!=="user-confirmed-pro"||
-s.active_assignment!==null||s.active_cooldown!==null||!Array.isArray(q.requests)||
-q.requests.some(r=>r.state==="claimed"||r.request_id===choice.v.requestId))
+!authorityWorkersMatch(s,c)||authorityOccupied(s,q,c)||
+!Array.isArray(q.requests)||q.requests.some(r=>r.request_id===choice.v.requestId))
 throw Error("Authority changed");
 await absent(c.stateDir+"/native-client");
+signal?.throwIfAborted();
 return {sessionId:c.sessionId,command:choice.v,attempt:choice.attempt};
+}
+
+// One native writer and one awaited owner. The detector is renewed by outer
+// calls, never by a background heartbeat. It only covers admission, not Pro.
+export async function residentAdmission(g,meta,invocation,ordinal,next,workActive=false){
+const o=g.parkedResident;
+if(!o||!o.used||o.serveInvocation!==invocation||o.socket!==g.parkedSocket||
+o.binding!==g.parkedBinding||JSON.stringify(o.socket.config)!==o.descriptor||
+meta?.threadId!==o.binding.broker||meta?.["x-codex-turn-metadata"]?.turn_id!==o.binding.turn)
+throw Error("Wrong resident admission owner");
+if(o.credentials){
+const current=await cli(["resident","check",J(o.credentials)]);
+if(next!==undefined){
+const slots=current.owner.slots;
+if(Array.isArray(slots)){
+if(!slots.some(slot=>slot.request===next.command?.requestId&&slot.invocation))
+throw Error("Canonical invocation must reserve admission first");
+}else if(current.owner.inflight?.invocation!==invocation||
+current.owner.inflight?.request!==next.command?.requestId)
+throw Error("Canonical invocation must reserve admission first");
+}
+}
+const a=o.admission??={expired:false,timer:null,work:null,controller:null,deadlineAt:null};
+if(a.deadlineAt!==null&&Date.now()>=a.deadlineAt)a.expire();
+if(a.expired||a.polling||(a.work&&(!a.retained||next!==undefined||a.ordinal!==ordinal)))
+throw Error("Resident admission ended or occupied");
+const controller=a.controller??new AbortController();a.controller=controller;
+a.expire=()=>{
+if(a.expired)return;
+a.expired=true;clearTimeout(a.timer);
+const error=Error("Resident serving evaluation stopped renewing admission");
+controller.abort(error);
+// Close synchronously withdraws socket admission and releases receive(), so
+// joining an in-flight receive cannot deadlock failure finalization.
+const closed=o.socket.close("resident_failed");closed.catch(()=>{});
+a.failure=(async()=>{
+// Joining prevents closure proof from racing a still-running marker writer.
+await a.work?.catch(()=>{});
+let stopRequested=false;
+try{
+const stop=JSON.parse((await privateBytes(o.directory+"/resident-stop.json",4096)).toString("utf8"));
+stopRequested=Object.keys(stop).join(",")==="sessionId"&&stop.sessionId===o.socket.config.sessionId;
+}catch(e){if(e.code!=="ENOENT")throw e;}
+try{await recordResidentFailure(o,{sessionId:o.socket.config.sessionId,at:Date.now(),
+reason:"resident_failed",stopRequested,pendingHelperSession:null,
+requestId:g.parkedDelivery?.requestId??null,heldDelivery:g.parkedDelivery,
+error:{name:error.name,message:error.message,stack:error.stack}});}
+finally{await closed;}
+})();
+a.failure.catch(()=>{}); // Preserved and joined by owner cleanup, never retried.
+};
+clearTimeout(a.timer);a.deadlineAt=Date.now()+60000;
+a.timer=setTimeout(a.expire,60000);
+if(!a.work){
+a.ordinal=ordinal;a.retained=next===undefined&&workActive;
+a.work=(async()=>{
+// Yield the serialized native lane without withdrawing a sibling's waiter.
+// Only explicit owner calls renew the deadline; expiry still aborts and joins
+// this same waiter. A claimed command retains its existing publication bound.
+if(next===undefined)return await residentNext(o.directory,ordinal,controller.signal,a.retained?null:25000);
+if(next.sessionId!==o.socket.config.sessionId||next.command?.ordinal!==ordinal)
+throw Error("Resident command mismatch");
+// The selected immutable command must still exist. Never start another long
+// command waiter inside this native call if its evidence has disappeared.
+await privateBytes(o.directory+"/command-"+ordinal+(next.attempt?"-retry-"+next.attempt:"")+".json",4096);
+const ready=await commandReady(o.directory,ordinal,next.command.requestId,next.attempt);
+controller.signal.throwIfAborted();
+if(JSON.stringify(ready)!==JSON.stringify({commandReady:true,...next.command,meaning:ready.meaning}))
+throw Error("Command changed");
+await absent(o.directory+"/resident-stop.json");
+if(g.parkedDelivery!==null||Date.now()>=ready.deadlineAt)throw Error("Delivery held or gate expired");
+g.parkedDelivery=await o.socket.receive();
+controller.signal.throwIfAborted();
+return g.parkedDelivery;
+})();
+a.work.catch(()=>{}); // Retained failures are consumed on the next owner call.
+}
+a.polling=true;
+let pending=false,pollTimer;
+try{
+const result=a.retained?await Promise.race([a.work,new Promise(resolve=>{
+pollTimer=setTimeout(()=>resolve(null),250);
+})]):await a.work;
+pending=result===null;
+controller.signal.throwIfAborted();
+if(o.credentials)await cli(["resident","check",J(o.credentials)]);
+// Pro uses its own budgets. A stop still needs owner cleanup, so retain its
+// detector until cleanup joins us and closes the socket.
+if(next!==undefined){clearTimeout(a.timer);a.deadlineAt=null;}
+return pending?{pending:true,sessionId:o.socket.config.sessionId}:result;
+}finally{
+clearTimeout(pollTimer);a.polling=false;
+if(!pending){a.work=null;a.controller=null;a.retained=false;}
+}
+}
+
+export async function stopResidentAdmission(o){
+const a=o.admission;if(!a)return;
+clearTimeout(a.timer);a.deadlineAt=null;
+// A lost tool response may leave its native receive alive. Withdraw that
+// admission before joining it, exactly as the owner-loss detector does.
+let closed;
+if(a.work){a.expired=true;closed=o.socket.close("resident_failed");closed.catch(()=>{});}
+a.controller?.abort(Error("Resident admission stopped"));
+await a.work?.catch(()=>{});
+await closed;
+await a.failure;
+}
+
+export async function recordResidentFailure(o,summary,final=false){
+// Preserve the first failure and the final operation identities independently.
+if(final)await recordResidentFailure(o,summary).catch(()=>{summary={...summary,firstRecordFailed:true};});
+const key=final?"failureFinalRecord":"failureRecord",name=final?"resident-failure-final.json":"resident-failure.json";
+return await(o[key]??=(async()=>{
+const h=await fs.open(o.directory+"/"+name,"wx",384);
+try{await h.writeFile(J(summary));await h.sync();}finally{await h.close();}
+const d=await fs.open(o.directory,"r");try{await d.sync();}finally{await d.close();}
+})());
 }
 
 async function commandReady(directory,ordinal,requestId,attempt){
@@ -1114,10 +1780,11 @@ const [action,...args]=process.argv.slice(2);
 let result;
 if(action==="packet"&&args.length===3) result=await packet(...args);
 else if(action==="resident-packet"&&[3,4].includes(args.length))
-result=await packet(...args.slice(0,3),undefined,undefined,undefined,true,args[3]);
+result=await residentPacket(args[0],args[1],
+  (args[2].startsWith("[")?JSON.parse(args[2]):args[2]),args[3]);
+else if(action==="resident-pool-packet"&&args.length===4)
+result=await poolResidentPacket(args[0],args[1],JSON.parse(args[2]),args[3]);
 else if(action==="closed-packet"&&args.length===4) result=await packet(...args);
-else if(action==="closed-resident-packet"&&[4,5].includes(args.length))
-result=await packet(...args.slice(0,4),undefined,undefined,true,args[4]);
 else if(action==="client-preflight"&&args.length===1)
 result=await clientPreflight(args[0]);
 else if(action==="closed-queued-packet"&&args.length===11)
@@ -1125,7 +1792,7 @@ result=await packet(...args.slice(0,4),{
 sessionId:args[4],requestId:args[5],fingerprint:args[6],callId:args[7],
 clientSessionId:args[8],nonce:args[9],promptSha256:args[10]
 });
-else if(["closed-terminal-packet","closed-terminal-resident-packet"].includes(action)&&[16,19].includes(args.length))
+else if(action==="closed-terminal-packet"&&[16,19].includes(args.length))
 result=await packet(...args.slice(0,4),undefined,{
 oldHelper:args[4],oldWorker:args[5],sessionId:args[6],requestId:args[7],
 callId:args[8],clientSessionId:args[9],fingerprint:args[10],nonce:args[11],
@@ -1134,11 +1801,21 @@ descriptorSha256:args[14],auditSha256:args[15],
 ...(args.length===19?{unobserved:{
 requestId:args[16],commandSha256:args[17],promptSha256:args[18]
 }}:{})
-},action==="closed-terminal-resident-packet");
-else if(action==="resident-next"&&args.length===2)
-result=await residentNext(args[0],Number(args[1]));
+});
+else if(action==="resident-serve-existing-packet"&&args.length===1)
+result=await serveExistingPacket(args[0]);
+else if(action==="resident-continue-armed-packet"&&args.length===1)
+result=await serveExistingPacket(args[0],false,true);
+else if(action==="resident-replace-unused-packet"&&args.length===1)
+result=await serveExistingPacket(args[0],true);
 else if(action==="resident-stop"&&args.length===1)
 result=await residentStop(args[0]);
+else if(action==="resident-handoff-packet"&&args.length===1)
+result=await handoffPacket(args[0]);
+else if(action==="resident-takeover-packet"&&args.length===0)
+result=await takeoverPacket();
+else if(action==="resident-status"&&args.length===1)
+result=await residentStatus(args[0]);
 else if(action==="ready"&&args.length===2) result=await ready(args[0],Number(args[1]));
 else if(action==="rendezvous"&&args.length===5)
 result=await rendezvous(args[0],Number(args[1]),...args.slice(2));

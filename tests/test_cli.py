@@ -116,6 +116,52 @@ class CliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error_type"], "ConfigurationError")
 
+    def test_worker_set_confirmation_flags(self) -> None:
+        worker_file = Path(self.env["CODEX_PRO_DISPATCH_HOME"]) / "config" / "worker.json"
+        for flags, marker in (
+            (["--confirm-worker"], "user-confirmed-worker"),
+            (["--confirm-worker", "--confirm-pro"], "user-confirmed-worker"),
+            (["--confirm-pro", "--confirm-worker"], "user-confirmed-worker"),
+            (["--confirm-pro"], "user-confirmed-pro"),
+        ):
+            with self.subTest(flags=flags):
+                if worker_file.exists():
+                    reset = self.run_cli("worker", "reset", "--force")
+                    self.assertEqual(reset.returncode, 0, reset.stderr)
+                completed = self.run_cli(
+                    "worker", "set", "--conversation-id",
+                    "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e",
+                    *flags, "--native-controls-confirmed",
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                payload = json.loads(completed.stdout)
+                self.assertEqual(payload["worker"]["model_confirmation"], marker)
+                shown = json.loads(self.run_cli("worker", "show").stdout)
+                self.assertEqual(shown["worker"]["model_confirmation"], marker)
+
+    def test_worker_set_without_confirmation_writes_nothing(self) -> None:
+        home = Path(self.env["CODEX_PRO_DISPATCH_HOME"])
+        completed = self.run_cli(
+            "worker", "set", "--conversation-id",
+            "6a87c2b8-0a34-83e8-8409-27bc1f4fef5e", "--native-controls-confirmed",
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        payload = json.loads(completed.stderr)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error_type"], "ConfigurationError")
+        self.assertIn("intended worker conversation", payload["error"])
+        self.assertNotIn("Pro", payload["error"])
+        self.assertFalse((home / "config").exists())
+        self.assertFalse((home / "state").exists())
+
+    def test_worker_set_help_keeps_both_confirmation_flags(self) -> None:
+        completed = self.run_cli("worker", "set", "--help")
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("--confirm-worker", completed.stdout)
+        self.assertIn("--confirm-pro", completed.stdout)
+        self.assertIn("Legacy alias", completed.stdout)
+
     def test_worker_setup_requires_native_host_preflight(self) -> None:
         completed = self.run_cli(
             "worker",

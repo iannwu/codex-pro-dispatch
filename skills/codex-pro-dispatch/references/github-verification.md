@@ -5,14 +5,17 @@ GitHub mutation, and again when Chat Pro reports one.
 
 ## Read-only consultation
 
+The worker's GitHub connector/app supports both reads and writes, subject to its
+configured repository permissions and available tools. Parked consultation uses
+only its read capabilities; explicitly authorized write assignments use the
+repository-write workflow below.
+
 The worker may read an authorized remote repository through its own GitHub
 connector/app even though dispatch carries only prompt text and grants no local
 filesystem access. Include the repository, requested revision, and relevant paths.
 Require evidence of the files and revision actually retrieved; if the connector
 cannot resolve the requested revision, report that limitation instead of claiming
 an exact-commit review. Supply local-only changes separately when needed.
-
-This does not grant writes or change the parked broker's consultation scope.
 
 ## Before dispatch
 

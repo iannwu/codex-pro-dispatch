@@ -78,7 +78,7 @@ class ReleaseParkedTests(unittest.TestCase):
         self.assertEqual(set(manifest["runtime"]), RUNTIME_NAMES)
         self.assertEqual(set(manifest["tests"]), TEST_NAMES)
         self.assertEqual(
-            sum(len(v["cases"]) for v in manifest["tests"].values()), 35
+            sum(len(v["cases"]) for v in manifest["tests"].values()), 59
         )
         pins = dict(manifest["runtime"])
         pins.update({k: v["sha256"] for k, v in manifest["tests"].items()})
@@ -94,7 +94,7 @@ class ReleaseParkedTests(unittest.TestCase):
         package = ROOT / "src/codex_pro_dispatch"
         self.assertEqual(
             {p.relative_to(package).as_posix() for p in package.rglob("*.py")},
-            {"__init__.py", "cli.py", "core.py", "queue.py", "native_storage.py"},
+            {"__init__.py", "cli.py", "core.py", "queue.py", "native_storage.py", "resident.py"},
         )
         forbidden = {
             "native_client", "native_endpoint", "native_broker",

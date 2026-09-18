@@ -5,6 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { spawnSync } = require("node:child_process");
 const { tmpdir } = require("node:os");
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 
 const source = fs.readFileSync(path.join(
   __dirname, "../skills/codex-pro-dispatch/scripts/parked-runner.js"
@@ -37,7 +38,7 @@ for (const resident of [false, true]) {
 }
 
 function fixture(options = {}) {
-  const calls = [], commands = [], files = new Map(), delays = [];
+  const calls = [], commands = [], files = new Map(), delays = [], verifications = [];
   let clock = 1000, sequence = 0, observations = 0, receiptStatus = "armed";
   let evidenceDirectories = 0;
   const requestId = "unit-request";
@@ -141,23 +142,53 @@ function fixture(options = {}) {
       if (args.code.includes("mkdtemp(")) {
         return native(JSON.stringify({ directory: "/private/unit/evidence-" + (++evidenceDirectories) }));
       }
-      const lines = args.code.split("\n");
-      const readLiteral = prefix => {
-        const line = lines.find(value => value.startsWith(prefix));
-        assert(line, "missing encoded evidence literal");
-        return JSON.parse(line.slice(prefix.length, -1));
-      };
-      const target = readLiteral("const path=");
-      const raw = readLiteral("const raw=");
-      assert(!files.has(target), "evidence must not be overwritten");
-      files.set(target, raw);
-      return native(JSON.stringify({ path: target }));
+      // Evidence code runs against an in-memory file system with injectable
+      // faults, so durability claims depend on what the code actually does.
+      const verifying = args.title === "Verify native evidence";
+      const ambiguous = !verifying && options.evidenceAck && !options.evidenceAckUsed &&
+        (options.evidenceAckAfterSend ? calls.includes("send") : true);
+      const fault = verifying ? options.verifySyncFails :
+        ambiguous ? (options.evidenceDropped ? "write" : options.evidenceCorrupted ? "corrupt" : null) : null;
+      let opened = null;
+      const store = { async open(target, flags) {
+        const directory = !target.endsWith(".json");
+        opened ??= target;
+        if (flags === "wx") {
+          assert(!files.has(target), "evidence must not be overwritten");
+          files.set(target, null);
+        } else if (!directory && !files.has(target)) throw Error("ENOENT: " + target);
+        return {
+          async writeFile(data) {
+            if (fault === "write") throw Error("EIO write");
+            files.set(target, fault === "corrupt" ? data.slice(0, -1) : data);
+          },
+          async readFile() { return files.get(target); },
+          async sync() { if (fault === (directory ? "parent" : "file")) throw Error("EIO fsync " + target); },
+          async close() {}
+        };
+      } };
+      const lines = [];
+      let failed = null;
+      try {
+        await new AsyncFunction("store", "console", args.code.replace('await import("node:fs/promises")', "store"))(
+          store, { log: value => lines.push(String(value)) });
+      } catch (error) {
+        if (fault === "write") files.delete([...files.keys()].find(key => files.get(key) === null));
+        failed = error;
+      }
+      if (verifying) verifications.push(opened);
+      if (failed && !ambiguous) return { isError: true, content: [{ type: "text", text: failed.message }] };
+      // An ambiguous acknowledgment may follow a real write (persisted) or a
+      // lost one (dropped); the runner must tell them apart by verification.
+      if (ambiguous) { options.evidenceAckUsed = true; return options.evidenceAck; }
+      return native(lines.join("\n"));
     },
     async mcp__codex_app__read_thread(args) {
       calls.push("read");
       assert.deepEqual(JSON.parse(JSON.stringify(args)), {
         threadId: config.worker, turnLimit: 2, maxOutputCharsPerItem: 20000
       });
+      if (options.readEnvelope !== undefined) return options.readEnvelope;
       return native(JSON.stringify({
         schemaVersion: 1,
         thread: {
@@ -176,6 +207,7 @@ function fixture(options = {}) {
       if (options.sendError) {
         return { isError: true, content: [{ type: "text", text: "unit transport error" }] };
       }
+      if (options.sendAck !== undefined) return options.sendAck;
       return native(JSON.stringify({ threadId: config.worker }));
     },
     async mcp__codex_app__navigate_to_codex_page(args) {
@@ -195,7 +227,7 @@ function fixture(options = {}) {
   };
   vm.runInNewContext(source, context, { filename: "parked-runner.js" });
   return {
-    config, calls, commands, files, delays, tools,
+    config, calls, commands, files, delays, verifications, tools,
     run: id => context.runParkedJob(config, id || requestId)
   };
 }
@@ -341,6 +373,169 @@ test("a mismatched claimed worker is rejected before native work", async () => {
   for (const name of ["read", "arm", "send"]) assert(!f.calls.includes(name));
 });
 
+// raw_before_decode: an undecodable history envelope is preserved whole,
+// together with the exception's name/message/stack, before any refusal.
+for (const [label, envelope] of [
+  ["two text blocks", { isError: false, content: [
+    { type: "text", text: "{}" }, { type: "text", text: "{}" }] }],
+  ["image block", { isError: false, content: [{ type: "image", data: "AA==" }] }],
+  ["empty content", { isError: false, content: [] }],
+  ["null result", null]
+])
+test("undecodable native history is preserved before refusal: " + label, async () => {
+  const f = fixture({ readEnvelope: envelope }), result = await f.run();
+  assert.equal(result.observation, "blocked");
+  assert.equal(result.failed_phase, "pre-send-read");
+  assert.equal(result.no_resend, false);
+  assert(!f.calls.includes("arm") && !f.calls.includes("send"));
+  const record = JSON.parse(f.files.get(result.error_evidence));
+  assert.deepEqual(record.error.detail, envelope);
+  assert.equal(record.error.name, "Error");
+  assert.equal(record.error.message, "Unsupported or failed native tool result");
+  assert.equal(typeof record.error.stack, "string");
+  assert.equal(record.worker_conversation_id, f.config.worker);
+  // The whole envelope and its operation identity were preserved first.
+  const preserved = JSON.parse(f.files.get(record.envelope_evidence));
+  assert.equal(preserved.operation, "read_thread");
+  assert.equal(preserved.request_id, "unit-request");
+  assert.deepEqual(preserved.result, envelope);
+  assert(record.envelope_evidence < result.error_evidence);
+});
+
+test("successful reads and sends preserve their original envelopes with operation identity", async () => {
+  const f = fixture(), result = await f.run();
+  assert.equal(result.observation, "published");
+  const records = [...f.files.values()].map(raw => JSON.parse(raw));
+  const reads = records.filter(v => v.operation === "read_thread");
+  const sends = records.filter(v => v.operation === "send_message_to_thread");
+  assert.equal(reads.length, f.calls.filter(v => v === "read").length);
+  assert.equal(sends.length, 1);
+  assert.deepEqual(sends[0].result, { isError: false, content: [{ type: "text",
+    text: JSON.stringify({ threadId: "unit-pro" }) }] });
+  for (const read of reads) assert.equal(read.result.content[0].type, "text");
+  assert.equal(f.verifications.length, 0);
+});
+
+// official_success_variants: documented acknowledgments complete one request;
+// a foreign thread or unsupported carrier is preserved and refused, no resend.
+const textAck = value => ({ isError: false, content: [{ type: "text", text: JSON.stringify(value) }] });
+for (const [label, sendAck, outcome] of [
+  ["incident threadId", textAck({ threadId: "unit-pro" }), "published"],
+  ["empty object", { content: [{ type: "text", text: "{}" }] }, "published"],
+  ["foreign thread", textAck({ threadId: "other-pro" }), "blocked"],
+  ["threadId plus extra field", textAck({ threadId: "unit-pro", ok: true }), "blocked"],
+  ["arbitrary object without identity", textAck({ ok: false, error: "denied" }), "blocked"],
+  ["array", textAck([]), "blocked"],
+  ["no content", { isError: false, content: [] }, "blocked"],
+  ["two text blocks", { isError: false, content: [{ type: "text", text: "{}" }, { type: "text", text: "{}" }] }, "blocked"],
+  ["non-object text", { isError: false, content: [{ type: "text", text: "sent" }] }, "blocked"]
+])
+test("send acknowledgment variant: " + label, async () => {
+  const f = fixture({ sendAck }), result = await f.run();
+  assert.equal(result.observation, outcome);
+  assert.equal(f.calls.filter(value => value === "send").length, 1);
+  if (outcome === "blocked") {
+    assert.equal(result.failed_phase, "send");
+    assert.equal(result.no_resend, true);
+    assert(f.calls.includes("indeterminate"));
+    const record = JSON.parse(f.files.get(result.error_evidence));
+    assert.deepEqual(record.error.detail, sendAck);
+    assert.equal(record.error.message, "Unsupported native send acknowledgment; never resend");
+  }
+});
+
+// Ambiguous evidence acknowledgments are verified against the private file's
+// exact bytes; a persisted write continues, an unconfirmed one stops.
+for (const evidenceAck of [{ isError: false, content: [] }, { isError: true, content: [{ type: "text", text: "EIO" }] }])
+test("ambiguous evidence acknowledgment is verified, never rewritten: " + JSON.stringify(evidenceAck), async () => {
+  const f = fixture({ evidenceAck }), result = await f.run();
+  assert.equal(result.observation, "published");
+  assert.equal(f.verifications.length, 1);
+  assert.deepEqual(Array.from(result.trace.filter(e => e.kind === "evidence_verified"), e => e.path), f.verifications);
+  assert.equal(f.calls.filter(value => value === "send").length, 1);
+});
+
+test("persisted evidence whose bytes differ is never trusted or rewritten", async () => {
+  const f = fixture({ evidenceAck: { isError: false, content: [] }, evidenceCorrupted: true });
+  const result = await f.run();
+  assert.equal(result.observation, "blocked");
+  assert.equal(result.failed_phase, "pre-send-read");
+  assert.equal(result.error, "Evidence persistence unconfirmed");
+  assert(!f.calls.includes("arm") && !f.calls.includes("send"));
+  assert.equal(f.verifications.length, 1);
+  const record = JSON.parse(f.files.get(result.error_evidence));
+  assert.equal(record.error.detail.verification.content[0].text, "Evidence bytes differ");
+  // The truncated file is retained untouched as evidence of the fault.
+  assert.throws(() => JSON.parse(f.files.get(f.verifications[0])));
+});
+
+test("unconfirmed pre-arm evidence persistence stops before arm and send", async () => {
+  const f = fixture({ evidenceAck: { isError: true, content: [{ type: "text", text: "EIO" }] }, evidenceDropped: true });
+  const result = await f.run();
+  assert.equal(result.observation, "blocked");
+  assert.equal(result.failed_phase, "pre-send-read");
+  assert.equal(result.error, "Evidence persistence unconfirmed");
+  assert.equal(result.no_resend, false);
+  assert(!f.calls.includes("arm") && !f.calls.includes("send"));
+  assert.equal(f.verifications.length, 1);
+  const record = JSON.parse(f.files.get(result.error_evidence));
+  assert.equal(record.error.detail.acknowledgment.isError, true);
+  assert.match(record.error.detail.verification.content[0].text, /^ENOENT/);
+});
+
+// Readable bytes alone are not durability: the verification must also sync
+// the file and its directory, and a failed sync stops progress.
+for (const verifySyncFails of ["file", "parent"])
+test("verified bytes with a failed " + verifySyncFails + " sync stop before arm", async () => {
+  const f = fixture({ evidenceAck: { isError: false, content: [] }, verifySyncFails });
+  const result = await f.run();
+  assert.equal(result.observation, "blocked");
+  assert.equal(result.failed_phase, "pre-send-read");
+  assert.equal(result.error, "Evidence persistence unconfirmed");
+  assert(!f.calls.includes("arm") && !f.calls.includes("send"));
+  assert.equal(f.verifications.length, 1);
+  assert.equal(f.files.get(f.verifications[0]).length > 0, true);
+  const record = JSON.parse(f.files.get(result.error_evidence));
+  assert.match(record.error.detail.verification.content[0].text, /EIO fsync/);
+});
+
+test("verified bytes with a failed sync after send enter post-arm failure handling", async () => {
+  const f = fixture({ evidenceAck: { isError: false, content: [] }, evidenceAckAfterSend: true, verifySyncFails: "parent" });
+  const result = await f.run();
+  assert.equal(result.observation, "blocked");
+  assert.equal(result.failed_phase, "send");
+  assert.equal(result.no_resend, true);
+  assert.deepEqual(f.calls, ["claim", "read", "arm", "send", "indeterminate", "navigate"]);
+});
+
+test("unconfirmed send-evidence persistence enters post-arm failure handling", async () => {
+  const f = fixture({ evidenceAck: { isError: false, content: [] }, evidenceDropped: true, evidenceAckAfterSend: true });
+  const result = await f.run();
+  assert.equal(result.observation, "blocked");
+  assert.equal(result.failed_phase, "send");
+  assert.equal(result.error, "Evidence persistence unconfirmed");
+  assert.equal(result.no_resend, true);
+  assert.deepEqual(f.calls, ["claim", "read", "arm", "send", "indeterminate", "navigate"]);
+});
+
+test("cross-realm and non-Error failures serialize structurally", async () => {
+  const f = fixture();
+  const original = f.tools.mcp__codex_app__read_thread;
+  const foreign = vm.runInNewContext('Object.assign(new Error("foreign realm"), { cause: new TypeError("inner") })');
+  assert(!(foreign instanceof Error));
+  f.tools.mcp__codex_app__read_thread = async () => { throw foreign; };
+  let result = await f.run();
+  let record = JSON.parse(f.files.get(result.error_evidence));
+  assert.equal(record.error.message, "foreign realm");
+  assert.equal(typeof record.error.stack, "string");
+  assert.equal(record.error.cause.message, "inner");
+  f.tools.mcp__codex_app__read_thread = async () => { throw "plain string"; };
+  result = await f.run();
+  record = JSON.parse(f.files.get(result.error_evidence));
+  assert.deepEqual(record.error, { message: "plain string" });
+  f.tools.mcp__codex_app__read_thread = original;
+});
+
 test("real CLI fences a replaced session and completes only on its new stable worker", async t => {
   const root = fs.realpathSync(path.join(__dirname, ".."));
   const home = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "parked-cas-")));
@@ -414,10 +609,15 @@ test("real CLI fences a replaced session and completes only on its new stable wo
     const save = f.tools.mcp__node_repl__js;
     f.tools.mcp__node_repl__js = async args => {
       if (args.code.includes("mkdtemp(")) return native(JSON.stringify({ directory: evidenceDir }));
+      const before = new Set(f.files.keys());
       const result = await save(args);
       const target = JSON.parse(result.content[0].text).path;
       assert.equal(path.dirname(target), evidenceDir);
-      fs.writeFileSync(target, f.files.get(target), { flag: "wx", mode: 0o600 });
+      for (const [saved, bytes] of f.files) {
+        if (before.has(saved)) continue;
+        assert.equal(path.dirname(saved), evidenceDir);
+        fs.writeFileSync(saved, bytes, { flag: "wx", mode: 0o600 });
+      }
       return result;
     };
     f.tools.mcp__codex_app__read_thread = async args => {

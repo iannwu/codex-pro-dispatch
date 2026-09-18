@@ -36,7 +36,10 @@ async function main() {
   const state = await helper(["status", "--current"]);
   if (state.paths?.config_dir !== c.configDir ||
       state.paths?.state_dir !== c.stateDir)
-    throw Error("Client and native session authority paths differ");
+      throw Error("Client and native session authority paths differ");
+  const stateWorkers = state.worker_pool?.workers?.map(worker => worker.conversation_id) ||
+    (state.worker?.conversation_id ? [state.worker.conversation_id] : []);
+  const hasTrustedWorker = worker => typeof worker === "string" && stateWorkers.includes(worker);
 
   if (operation === "acknowledge")
     return await helper(["queue", "acknowledge", requestId]);
@@ -49,7 +52,8 @@ async function main() {
     const prior = await helper(["queue", "collect", c.queuedResume.requestId]);
     if (!["published", "acknowledged"].includes(prior.state) ||
         prior.dispatch_status !== "complete" || prior.sent_verified !== true ||
-        prior.parent_task_id !== c.parent || prior.worker_conversation_id !== c.worker)
+        prior.parent_task_id !== c.parent ||
+        !hasTrustedWorker(prior.worker_conversation_id))
       throw Error("Complete the bound queued recovery before another request");
   }
 
@@ -99,17 +103,19 @@ async function main() {
         ready.sessionId !== c.sessionId || ready.ordinal !== 1 ||
         !Number.isSafeInteger(ready.at) || ready.at >= v.deadlineAt)
       throw Error("Wrong or expired queued-resume command");
+    const resumeWorker = r.workerConversationId || c.worker;
+    if (!hasTrustedWorker(resumeWorker)) throw Error("Queued-resume worker is not configured");
     const checked = await helper([
       "queue", "resume-check", requestId, "--fingerprint", r.fingerprint,
-      "--worker-conversation-id", c.worker, "--client-session-id", r.clientSessionId,
+      "--worker-conversation-id", resumeWorker, "--client-session-id", r.clientSessionId,
       "--raw-prompt-sha256", r.promptSha256
     ]);
     if (checked.resume_eligible !== true || checked.assignment_absent !== true ||
         checked.send_authorized !== false || checked.state !== "queued" ||
         checked.request_id !== requestId || checked.fingerprint !== r.fingerprint ||
         checked.client_session_id !== r.clientSessionId || checked.raw_prompt_sha256 !== r.promptSha256 ||
-        checked.worker_conversation_id !== c.worker ||
-        checked.worker_model_confirmation !== "user-confirmed-pro" ||
+        checked.worker_conversation_id !== resumeWorker ||
+        !["user-confirmed-worker", "user-confirmed-pro"].includes(checked.worker_model_confirmation) ||
         checked.paths?.config_dir !== c.configDir || checked.paths?.state_dir !== c.stateDir)
       throw Error("Canonical queued-resume check differs");
     resumeCommand = v;
@@ -118,7 +124,7 @@ async function main() {
   if (operation === "submit") {
     if (!promptFile?.startsWith("/") || !clientSessionId)
       throw Error("Submit requires absolute prompt file and client session ID");
-    if (state.worker?.conversation_id !== c.worker)
+    if (!c.workers && !hasTrustedWorker(c.worker))
       throw Error("Configured worker changed");
     await helper([
       "queue", "submit", "--request-id", requestId,
@@ -157,7 +163,7 @@ async function main() {
     return { ...existing, wake: { status: "collect_only" } };
   if (operation === "observe" && !existing.send_may_have_occurred)
     return { ...existing, wake: { status: "not_submitted" } };
-  if (state.worker?.conversation_id !== c.worker)
+  if (!c.workers && !hasTrustedWorker(c.worker))
     throw Error("Configured worker changed");
   if (existing.parent_task_id && existing.parent_task_id !== c.parent)
     throw Error("Request belongs to another native parent");

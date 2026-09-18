@@ -16,20 +16,30 @@ await assert.rejects(fs.lstat(path),e=>e.code==="ENOENT");
 }
 function appeared(path){
 return new Promise((resolve,reject)=>{
-let done=false;
-const w=watch(dirname(path),()=>void check());
+let done=false,busy=false,again=false,deferred=false;
+const w=watch(dirname(path),()=>{again=true;void check();});
 const timer=setTimeout(()=>end(Error("Missing fixture event")),8000);
 function end(e,v){
 if(done)return;done=true;clearTimeout(timer);w.close();e?reject(e):resolve(v);
 }
 async function check(){
+if(done||busy)return;busy=true;again=false;
+let torn=false;
 try{end(null,JSON.parse(await fs.readFile(path,"utf8")));}
-catch(e){if(e.code!=="ENOENT"&&!(e instanceof SyntaxError))end(e);}
+catch(e){
+if(e.code!=="ENOENT"&&e.code!=="EAGAIN"&&!(e instanceof SyntaxError))end(e);
+else if(e.code==="EAGAIN"||e instanceof SyntaxError)torn=true;
+}finally{
+busy=false;
+if(done)return;
+if(again){deferred=false;void check();return;}
+if(torn&&!deferred){deferred=true;setImmediate(()=>void check());}
+}
 }
 w.on("error",e=>end(e));void check();
 });
 }
-async function fixture(t,idleMs=5000,resident=false){
+async function fixture(t,idleMs=5000){
 const d=await fs.realpath(await fs.mkdtemp(tmpdir()+"/pro-rendezvous-unit-"));
 const session=d+"/session",home=d+"/authority",helper=root+"bin/pro-dispatch";
 const env={...process.env,CODEX_PRO_DISPATCH_HOME:home};
@@ -56,7 +66,7 @@ await fs.mkdir(session,{mode:448});
 const socket=await openSession(session,{
 helper,configDir:home+"/config",stateDir:home+"/state",
 worker:"fixture-pro",parent:"fixture-parent",
-leaseMs:resident?null:60000,idleMs,replyMs:10000,...(resident?{resident:true}:{})
+leaseMs:60000,idleMs,replyMs:10000
 });
 const prompt=d+"/prompt.txt";
 await fs.writeFile(prompt,"Review exact bytes: café.\n",{mode:384});
@@ -138,8 +148,8 @@ assert.deepEqual(audit.events.filter(e=>e.name==="accepted").map(e=>e.requestId)
 ["request-A","request-B"]);
 });
 
-for(const resident of [false,true])test(`oversized prompts do not consume a handoff; same ordinal still works (resident=${resident})`,async t=>{
-const f=await fixture(t,5000,resident);
+test("oversized finite prompts do not consume a handoff; same ordinal still works",async t=>{
+const f=await fixture(t);
 for(const body of ["x".repeat(20000),"😀".repeat(10000)," \n\t"]){
 await fs.writeFile(f.prompt,body,{mode:384});
 const result=await f.start(1,"request-A");
@@ -177,13 +187,15 @@ assert.equal((await f.cli(["status"])).active_assignment,null);
 });
 
 test("duplicate rendezvous and duplicate gate cannot authorize another receive",async t=>{
-const f=await fixture(t);
+const f=await fixture(t,30000);
 const a=f.start(1,"request-A");
 await appeared(f.session+"/command-1.json");
 assert.notEqual((await f.start(1,"request-A")).code,0);
 assert.equal((await f.gate(1,"request-A")).code,0);
 assert.notEqual((await f.gate(1,"request-A")).code,0);
 const delivery=await f.socket.receive();
+assert.ok(delivery,"gated request must be received");
+assert.equal(delivery.requestId,"request-A");
 await f.complete(delivery);
 assert.equal((await a).code,0);
 assert.equal((await f.cli(["status","request-A"])).assignment.submission_count,1);

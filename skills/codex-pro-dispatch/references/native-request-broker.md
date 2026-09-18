@@ -1,7 +1,7 @@
-# Finite-session native broker release candidate
+# Finite-session native broker
 
-Status: 1.3.0-rc.1 source candidate. Actual-Pro candidate qualification and
-installed actual-Claude smoke remain release gates. Installation is not activation.
+Status: 1.3.0 source release. Live native and actual-Claude qualification passed
+for the recorded release environment. Installation is not activation.
 
 ## Bounded current-state inspection
 
@@ -85,6 +85,16 @@ Observe is collect-only for existing post-arm work. Do not call it periodically
 from model turns. Slow-Pro snapshot observation belongs inside one awaited,
 bounded native orchestration; exhaustion means pending, not cancellation.
 Ten minutes is an observation point, never a generation cutoff.
+
+Observe also recovers a receipt that core already completed while the queue
+publication was lost (queue state `claimed`, `dispatch_status` `complete`, no
+staged history). Without a listener, the same recovery is the helper command
+`queue observe "$REQUEST" --parent-task-id "$PARENT" --native-controls-confirmed
+--native-read-file "$HISTORY"`, where `HISTORY` is one read-only native history
+of the worker. Matching history is staged and published through the existing
+publication path; a history whose response or message identity differs from
+the immutable receipt is refused before anything is staged. Nothing here
+re-arms or resends.
 
 ## Closed listener with an untouched queued request
 

@@ -20,7 +20,7 @@ class QueuedResumeCheckTests(unittest.TestCase):
     def setUp(self):
         self.fresh()
 
-    def fresh(self):
+    def fresh(self, confirm="--confirm-pro"):
         temporary = tempfile.TemporaryDirectory(prefix="pro-queued-resume-")
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name).resolve(strict=True)
@@ -36,7 +36,7 @@ class QueuedResumeCheckTests(unittest.TestCase):
             [self.prompt, self.client], ensure_ascii=True, separators=(",", ":")
         ).encode("utf-8")).hexdigest()
         self.call("worker", "set", "--conversation-id", self.worker,
-                  "--confirm-pro", "--native-controls-confirmed")
+                  confirm, "--native-controls-confirmed")
         submitted = self.call(
             "queue", "submit", "--request-id", self.rid,
             "--client-session-id", self.client, "--prompt-file", "-",
@@ -108,6 +108,25 @@ class QueuedResumeCheckTests(unittest.TestCase):
         self.assertEqual(before, self.stored())
         queued = json.loads(self.record.read_text("utf-8"))
         self.assertEqual(queued["prompt"].encode("utf-8"), self.prompt.encode("utf-8"))
+
+    def test_neutral_marker_worker_passes_and_other_markers_fail(self):
+        self.fresh(confirm="--confirm-worker")
+        first = self.check()
+        self.assertTrue(first["resume_eligible"])
+        self.assertEqual(first["worker_model_confirmation"], "user-confirmed-worker")
+        self.rejected(worker="different-worker")
+        worker_file = self.paths.worker_file
+        record = json.loads(worker_file.read_text("utf-8"))
+        for marker in ("user-confirmed-other", "", None, ["user-confirmed-worker"]):
+            with self.subTest(marker=marker):
+                value = dict(record, model_confirmation=marker)
+                if marker is None:
+                    del value["model_confirmation"]
+                self.write_record(value, worker_file)
+                result = self.rejected(code=2)
+                self.assertEqual(result["error_type"], "ConfigurationError")
+        self.write_record(record, worker_file)
+        self.assertEqual(self.check(), first)
 
     def test_expectations_must_match(self):
         for changes in (

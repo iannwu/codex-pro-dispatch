@@ -456,6 +456,104 @@ class ReleaseQueueTests(unittest.TestCase):
             self.call("status", "unit-A")["assignment"]["submission_count"], 1
         )
 
+    def complete_core_only(self):
+        """Core completes from native history while the queue stage is lost."""
+        self.begin()
+        raw = json.dumps(self.document()).encode("utf-8")
+        core.mark_submitted("unit-A", self.wrapped, self.paths)
+        core.complete_assignment("unit-A", b"", self.paths, native_read=raw)
+        receipt = self.call("status", "unit-A")["assignment"]
+        self.assertEqual(receipt["status"], "complete")
+        record = self.call("queue", "status", "unit-A")
+        self.assertEqual(record["state"], "claimed")
+        self.assertEqual(record["dispatch_status"], "complete")
+        return receipt
+
+    def test_complete_receipt_without_stage_publishes_matching_history(self):
+        receipt = self.complete_core_only()
+        before = self.records()
+        # Without any history the runner is told to fetch one read-only.
+        self.assertEqual(self.observe(code=4)["error"], "No native snapshot or staged history")
+        self.assertEqual(before, self.records())
+        result = self.observe(self.document())
+        self.assertEqual(result["observation"], "published")
+        self.assertEqual(result["answer"]["payload"], "unit answer")
+        self.assertEqual(self.call("status", "unit-A")["assignment"], receipt)
+        self.assertEqual(self.call("queue", "collect", "unit-A")["answer"], result["answer"])
+        saved = self.records()
+        self.assertEqual(self.observe()["answer"], result["answer"])
+        self.assertEqual(self.observe(self.document())["answer"], result["answer"])
+        self.assertEqual(saved, self.records())
+
+    def test_complete_receipt_prevalidation_completes_once(self):
+        self.complete_core_only()
+        raw = json.dumps(self.document()).encode("utf-8")
+        real, calls = core.complete_assignment, []
+
+        def counted(*args, **kwargs):
+            calls.append(kwargs.get("native_read"))
+            return real(*args, **kwargs)
+
+        # Prevalidation of the complete receipt is reused; the same validation
+        # never runs twice against the same bytes on this branch.
+        with patch.object(core, "complete_assignment", counted):
+            published = Queue(self.paths).publish(
+                "unit-A", "unit-parent", confirmed=True, native_read=raw)
+        self.assertEqual(calls, [raw])
+        self.assertEqual(published["answer"]["payload"], "unit answer")
+        self.assertEqual(self.call("status", "unit-A")["assignment"]["status"], "complete")
+
+    def test_conflicting_history_never_stages_against_a_complete_receipt(self):
+        receipt = self.complete_core_only()
+        before = self.records()
+        for kind in ("response", "assistant_id", "turn_id"):
+            document = self.document()
+            if kind == "response":
+                document["turns"][0]["items"][1]["text"] = (
+                    core.result_marker("unit-A") + "\nother answer\n" + core.end_marker("unit-A")
+                )
+            elif kind == "assistant_id":
+                document["turns"][0]["items"][1]["id"] = "other-answer"
+            else:
+                document["turns"][0]["id"] = document["turns"][0]["items"][0]["id"] = "other-turn"
+            with self.subTest(kind=kind):
+                for operation in ("observe", "publish"):
+                    self.call(
+                        "queue", operation, "unit-A", "--parent-task-id", "unit-parent",
+                        "--native-controls-confirmed",
+                        "--native-read-file", str(self.evidence(document)), code=4,
+                    )
+                self.assertEqual(before, self.records())
+        self.assertEqual(self.call("status", "unit-A")["assignment"], receipt)
+        self.assertEqual(self.observe(self.document())["observation"], "published")
+        self.call("queue", "acknowledge", "unit-A")
+        self.assertFalse(self.call("queue", "collect", "unit-A")["body_available"])
+        self.observe(self.document(), code=4)
+        self.assertEqual(self.call("status", "unit-A")["assignment"], receipt)
+
+    def test_interruption_after_each_boundary_recovers_without_a_second_arm(self):
+        claim = ["queue", "claim", "--request-id", "unit-A",
+                 "--parent-task-id", "unit-parent", "--native-controls-confirmed"]
+        self.begin()  # Interrupted after arm: the counter is still zero.
+        self.assertEqual(self.call(*claim)["action"], "collect_only")
+        self.assertEqual(self.call("status", "unit-A")["assignment"]["submission_count"], 0)
+        self.call("arm", "unit-A", code=4)
+        self.assertEqual(self.observe(code=4)["error"], "No native snapshot or staged history")
+        core.mark_submitted("unit-A", self.wrapped, self.paths)  # Interrupted after send.
+        self.assertEqual(self.call(*claim)["action"], "collect_only")
+        raw = json.dumps(self.document()).encode("utf-8")
+        with patch.object(core, "complete_assignment", side_effect=OSError("unit fault")):
+            with self.assertRaises(OSError):  # Interrupted after staging.
+                Queue(self.paths).publish("unit-A", "unit-parent", confirmed=True, native_read=raw)
+        self.assertEqual(self.call(*claim)["action"], "collect_only")
+        core.complete_assignment("unit-A", b"", self.paths, native_read=raw)  # After core completion.
+        self.assertEqual(self.call(*claim)["action"], "collect_only")
+        result = self.observe()
+        self.assertEqual(result["observation"], "published")
+        receipt = self.call("status", "unit-A")["assignment"]
+        self.assertEqual(receipt["submission_count"], 1)
+        self.assertTrue(receipt["no_resend"])
+
     def test_busy_no_resend_cooldown_and_purge(self):
         self.begin()
         self.call("arm", "unit-A", code=4)

@@ -1,31 +1,58 @@
 # Codex Pro Dispatch
 
-**Delegate tasks to ChatGPT from the native Codex desktop app on macOS.**
-
-Get help with code reviews, research, and implementation, then bring the results back into your original Codex task.
-
-This unofficial plugin is not affiliated with, endorsed by, or maintained by OpenAI. The current supported workflow requires a dedicated ChatGPT conversation with Pro selected.
-
-**Desktop-only:** It does not run from ChatGPT on the web, Codex CLI alone, IDE extensions, Windows, or Linux.
-
 [![CI](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/iannwu/codex-pro-dispatch)](https://github.com/iannwu/codex-pro-dispatch/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+Dispatch work from Codex or Claude Code to ChatGPT through the official native Mac apps.
+
+**No browser control. No pop-up browsers. No computer-use automation.**
+
+Codex Pro Dispatch supports:
+
+- ChatGPT Pro or Sol with the reasoning level you choose in ChatGPT
+- up to two configured workers; concurrent dispatch requires live qualification
+- recovery across interruptions and listener restarts after live qualification
+- durable request identity and inspectable results
+
+## How it works
+
+```text
+Codex       -> ChatGPT
+Claude Code -> Codex listener -> ChatGPT
+```
+
+From Codex, the current task dispatches work directly to a dedicated ChatGPT
+worker conversation and collects the result back into the originating task.
+
+From Claude Code, a local request goes through a resident Codex listener. The
+listener performs the native ChatGPT dispatch and returns the collected result
+to Claude Code.
+
+The bridge uses native conversation controls in the official ChatGPT desktop
+app for macOS with Codex. It does not use browser automation, Accessibility,
+AppleScript, CDP, clipboard automation, or a separate daemon.
+
+This project is independent and unofficial. It is not affiliated with,
+endorsed by, or maintained by OpenAI.
+
+**Desktop-only:** It does not run from ChatGPT on the web, Codex CLI alone, IDE
+extensions, Windows, or Linux.
+
 ## Install
 
-**Version: v1.3.0-rc.1.**
+**Version: v1.3.0.**
 
 Run these commands in your terminal:
 
 ```bash
-codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.3.0-rc.1
+codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.3.0
 codex plugin add codex-pro-dispatch@codex-pro-dispatch
 ```
 
 You need macOS, Python 3.9 or newer, Git, and a Codex CLI with plugin support. No extra Python packages are required. The workflow runs inside the official ChatGPT desktop app for macOS with Codex. The CLI installs the plugin; it cannot run the dispatch workflow on its own.
 
-This pins the v1.3.0 release candidate. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.3.0-rc.1-acceptance.md).
+This pins v1.3.0. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.3.0-acceptance.md).
 
 Restart the desktop app if the plugin does not appear.
 
@@ -34,22 +61,24 @@ Restart the desktop app if the plugin does not appear.
 In a Codex task, paste:
 
 ```text
-Use $codex-pro-dispatch to check compatibility and set up my dedicated ChatGPT Pro worker.
+Use $codex-pro-dispatch to check compatibility and set up my dedicated ChatGPT worker.
 ```
 
-Codex checks compatibility, helps you create or choose a dedicated ChatGPT conversation, and asks you to select Pro. It saves the conversation ID so future requests return to the same conversation, and runs a local health check. Model selection is confirmed by you, not automatically verified by the plugin.
+Codex checks compatibility, helps you create or choose a dedicated ChatGPT conversation, and asks you to pick the model and reasoning effort you want in it. It saves the conversation ID so future requests return to the same conversation, and runs a local health check. Model selection is confirmed by you, not automatically verified by the plugin.
 
 Once setup is complete, try a review using text already in your Codex task:
 
 ```text
-Use $codex-pro-dispatch to ask my ChatGPT Pro worker to review the implementation plan above. Include the plan in the assignment, ask for the three biggest risks, and bring the findings back here. Do not change any files.
+Use $codex-pro-dispatch to ask my ChatGPT worker to review the implementation plan above. Include the plan in the assignment, ask for the three biggest risks, and bring the findings back here. Do not change any files.
 ```
 
 You do **not** need a connector for reviewing content included in the prompt.
 
 ### Use it from Claude Code
 
-For a source installation, register the same global skill for Claude Code:
+For a source installation, first complete [Source installation and
+removal](#source-installation-and-removal), then register the same global skill
+for Claude Code:
 
 ```bash
 python3 ~/.agents/skills/codex-pro-dispatch/scripts/register-claude.py
@@ -59,6 +88,12 @@ Then invoke `/codex-pro-dispatch` in a fresh local Claude Code task. Claude uses
 the resident listener owned by Codex. If no listener is ready, it returns the
 documented Codex setup prompt. Registration does not start a listener, grant
 shell permission, or authorize a send. See the [Claude client guide](skills/codex-pro-dispatch/references/claude-client.md).
+
+Resident service keeps a dedicated Codex task turn active until shutdown. Codex
+shares the session details once, then automatically waits on the original serve
+execution. No periodic confirmation is needed. A completed owner turn or a
+detached cell is not an available listener; app closure and host cancellation
+are not supported availability guarantees.
 
 ## What happens
 
@@ -76,14 +111,17 @@ Use it to:
 - Review code or investigate a question using context supplied in the assignment.
 - Delegate repository changes when the ChatGPT conversation has the necessary GitHub access.
 
-The supported workflow handles one unresolved assignment at a time. It does not promise background operation or concurrent work in the originating Codex task.
+The default workflow handles one unresolved assignment at a time. An explicit
+worker pool can bind at most two user-confirmed conversations to one listener.
+Native overlap and restart recovery are live qualification gates, not promises
+from local tests. It does not start automatically after Codex reopen or reboot.
 
 ## Requirements and limits
 
 - **Native macOS desktop only.** ChatGPT on the web, Codex CLI alone, IDE extensions, Windows, and Linux cannot run this workflow.
-- **Pro selected in ChatGPT.** Other model and reasoning configurations are outside the supported v1.3.0-rc.1 workflow. The plugin does not select or route models.
+- **You choose the model in ChatGPT.** Select any available model and reasoning effort in the dedicated conversation before you dispatch. The plugin does not select, route, or verify models.
 - **Compatible native controls.** The app must let Codex identify both conversations, send a message, read it back, collect a response, and restore the original task. If any required control is missing, the workflow stops.
-- **Explicit invocation.** Start requests with `$codex-pro-dispatch`.
+- **Explicit invocation.** Use `$codex-pro-dispatch` in Codex or `/codex-pro-dispatch` in Claude Code.
 - **Shared context is explicit.** ChatGPT does not automatically see your Codex task, local files, uncommitted changes, or worktree. Include the relevant material in the assignment or provide authorized repository access.
 
 The workflow does not fall back to browser or UI automation when native controls are unavailable.
@@ -99,12 +137,12 @@ The plugin does not install the connector or grant permissions. Start the first 
 After access is verified, specify the repository, starting commit, branch, and allowed changes:
 
 ```text
-Use $codex-pro-dispatch to send the implementation described above to my ChatGPT Pro worker. Include the specified repository, starting commit, and allowed changes. Commit only to the named branch, then independently verify the returned commit and tests here.
+Use $codex-pro-dispatch to send the implementation described above to my ChatGPT worker. Include the specified repository, starting commit, and allowed changes. Commit only to the named branch, then independently verify the returned commit and tests here.
 ```
 
 See the [GitHub verification protocol](skills/codex-pro-dispatch/references/github-verification.md) for the full requirements.
 
-## If a task is interrupted
+## Recovery and at-most-once delivery
 
 Ask Codex to recover the existing assignment:
 
@@ -125,7 +163,7 @@ Do not delete receipts or force-reset the worker to bypass an active assignment.
 | `codex plugin` is unknown | Update to a Codex CLI that supports plugin marketplaces. |
 | The skill does not appear | Restart the desktop app, confirm the plugin is enabled, and invoke `$codex-pro-dispatch` explicitly. |
 | Compatibility check fails | Check the [supported app capabilities](docs/compatibility.md). A missing native control cannot be bypassed. |
-| Pro is unavailable | Use an account or workspace that exposes Pro. The plugin cannot enable it. |
+| The model you want is unavailable | Use an account or workspace that exposes it, or pick another available model. The plugin cannot enable models. |
 | ChatGPT cannot see the code | Include the relevant content in the assignment, or provide authorized GitHub access and a remotely available starting commit. |
 | ChatGPT can read GitHub but cannot commit | Check write permissions and organization or SSO policy. Use prompt-only review until access is verified. Recover any active assignment before starting a new one. |
 | `legacy-active-assignment` appears after an upgrade | v1.2 can inspect, recover, or explicitly abandon a v1.1 assignment, but cannot continue or complete it. Finish it on v1.1, or explicitly abandon it before starting a new assignment. Never resend it automatically. |
@@ -135,7 +173,7 @@ For help, follow [SUPPORT.md](SUPPORT.md). Share redacted version and capability
 
 ## Verification and privacy
 
-The v1.3.0-rc.1 candidate adds the resident Claude client and deterministic prompt-admission checks. Its automated suites pass, while the candidate-specific live native gates remain pending. Read the [release receipt](docs/releases/v1.3.0-rc.1-acceptance.md) for the evidence and limits.
+v1.3.0 adds the resident Claude client, one or two configured workers, and deterministic prompt-admission checks. Automated suites and bounded live native qualification passed. Read the [release receipt](docs/releases/v1.3.0-acceptance.md) for the evidence and limits.
 
 The plugin checks the answer it reads from the app’s native history, reported as `bounded_native_summary` verification. It cannot prove that this is an exact copy of the original response or independently establish that ChatGPT has finished generating. Reported repository changes require separate commit verification.
 
@@ -148,7 +186,7 @@ The workflow can use short-lived private files during collection. App and termin
 For source inspection or development, install a pinned checkout instead of the plugin package:
 
 ```bash
-git clone --branch v1.2.2 https://github.com/iannwu/codex-pro-dispatch.git
+git clone --branch v1.3.0 https://github.com/iannwu/codex-pro-dispatch.git
 cd codex-pro-dispatch
 ./install.sh
 ```
@@ -168,7 +206,7 @@ For a source installation, run `./uninstall.sh` from its checkout. Recovery reco
 
 ## Development and documentation
 
-This README describes the v1.3.0-rc.1 workflow.
+This README describes the v1.3.0 workflow.
 
 - [Contributing](CONTRIBUTING.md): development and contribution guidance.
 - [Skill protocol](skills/codex-pro-dispatch/SKILL.md): dispatch, verification, and recovery rules.

@@ -89,13 +89,79 @@ class CoreTests(unittest.TestCase):
         self.arm(prepared)
         cpd.mark_submitted(prepared.assignment_id, prepared.wrapped_prompt, self.paths)
 
-    def test_worker_requires_explicit_pro_confirmation(self) -> None:
+    def test_worker_requires_explicit_confirmation(self) -> None:
+        for kwargs in ({}, {"confirm_pro": False}, {"confirm_worker": False},
+                       {"confirm_pro": False, "confirm_worker": False}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(cpd.ConfigurationError):
+                    cpd.save_worker(self.worker_id, paths=self.paths, **kwargs)
+                self.assertFalse(self.paths.worker_file.exists())
+                self.assertFalse(self.paths.config_dir.exists())
+
+    def test_worker_confirmation_marker_follows_the_flags(self) -> None:
+        for kwargs, marker in (
+            ({"confirm_worker": True}, "user-confirmed-worker"),
+            ({"confirm_worker": True, "confirm_pro": True}, "user-confirmed-worker"),
+            ({"confirm_pro": True}, "user-confirmed-pro"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                cpd.reset_worker(force=True, paths=self.paths)
+                worker = cpd.save_worker(self.worker_id, paths=self.paths, **kwargs)
+                self.assertEqual(worker.model_confirmation, marker)
+                stored = json.loads(self.paths.worker_file.read_text(encoding="utf-8"))
+                self.assertEqual(stored["model_confirmation"], marker)
+                self.assertEqual(cpd.load_worker(self.paths), worker)
+
+    def test_same_worker_reconfiguration_preserves_legacy_bytes(self) -> None:
+        cpd.save_worker(self.worker_id, confirm_pro=True, paths=self.paths)
+        before = self.paths.worker_file.read_bytes()
+        again = cpd.save_worker(
+            self.worker_id,
+            confirm_worker=True,
+            expected_conversation_id=self.worker_id,
+            paths=self.paths,
+        )
+        self.assertEqual(again.model_confirmation, "user-confirmed-pro")
+        self.assertEqual(self.paths.worker_file.read_bytes(), before)
         with self.assertRaises(cpd.ConfigurationError):
-            cpd.save_worker(
-                self.worker_id,
-                confirm_pro=False,
-                paths=self.paths,
-            )
+            cpd.save_worker(self.worker_id, confirm_worker=True, paths=self.paths)
+        self.assertEqual(self.paths.worker_file.read_bytes(), before)
+
+    def test_load_worker_accepts_exactly_two_markers(self) -> None:
+        self.configure_worker()
+        record = json.loads(self.paths.worker_file.read_text(encoding="utf-8"))
+        for marker in ("user-confirmed-worker", "user-confirmed-pro"):
+            with self.subTest(marker=marker):
+                self.paths.worker_file.write_text(
+                    json.dumps({**record, "model_confirmation": marker}), encoding="utf-8"
+                )
+                self.assertEqual(cpd.load_worker(self.paths).model_confirmation, marker)
+        for marker in ("user-confirmed-Pro", "user-confirmed-worker ", "", None, True,
+                       ["user-confirmed-worker"]):
+            with self.subTest(marker=marker):
+                value = {**record, "model_confirmation": marker}
+                if marker is None:
+                    del value["model_confirmation"]
+                self.paths.worker_file.write_text(json.dumps(value), encoding="utf-8")
+                with self.assertRaises(cpd.ConfigurationError):
+                    cpd.load_worker(self.paths)
+                with self.assertRaises(cpd.ConfigurationError):
+                    cpd.prepare_assignment(
+                        "Task", parent_task_id=self.parent_id,
+                        assignment_id="dispatch-refused-7319", paths=self.paths,
+                    )
+                self.assertFalse(
+                    (self.paths.assignments_dir / "dispatch-refused-7319.json").exists()
+                )
+
+    def test_new_receipts_snapshot_the_configured_marker(self) -> None:
+        cpd.save_worker(self.worker_id, confirm_worker=True, paths=self.paths)
+        prepared = cpd.prepare_assignment(
+            "Task", parent_task_id=self.parent_id,
+            assignment_id="dispatch-neutral-7319", paths=self.paths,
+        )
+        receipt = cpd.load_assignment(prepared.assignment_id, self.paths)
+        self.assertEqual(receipt["worker_model_confirmation"], "user-confirmed-worker")
 
     def test_worker_config_is_private(self) -> None:
         worker = self.configure_worker()

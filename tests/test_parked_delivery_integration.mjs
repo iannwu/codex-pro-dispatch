@@ -363,6 +363,40 @@ test("active observation budget exhaustion preserves armed collect-only work", a
   assert.equal(f.commands.filter(r => r.command.includes("'arm'")).length, 1);
 });
 
+// complete_without_stage: the core receipt completed but the queue lost its
+// stage and publication. Collect-only recovery fetches history read-only and
+// publishes through Queue.publish without arming, claiming anew or resending.
+test("collect-only recovery publishes a complete receipt whose queue stage is missing", async t => {
+  const f = await fixture(t);
+  const first = await f.drive();
+  assert.equal(first.returned.result.observation, "published");
+  const record = f.directory + "/authority/state/queue/fixture-A.json";
+  const saved = JSON.parse(await fs.readFile(record, "utf8"));
+  assert.equal(saved.state, "published");
+  // Synthetic loss of the queue-side stage only; the canonical receipt is untouched.
+  const { native_read, answer, ...unstaged } = saved;
+  await fs.writeFile(record, JSON.stringify({ ...unstaged, state: "claimed" }), { mode: 384 });
+  const receipt = (await f.cli(["status", "fixture-A"])).assignment;
+  assert.equal(receipt.status, "complete");
+  const missing = await f.cli(["queue", "status", "fixture-A"]);
+  assert.equal(missing.state, "claimed");
+  assert.equal(missing.dispatch_status, "complete");
+
+  const second = await f.drive("observe");
+  assert.equal(second.returned.result.observation, "published");
+  assert.equal(second.collected.answer.payload, "integration answer");
+  assert.equal(f.native.sends.length, 1);
+  assert.equal(f.native.reads.length, 3);
+  assert.equal(f.commands.filter(r => r.command.includes("'arm'")).length, 1);
+  const fallback = f.commands.filter(r =>
+    r.stderr?.includes("No native snapshot or staged history"));
+  assert.equal(fallback.length, 2);
+  const restaged = JSON.parse(await fs.readFile(record, "utf8"));
+  assert.equal(restaged.native_read, native_read);
+  assert.deepEqual(restaged.answer, answer);
+  assert.deepEqual((await f.cli(["status", "fixture-A"])).assignment, receipt);
+});
+
 test("large history stays off the native wire without changing one-send behavior", async t => {
   const f = await fixture(t, { largeHistory: true });
   const history = await f.cli(["status"]);

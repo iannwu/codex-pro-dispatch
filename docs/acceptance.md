@@ -33,15 +33,60 @@ Expected:
 ### A1. Worker configuration
 
 - Create one dedicated Chat conversation.
-- Visibly select Pro.
+- Choose the model and reasoning effort for it.
 - Resolve its stable conversation ID.
-- Run `pro-dispatch worker set --conversation-id <id> --confirm-pro --native-controls-confirmed`.
+- Run `pro-dispatch worker set --conversation-id <id> --confirm-worker --native-controls-confirmed`.
 
 Expected:
 
-- `worker show` returns the exact ID.
+- `worker show` returns the exact ID with `model_confirmation: user-confirmed-worker`.
 - The config file is mode `0600`.
-- The model is reported as user-confirmed, not machine-verified.
+- The conversation is reported as user-confirmed; the model is not machine-verified.
+- An existing worker saved with the legacy `--confirm-pro` still loads unchanged.
+
+### A2. Resident owner liveness
+
+For resident candidates, use a disposable native session before any live send:
+
+- Await repeated idle admission observations in the same serving evaluation.
+  Verify no independent waiting process, model turn, chat read or navigation.
+- Stop renewing admission while the native runtime remains alive. Verify that
+  the owner-loss detector removes unclaimed readiness, closes the socket and
+  preserves a zero-event failure audit. It must not reopen or submit anything.
+- Exercise cleanup while receive is waiting. Verify close finishes without a
+  deadlock and preserves the observed-command and ready records.
+- Confirm an accepted slow request is not cancelled by the admission detector.
+
+Record native-host results separately from synthetic tests. Nonrenewal does not
+prove host cancellation, kernel-loss cleanup or recovery after a laptop reboot.
+Missing closure evidence remains a blocker, never permission to take over.
+
+### A3. Canonical resident ownership
+
+For ownership candidates, qualify first enrollment from trusted fresh-deployment
+or legacy-quiescence evidence. An empty queue, missing globals or a stale socket
+does not qualify an existing deployment. Record the accepted evidence and exact
+candidate implementation. Do not enroll merely to unblock this test.
+
+- Race replacement against reservation. Exactly one wins; a replaced owner
+  cannot admit, claim, arm or send. Once reserved, replacement stays blocked
+  through the final native cleanup, even after the answer is complete.
+- Verify joined pre-arm failures resume the same request, and joined post-arm
+  failures remain collect-only. Queued requests, partial claims and completed
+  but unpublished answers must survive replacement.
+- Verify uncertain native calls, pending helpers and unconfirmed cleanup retain
+  ownership and their evidence. Only the original joined continuation releases.
+- Run a real Claude roundtrip, collect twice, compare preserved answer hashes,
+  then acknowledge. Verify no foreground navigation or routine progress messages.
+
+Report synthetic and native results separately. These tests do not establish
+automatic startup after a reboot or safe migration of an unfenced legacy owner.
+
+Local source tests may exercise collector-only recovery, crash-without-audit
+recover-start, and a two-slot scheduler against fixtures. They never mark native
+two-worker overlap, app reopen collection, laptop reboot, or legacy migration
+PASS. Those gates stay NOT RUN or BLOCKED until a disposable live qualification
+is authorized.
 
 ## B. One-turn roundtrip
 
@@ -132,7 +177,7 @@ Give the worker one disposable branch assignment.
 
 Expected:
 
-- Chat Pro performs the write through its own GitHub connector
+- the ChatGPT worker performs the write through its own GitHub connector
 - worker returns branch and commit SHA
 - parent independently verifies the remote commit and unchanged protected refs
 - parent does not substitute its own write
@@ -201,3 +246,28 @@ Expected:
 ## Release gate
 
 The candidate is ready to be called stable only when A through L pass on the exact candidate commit. H may retain the documented brief foreground collection limitation, but missing native capabilities, clipboard changes, duplicate submission, cooldown bypass, wrong-thread collection, stale response acceptance, incorrect chunk assembly, sensitive temp-file residue, unredacted legacy diagnostics, or failed parent restoration are blockers.
+
+## Guarded takeover contract regression coverage
+
+The isolated takeover suites are `tests/test_resident_takeover.py` and
+`tests/test_parked_takeover.mjs`. They use temporary authorities and synthetic
+native tools, including real helper and runner execution, without live sends.
+
+| Contract | Regression evidence |
+| --- | --- |
+| T1, T11 | Clean takeover byte audit, exact owner keys, real command admission; request files remain unchanged. |
+| T2, T3 | Every uncertain receipt state remains collect-only; old and new arm attempts refuse; active/working refuse unchanged and idle commits. |
+| T4 | Prepared, receiptless claim, and reserved queued variants; injected crashes before/after abandon, release, and end converge. |
+| T5 | Barrier at real lock acquisition produces one commit and one stale loser. |
+| T6 | Old claim, begin, arm, publish, submitted, indeterminate, ambiguous, release, abandon, end, session bind, collector open, and handoff refuse unchanged. |
+| T7 | Pending observation retains the slot; late answer publishes with one verified submission and no new arm. |
+| T8, T9 | Classification and marker-generation matrices, association failure, orphan and legacy receipts, malformed host and packet evidence, and public takeover refusal. |
+| T10 | Prepared and armed requests retain their worker slots through cancellation and collect-only classification. |
+| T12 | Real runner collects pending inherited work without sending, then arms and sends once on the idle sibling; cooldown and single-worker cases block. |
+| T13 | Single-worker cancellation frees capacity; the real runner sends only the fresh request once. |
+| T14 | Operation denial, mixed flags, stored-input hash checks, operator abandon/release/end, idempotent completion denial, exact ancestry across successive takeovers, and history-only denial. |
+| T15 | Stale marker archival, current marker exclusion, stale arm/handoff/recovery readers, and collector `marker_stale`. |
+| T16 | Generated call order, native identity, real helper commit, exact evidence bytes, replay, current native temp directory, and chmod-before-open failure. |
+
+The desktop release harness R1-R5 remains a separate live qualification gate.
+These isolated tests do not claim to prove desktop host lifecycle guarantees.

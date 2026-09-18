@@ -1,5 +1,24 @@
 # Trusted native activation
 
+## Retained post-arm continuation after a turn ends
+
+For an explicitly requested later-turn continuation in the same owner task,
+generate `resident-continue-armed-packet SESSION` with the installed
+`parked-activation.mjs`, then execute its decoded `calls.serve` verbatim in
+outer `functions.exec`. Keep supervising that original cell after every yield.
+The packet checks the exact canonical parent, owner, generation, session and
+pool, and requires one or two armed reservations belonging to the retained
+serving invocation. It resumes the original promises only when every outstanding
+call is the exact read-only native owner check. It fences the previous driver
+and consumes each subsequent host call before dispatch; it never repeats open,
+rendezvous, arm, or a consumed send. An older retained relay qualifies only if
+all missing call metadata is still available in its never-emitted call queue.
+Missing runtime, changed ownership, a lost send result, or any other outstanding
+call remains blocked and collect-only. A zero submission count alone never
+authorizes sending. This command changes no durable request or owner state.
+
+## Finite activation
+
 Read the broker reference; require production ownership, native preflight,
 trusted BROKER/PARENT IDs and canonical authority. Generate:
 
@@ -220,6 +239,15 @@ already armed Pro operation. These local fixtures do not qualify native Stop,
 crash, suspension, hidden model accounting or continuous availability.
 ## Active-parent requirement and expired unobserved retries
 
+For graceful rotation to a fresh owner task, see
+[listener owner handoff](../../../docs/listener-owner-handoff.md).
+For replacement from a new task, first follow [new-owner-handoff.md](new-owner-handoff.md) and its `resident-takeover-packet` path. The cooperative handoff below is a fallback only when the old task is active.
+
+Only the current native owner may execute the `resident-handoff-packet` after
+joining its graceful stop. Direct credential-only CLI handoff is rejected.
+The native packet checks the current task, the target's existence, and the
+post-join barrier. It preserves request evidence and does not expand recovery.
+
 An open socket does not wake the native Codex parent. For EVERY request, the parent must run the matching `command-ready` waiter and, only after its successful result, execute the existing native `calls.receive` exactly once. Client publication alone cannot complete this sequence. This is not an autonomous desktop service.
 
 For an intact expired original command whose ordinal has neither `ready-N.json` nor `command-observed-N.json`, an explicit retry is available while the same listener's lease remains live:
@@ -239,78 +267,221 @@ An unused retry ID may be tried after another unobserved timeout, but no attempt
 This does not extend leases, recover a used listener closed with `lease_expired`, or change closed-listener replacement eligibility. `closed-packet` still requires the existing zero-event `idle_expired` proof.
 ## Resident opt-in (candidate)
 
-This section overrides the manual per-request instructions only for an explicitly generated resident packet. The finite workflow below remains the default fallback. Resident mode removes the session-age lease, not the finite pickup, reply or active-observation budgets, the 64-admission ceiling, or any canonical and at-most-once guard.
+This section overrides the manual per-request instructions only for an explicitly generated resident packet. Finite workflows above retain their own eligibility rules and are not a fallback around resident ownership. Resident mode removes the session-age lease, not pickup, reply or active-observation budgets, the 64-admission ceiling, or any at-most-once guard.
 
-### Setup once
+### Setup and replacement
 
-If opening was interrupted before serving, an explicitly authorized cancellation
-may call the installed activation module's `cancelUnstartedResident(globalThis,
-nodeRepl.requestMeta)` in the retained native runtime. Verify the module's physical
-path and reviewed hash first. This accepts only the same task in a later turn,
-an unchanged owner with `used:false`, no held delivery, clean canonical authority,
-and no readiness or observed command. One expired, unqueued command may remain
-as evidence; it is never replayed. The helper closes the old socket with
-`resident_start_cancelled`. Then generate a fresh `closed-resident-packet` and
-execute open and serve in this same turn. Do not advertise readiness before
-serve has started. Used, unknown or post-arm sessions remain ineligible.
+One canonical `resident-owner.json` contains a generation, trusted parent/worker,
+enrollment evidence, one session binding, and at most one in-flight invocation. It is updated under
+the same lock as claim/arm/receipt mutations. Session files are evidence, not
+replacement permission.
 
-First complete candidate tests, pin/manifest checks, the existing native-capability preflight and the client filesystem preflight below. Obtain authorization for this resident consultation scope before starting service. Use the reviewed candidate root, not an assumed installed version:
+First enrollment is a one-time maintenance operation, not normal startup.
+Ordinary startup returns `blocked: enrollment_required` when no owner exists.
+An authorized operator must establish either a genuinely fresh deployment or
+physical quiescence of ALL legacy executions affecting this canonical authority.
+A new chat, empty queue, absent socket/global, elapsed time or an approval alone
+does not establish that fact. Do not enroll the known unresolved legacy runtime.
 
-```sh
-ACT="$ROOT/skills/codex-pro-dispatch/scripts/parked-activation.mjs"
-HELPER="$ROOT/skills/codex-pro-dispatch/scripts/pro-dispatch"
-```
+Record accepted observations and their sources in a private JSON evidence file:
+`kind` (`fresh_deployment` or `legacy_quiescence`), trusted `parent`, `worker`,
+resolved `config_dir`, `state_dir`, inspected `implementation` revision,
+`observations`, and explicit `authorization`. Keep competing legacy launches
+stopped throughout this maintenance transition. The operator verifies physical
+facts; the helper only validates bindings and hashes, not the truth of a claim.
 
-Set `PARENT` to the actual native task ID and `WORKER` to the configured user-confirmed Pro conversation. Broker and parent must be that same task. Keep packet JSON, descriptors and evidence private.
+After that qualification, the operator runs `pro-dispatch resident enroll` with
+one JSON argument containing `generation:0`, a fresh `owner` identifier,
+trusted `parent` and `worker`, `evidence_file` and `evidence_sha256`. It copies
+the accepted evidence into canonical ownership. It neither opens nor sends.
+Never manufacture evidence to clear this gate, delete the owner record or
+reenroll to reset its generation. Worker reconfiguration/reset/purge while
+enrolled is unsupported in this patch.
 
-With no retained native session, generate:
-
-```sh
-node "$ACT" resident-packet "$PARENT" "$PARENT" "$WORKER"
-```
-
-After a clean resident stop, generate a new packet rather than replaying the old one:
-
-```sh
-node "$ACT" closed-resident-packet "$PARENT" "$PARENT" "$WORKER" "$OLD_DIR"
-```
-
-This requires the retained owning runtime, matching closed socket and binding,
-no held delivery, no unknown command artifacts, and either zero deliveries or
-complete, acknowledged, one-send canonical receipts for every delivery. It
-consumes a new exclusive replacement marker and preserves all old evidence.
-Unacknowledged, pending or uncertain work blocks replacement. Runtime loss is
-not recovered by this command. A new packet does not authorize replaying any
-old request.
-
-For a historical finite session, use the existing terminal proof:
+For both ordinary startup and replacement, after actual Claude's filesystem
+preflight, the six native capability checks and authorization, generate:
 
 ```sh
-node "$ACT" closed-terminal-resident-packet \
- "$PARENT" "$PARENT" "$WORKER" "$OLD_DIR" \
- "$OLD_HELPER" "$OLD_WORKER" "$OLD_SESSION" "$OLD_REQUEST" "$OLD_CALL" \
- "$OLD_CLIENT" "$FINGERPRINT" "$NONCE" "$RAW_SHA" "$SENT_SHA" \
- "$DESCRIPTOR_SHA" "$AUDIT_SHA" \
- "$LATER_REQUEST" "$COMMAND2_SHA" "$PROMPT2_SHA"
+node "$ACT" resident-packet "$PARENT" "$PARENT" "$WORKER" "$CLIENT_ROOT"
 ```
 
-Omit the final three arguments as a group when there is no later unobserved command. All historical identities and hashes must come from inspected private evidence. The old helper path remains historical evidence, not an executable selection. This mode retains the acknowledged one-send proof and the narrow optional ordinal-2 absence proof; it does not resume that later request.
+Resolve ACT and the helper to the same inspected physical candidate/install.
+PARENT is the actual dedicated native task, not this development task.
+CLIENT_ROOT is required, physical, private and shared with the actual client.
 
-Execute the decoded `calls.open` verbatim once through outer `functions.exec`. Preserve its returned directory as `SESSION` and its session ID. Then execute the decoded `calls.serve` verbatim once through another outer `functions.exec`, in the same actual native task/turn. Preserve that serve cell ID. Supply these strings as source, not through `eval` or dynamically reconstructed functions.
+Execute decoded `calls.open` once, verbatim through outer `functions.exec`.
+It compares the captured generation atomically. Its result is `ready`,
+`collect_only`, `busy` or `blocked`. Only the first two permit executing that
+packet's `calls.serve` once, in the same native task/turn. Preserve its cell ID
+and follow the packet's `lifecycle` contract. Opening alone does not mean ready;
+`ready` here is the canonical start disposition, not listener availability.
 
-While serve runs, it discovers request publications, performs the exact gate and receive, invokes the existing runner, and returns to an event wait after verified terminal success. The parent must NOT issue per-request `command-ready`, `receive`, dispatch or delivery-clear calls. No idle model turns are needed; terminal wait collection inside the owning evaluation is not a native read or model poll.
+If open succeeded but its generated serving body was lost **before any serving
+attempt**, the sole recovery path is:
 
-Resident service stays in the background: it does not navigate to the owning task
-after observations or completion. Do not forward milestones or routine completion
-messages to a development/coordinator task. The requesting client collects the
-canonical answer; successful deliveries need no separate chat notification.
-Report actionable service failures to the owner without replaying a request.
+```sh
+node "$ACT" resident-serve-existing-packet "$SESSION_DIRECTORY"
+```
 
-Do not restart a consumed open/serve call. A returned pending/blocked result, failed navigation, unresolved helper or owner mismatch stops service rather than authorizing another send. Preserve held delivery and canonical state. Forced host termination has no proven teardown guarantee.
+The complete packet is bounded by an 8 KiB regression test. `calls.serve` is a
+small integrity-pinned relay; the trusted installed module owns the serving loop.
+No generated serving source is evaluated. Each emitted host call is settled once.
+A missing or changed installed module fails closed before the claim.
+
+The native REPL is a shared execution lane. Pool admission uses a 25-second
+observation when no job is running, and a 250-millisecond observation while a
+job needs that lane. This bounds idle-sibling blocking of owner checks, evidence
+writes and result publication. It does not change the winning claimant's
+publication deadline, the admission expiry detector or the Pro observation
+budget. The existing outer execution drives these observations; there is no
+new daemon, timer that renews itself, or coordinator notification.
+
+Each history read saves its original tool envelope and extracted history in
+one native call. They remain separate exclusive 0600 files, individually synced,
+with a directory sync before the helper may arm or observe. An uncertain write
+acknowledgment requires verification of both files and never authorizes a send
+retry. Pooled native evidence and transport calls check owner identity inside
+that same call, before performing the operation.
+
+A client's rendezvous returns after observation and publication, so a delayed
+return is not evidence of a delayed ChatGPT answer. For latency qualification,
+compare command observation, pre-send history, arm, actual ChatGPT user/answer
+turns, post-send history, evidence persistence and publication separately.
+Run the complete generated driver through one outer `functions.exec`; do not
+manually step its individual relay calls between model turns.
+
+Execute only the returned `calls.serve`, once, verbatim through outer
+`functions.exec` in the original native owner task. This packet has no open
+action. It retains the original socket object and descriptor. After the claim
+succeeds it may bind a later trusted turn of that same task; it never takes
+ownership from another task, changes workers or replays a request.
+The updated activation module and helper must resolve to the same physical
+installation as the retained descriptor. Do not mix candidate and installed paths.
+
+Execution first checks the retained native state, then permanently fences the
+attempt before awaiting anything. Under the canonical lock it verifies the exact
+owner, generation and session, no active assignment, invocation or cooldown,
+and the pristine `session.json` plus `wake.sock` inventory. Slots must be idle,
+except for completed, no-resend requests fenced into collect-only slots from an
+older generation. Each exception requires its exact queue/receipt/worker binding;
+unrelated claims, prepared work and uncertain deliveries remain ineligible.
+The retained native recovery plan must match the canonical plan before serving.
+This covers a truncated ordinary packet after open: the existing collector may
+finish publication/release without sending again. It does not permit occupied
+slots through the separate unused-replacement path.
+The pinned transport cannot accept a request before a receive/readiness write;
+any admission object, readiness, ticket, command, request, audit, failure or
+unknown session artifact rejects recovery. It creates one exclusive durable
+`resident-serve-existing.json` claim without changing canonical or request files.
+Concurrent, duplicate, missing, malformed or uncertain evidence fails closed.
+A lost claim reply consumes recovery too. Preserve the claim and native state;
+never delete evidence, reset `used`, reconstruct the socket, change the turn
+binding manually, regenerate ordinary startup as a workaround, or retry an
+attempted serve. A lost native runtime or a foreign owner task is ineligible.
+
+### Explicit replacement of consumed but unused serving
+
+If a serve-existing claim was consumed but serving never started, the same
+canonical owner task may explicitly generate:
+
+```sh
+node "$ACT" resident-replace-unused-packet "$SESSION_DIRECTORY"
+```
+
+Execute `calls.replace` once through outer `functions.exec`. Eligibility requires
+the retained native object/socket, exact canonical owner/generation/session,
+durable consume marker, idle slots, no active assignment/cooldown, and an exact
+inventory of descriptor, socket and consume marker. Admission, readiness,
+commands, request evidence, audit, failure, a started relay or unknown artifacts
+reject replacement. A synchronous native fence blocks any delayed serving call.
+An exclusive `resident-unused-replacement.json` is durably written before the
+canonical session is detached. Original evidence is never deleted or rewritten.
+Normal socket close then adds its closure audit. Only an explicit successful
+`replaced:true` receipt permits generating an ordinary resident packet to open
+a fresh session in that task. Follow its normal open/serve lifecycle.
+Uncertain output, partial writes or closure failure stop the workflow. Never
+retry replacement or treat missing readiness as proof of eligibility.
+
+If packet generation succeeded but its output was truncated or lost, and no
+`calls.serve` invocation occurred, rerun the same recovery command for the same
+session in the original owner task, then discard the earlier packet.
+Generation is read-only and creates no claim. Claim absence alone is insufficient:
+any attempted or uncertain execution remains consumed by the native fence.
+A lost relay reply is also terminal for that attempt; never replay relay calls.
+
+This exception only regenerates the never-started serving action. The original
+no-replay and collect-only rules remain in effect. Supervise the returned serve
+cell exactly as below; packet generation and claim success are not readiness.
+
+Resident service owns the dedicated Codex turn until shutdown. A yielded
+`functions.exec` cell is not a detached daemon: ending the owner turn can stop
+its native calls even if the cell still appears to run. Give the session path
+and client command in commentary once. Do not send a final response while the
+cell is running. After each yield, automatically call `functions.wait` with
+that actual returned cell ID and `yield_time_ms:60000`, repeating in the same
+turn until completion. This requires no user confirmation, scheduled task,
+routine progress message, or manual reactivation. Waits supervise the original
+execution; they do not poll the worker or publish new requests. Never replay
+open/serve when a wait yields or its result is lost.
+
+The first serve output, `resident_supervision_required`, repeats this contract
+and explicitly does not assert readiness. Clients still require the current
+bound `resident-status` admission observation and atomic rendezvous claim.
+Only finalize after the original cell completes and its cleanup is checked.
+If the host cannot keep this owner turn active, report resident service as
+unavailable on that host; do not advertise indefinite detached availability.
+
+The owner reserves an invocation before accepting a request, and retains it
+through helper calls, native work, transport completion and cleanup. Replacement
+is refused while that reservation exists. A stale generation cannot claim/arm.
+No timer, answer completion or idle chat releases ownership. Only the original
+final continuation releases after all its operations and cleanup have joined.
+Unknown native work, unknown helper identity, pending helpers and unconfirmed
+cleanup retain the reservation. Do not manually run begin/end to clear a lock.
+
+Once safely replaceable, the same startup recipe preserves durable request IDs:
+queued or partially prepared work resumes its first-send path; a post-arm or
+completed-but-unpublished receipt is collect-only. Completed answers remain
+collectable without blocking startup or requiring acknowledgement first.
+Original session files remain intact. The resident-only closed/failed/terminal
+packet variants and retained-object cancellation recipe are removed. Finite
+legacy recovery above is unchanged and cannot bypass resident ownership.
+
+### Service and failure
+
+Serve handles gates, receive, dispatch and cleanup. Do not issue those operations
+separately while it runs. Idle native observations are bounded to 25 seconds
+inside the same evaluation. A non-self-renewing 60-second detector withdraws
+admission if that evaluation disappears. It is disabled during accepted Pro work
+and is never takeover permission. This is not reboot auto-start or a daemon.
+The wait loop above is the operational continuation mechanism. It cannot
+guarantee survival of host cancellation, app closure, task limits, or kernel
+loss. Never replace it with a self-renewing native timer: that can leave a fresh
+readiness marker without any execution able to dispatch the claimed request.
+
+The service does not navigate or forward routine messages to development tasks.
+Claude collects the canonical answer. Report actionable failures only.
+Ten minutes remains an observation point, not a send retry or generation limit.
+
+On failure, capture pending-helper identity before decoding transport, attempt
+to join that known execution, stop/join admission, preserve a private failure
+record and close the owned socket. A failed continuation admits no next request.
+Keep the first failure in `resident-failure.json` and final operation identities
+in `resident-failure-final.json`, even when the detector recorded failure first.
+An unresolved helper or native call retains ownership even if the socket closes.
+A fully joined failure may release, but its receipt still determines whether
+recovery is pre-arm or collect-only. Cleanup never resets that receipt.
+
+Native envelopes and operation identities remain in private evidence before
+decoding. Only the evidenced send acknowledgements `{}` and
+`{"threadId": <bound worker>}` are accepted; acknowledgement is not proof of
+submission. Publication still uses the existing native validator. The final
+`resident_closed` summary reports failure separately from immutable transport
+audit reasons. Forced host termination remains unqualified.
 
 ### Bounded actual-Claude qualification
 
-Authorize actual Claude once to perform the sequence below. The parent only starts open/serve, preserves evidence and retrieves the original cell afterward. Do not prepublish B or have the parent impersonate Claude.
+Authorize actual Claude once to perform the sequence below. The parent starts open/serve, preserves evidence and automatically joins the original cell with bounded `functions.wait` calls throughout qualification. Do not prepublish B or have the parent impersonate Claude.
 
 Use a new private mode-0700 `PROOF` directory, mode-0600 prompt files, fresh request IDs `A` and `B`, a client session ID `CLIENT`, and distinct unpredictable response tokens. Pass the matching candidate paths and returned `SESSION` to Claude.
 
@@ -329,18 +500,58 @@ node "$ACT" client-preflight "$CLIENT_ROOT"
 `CLIENT_ROOT` must already be a physical, owner-only directory legitimately
 accessible to that Claude session. The check creates, reads and removes only
 its own temporary probe. It never queues, arms or sends. The native owner can
-pass this same directory as the optional final argument to `resident-packet`
-or `closed-resident-packet`; the new listener is then created beneath it,
+pass this same directory as the required final argument to `resident-packet`;
+the new listener is then created beneath it,
 instead of an unrelated Codex temporary directory. Keep the directory path
 short enough for the platform's local socket limit.
 
 If this filesystem preflight is denied, stop before opening and report the
 exact denial. A successful preflight does not authorize a send.
 
+#### After Codex restart or laptop reboot
+
+Automatic startup is unsupported. After restarting Codex or the laptop, open a
+Codex task and paste this single owner-side instruction:
+
+> Restore the codex-pro-dispatch listener using the installed skill. Inspect
+> canonical state first. Preserve any armed or indeterminate request as
+> collect-only and never resend it. Use `resident recover-start` only when its
+> schema-3 ownership, canonical eligibility, and bound operator-evidence checks
+> pass; otherwise recovery remains collect-only. Preserve unresolved receipts
+> and evidence. Use the documented fresh-open path only when eligible, and
+> report ready only after a live waiter is observed. Do not submit a test request.
+
+This prompt invokes the existing resident recovery recipe; it does not authorize
+a daemon, polling, automatic startup, a new request, or another send attempt.
+If the installed skill cannot prove the recovery or fresh-open prerequisites,
+it must report the exact blocker instead of altering canonical state. A live
+waiter is required before reporting ready, not before guarded recovery begins.
+
 After it passes, the authorized native owner opens once and starts serve once
 as described above, in the same actual task/turn. Opening alone does not send,
 but serve can process eligible requests within the authorized consultation
 scope. Keep that owning execution active; a socket alone is not readiness.
+
+Readiness is enforced, not assumed: while the native admission call waits for ordinal N
+it keeps the empty owner-only directory `waiting-N.<session ID>` beside
+`session.json` with a one-second heartbeat on its mtime. A resident
+`rendezvous` (including retry and queued resume) claims that marker by
+atomically renaming it into its command ticket, and only that claimed
+directory ever becomes a ticket; the waiter retires the marker with an atomic
+`rmdir` when its idle observation ends. The next observation is entered by the
+same serving evaluation, not by an independent heartbeat. Exactly one side wins: if the waiter has retired, the
+client fails with `Resident is not waiting for ordinal N` and creates no
+command, ticket, queue entry or send, so the same request ID can be submitted
+once a waiter exists; if the claim landed first, the waiter notices its marker is gone, stays
+responsible for that publication (a stop is honored at the next ordinal), and
+fails the residence with the claimed ticket kept if no command follows within
+five seconds, whether or not a stop was ever published. A marker older than five
+seconds, or one that is not an owner-only directory, is `Stale resident
+readiness` and is never claimed. Losing only the outer evaluation stops marker
+refresh and retires unclaimed readiness through the native detector. Losing the
+native runtime itself has no proven teardown guarantee: a leftover marker remains
+evidence and blocks another waiter. Existing closure and canonical checks still
+apply; no timer authorizes deleting that marker or claiming ownership.
 
 Use the returned `SESSION` to give Claude the exact rendezvous command below.
 Claude must obtain any required command permission before executing it. Do
@@ -358,6 +569,54 @@ verify the saved rule and its scope before claiming it persists across sessions.
 
 ### Requests
 
+Before preparing a new resident delivery, inspect the exact owner-provided path:
+
+```sh
+node "$ACT" resident-status "$SESSION"
+```
+
+This read-only snapshot checks the canonical owner's bound directory, session ID
+and descriptor hash. Open records that binding once using internal `bind-session`,
+before serve. Do not call it manually to adopt a folder. Startup reads old v1
+owners but writes v2; older resident-owner operations reject v2 rather than
+ignoring its binding. This is not a global two-worker migration fence.
+`admission_observed` includes the currently observed ordinal;
+it is not send permission or a guarantee that rendezvous will win. Rendezvous
+uses internal `resident admit` to recheck the binding, prompt and queue, claim
+the waiter, and publish the handoff under the same canonical lock as replacement.
+If replacement wins first, admission creates nothing. If admission wins, the
+complete handoff precedes replacement; the old owner's later `begin` still fails.
+Partial handoff files are preserved, never rolled back or reused. This operation
+does not queue, arm or send, and requires no extra operator approval or closure proof.
+`busy` means the current authority has work or an invocation reserved. Wait for
+that request's outcome using its existing watcher, not another listener.
+`retired_owner`, `unbound_owner`, `descriptor_changed` or `installed_helper_mismatch` means
+this path cannot be selected for a new delivery with this installed helper.
+Do not retrofit bindings into old descriptors. An older live owner's requests
+must drain through its existing runtime; coordinate an ordinary owner restart
+before switching clients to this candidate. Do not hot-edit its files.
+`not_waiting`, `stale_readiness`
+and `malformed_preserve` do not prove that the owning execution or Pro stopped.
+Keep the evidence and use the documented owner path, never delete a marker or
+release ownership based on this snapshot. All results report
+`sendAuthorized:false` and `replacementAuthorized:false`.
+
+After explicit `worker-pool activate` maintenance, this candidate can report
+`maxConcurrentRequests` equal to the configured pool size (one or two) for one
+listener. Opening two listeners or keeping two chats still does not raise capacity. Live
+native overlap, app reopen collection, laptop reboot, and legacy migration are
+separate qualification gates; passing fixture tests does not enable them.
+Ordinary reopen is collector-only. Automatic startup remains unsupported.
+Explicit `resident recover-start` after operator physical-quiescence evidence
+fences the old generation. A published `transport-audit.json` remains the
+graceful closure proof and is still required when present. A crash or reboot
+that left no audit is recoverable by that same maintenance action: inspect and
+preserve the bound session, including leftover readiness markers and a stale
+`wake.sock`, refuse a still-listening socket, and keep every possibly-sent
+receipt collect-only. Missing audit, PID, or socket never authorizes a resend.
+Live native overlap, app reopen collection, laptop reboot, and legacy migration
+remain separate qualification gates.
+
 1. Claude creates `PROOF/A.txt` asking for exactly its A token, then runs:
 
    ```sh
@@ -366,7 +625,7 @@ verify the saved rule and its scope before claiming it persists across sessions.
 
    Preserve the actual returned answer and timestamps. Verify and acknowledge A using the block below.
 
-2. After A's verified answer, wait 180 seconds using one external sleep or equivalent independent elapsed time. Do not call native tools, issue parent gates, collect the serve cell or publish B during this interval. Then Claude independently creates `PROOF/B.txt` with the B token and runs:
+2. After A's verified answer, wait 180 seconds using one external sleep or equivalent independent elapsed time. Continue only the owner's automatic `functions.wait` calls on the original cell. Do not separately call native tools, issue parent gates or publish B during this interval. Then Claude independently creates `PROOF/B.txt` with the B token and runs:
 
    ```sh
    node "$ACT" rendezvous "$SESSION" 2 "$B" "$PROOF/B.txt" "$CLIENT"
@@ -424,7 +683,7 @@ node "$ACT" resident-stop "$SESSION"
 
 This publishes an exclusive stop request; its successful return alone is not proof of closure. Retrieve the original serve cell using `functions.wait`, with each retrieval bounded to 60 seconds. Require serve completion, the matching `transport-audit.json` with `resident_stopped`, and absent `wake.sock`.
 
-The audit must contain exactly A then B accepted/finished pairs; canonical receipts and native traces must show one submission/send each. Confirm unchanged session identity, no third readiness, no idle native reads or parent model interventions, and B completion before the first serve-cell retrieval.
+The audit must contain exactly A then B accepted/finished pairs; canonical receipts and native traces must show one submission/send each. Confirm unchanged session identity, no third readiness, no idle worker reads, no manual parent gates, and automatic same-cell supervision through B completion and shutdown. Preserve wait results to prove the owner turn remained active; cell existence alone is insufficient.
 
 Time-box qualification observations to 25 minutes including the quiet interval. A ten-minute checkpoint is observation, not a generation deadline. If an answer remains unresolved, do not proceed to B or resend. Mark qualification inconclusive, request stop, preserve the owning cell and use the documented collect-only recovery. Stop drains active runner work under its existing budgets; it does not cancel Pro generation or promise immediate shutdown.
 
