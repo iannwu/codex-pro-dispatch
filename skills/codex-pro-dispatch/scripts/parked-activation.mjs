@@ -36,7 +36,7 @@ onCompletion:"Verify the original serve outcome and cleanup evidence before fina
 // writes; neither verifies a model. The literals stay inline because several
 // gate functions are serialized into packets and cannot see module scope.
 const pins={
-"resident-supervision.mjs":"a1467c57d4c35272c03c92a124ccb0b30bb79b5687783f1e0b907ba4ce23d238",
+"resident-supervision.mjs":"d1f6f48a30d75b5ca49a5e4e2b0e660856242c0855c6f24b2eb89b8ff67a5e97",
   "parked-runner.js":"071cee7b64b403484b053fc57e61731c359bd30e760941af99df5ed0f5382b07",
 "parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
 "parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
