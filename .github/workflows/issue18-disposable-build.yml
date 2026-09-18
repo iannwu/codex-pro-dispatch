@@ -29,122 +29,28 @@ jobs:
       - name: Assemble the pinned accepted patch and commit the test candidate
         run: |
           python3 - <<'PY'
-          import ast
-          import difflib
           import hashlib
-          from pathlib import Path
           import subprocess
-
           source = subprocess.check_output([
-              "git", "show", "d9a8dac13dca26e1abd9389a54654d9cc4bf7177:.github/workflows/issue18-disposable-build.yml"
+              "git", "show", "c1858ea6946dd0fee554a88e49fe92c7640ee0e1:.github/workflows/issue18-disposable-build.yml"
           ])
-          assert hashlib.sha1(b"blob " + str(len(source)).encode() + b"\0" + source).hexdigest() == "cfe17f859e7692da2f8dbb35e48d04055110b31a"
+          assert hashlib.sha1(b"blob " + str(len(source)).encode() + b"\0" + source).hexdigest() == "b23bd1f1170b870b17122cd6e3a3dcf017c6042c"
           block = source.decode().split("          python3 - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
-          assert all(line.startswith("          ") for line in block.splitlines())
-          script = "\n".join(line[10:] for line in block.splitlines()) + "\n"
-          original = {}
-          updated = {}
-          path = "src/codex_pro_dispatch/core.py"
-          s = Path(path).read_text()
-          original[path] = s
-          a = s.index("def _native_response(")
-          b = s.index("\n\ndef complete_assignment(", a)
-          old = s[a:b]
-          start = old.index("    def invalid()")
-          cut = old.index('        if len(turn["items"]) == 1:')
-          flags_start = old.index("        flags = {}\n")
-          flags_end = old.index('        text = assistant["text"]\n')
-          exception = old[old.index("    except (ValueError, UnicodeError, RecursionError, TypeError, KeyError, IndexError):"):]
-          selector = ('def _native_outbound(\n'
-                      '    raw: bytes, receipt: Mapping[str, Any]\n'
-                      ') -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:\n'
-                      '    """Select exact outbound read-back independently of worker/reply progress."""\n'
-                      + old[start:cut])
-          idle = '        if status["type"] != "idle":\n            raise StateError("native-worker-not-idle: wait and read again; never resend")\n'
-          assert selector.count(idle) == 1
-          selector = selector.replace(idle, "")
-          selector += old[flags_start:flags_end].replace(', ("assistant", assistant)', '')
-          selector += '        return content[0]["text"], data, turn, flags\n' + exception
-          response = old[:start] + old[start:old.index("    def pairs(")] + '''    try:
-                  _, data, turn, flags = _native_outbound(raw, receipt)
-                  thread = data["thread"]
-                  user = turn["items"][0]
-                  if thread["status"]["type"] != "idle":
-                      raise StateError("native-worker-not-idle: wait and read again; never resend")
-          ''' + old[cut:flags_start] + '''        for key in ("truncated", "textTruncated"):
-                      value = assistant.get(key)
-                      if key in assistant and type(value) is not bool:
-                          invalid()
-                      if value is True:
-                          raise MarkerError("truncated-response: native summary reports shortening")
-                      flags[f"assistant.{key}"] = value
-          ''' + old[flags_end:]
-          updated[path] = s[:a] + selector + "\n\n" + response + s[b:]
-
-          path = "src/codex_pro_dispatch/queue.py"
-          s = Path(path).read_text()
-          original[path] = s
-          before = '''        Pending snapshots do not mutate request/receipt records. A candidate
-                  must pass the existing native-summary and short-envelope validators.
-                  Publication and interrupted-publication recovery retain core authority.
-          '''
-          after = '''        Pending snapshots may record exact outbound delivery once, but never
-                  stage or publish a response. Results still require the native-summary
-                  and short-envelope validators; core retains publication authority.
-          '''
-          assert s.count(before) == 1
-          s = s.replace(before, after)
-          a = s.index("            try:\n                response, association = core._native_response(native_read, receipt)", s.index("    def observe("))
-          b = s.index('            return dict(result, observation="published", no_resend=True)', a)
-          replacement = '''            mutation = resident.collector_observation() if collector else contextlib.nullcontext()
-                      with mutation:
-                          try:
-                              sent_prompt, _, _, _ = core._native_outbound(native_read, receipt)
-                              if receipt.get("outbound_prompt_verified") is not True:
-                                  receipt = core.mark_submitted(
-                                      rid, sent_prompt, self.paths, _locked=locked
-                                  )
-                              elif (type(receipt.get("submission_count")) is not int
-                                    or receipt["submission_count"] != 1
-                                    or receipt.get("sent_prompt_sha256") != receipt["wrapped_prompt_sha256"]):
-                                  raise core.StateError("Verified submission record is invalid")
-                              response, _ = core._native_response(native_read, receipt)
-                          except core.StateError as exc:
-                              reason = str(exc).partition(":")[0]
-                              if staged is None and reason in {
-                                  "native-worker-not-idle", "native-reply-not-observed"
-                              }:
-                                  return dict(
-                                      self.metadata(r, _locked=locked),
-                                      observation="pending",
-                                      reason_code=reason,
-                                      no_resend=True,
-                                  )
-                              raise
-
-                          parsed = core._parse_result(response, rid)
-                          if parsed.result_kind != "short":
-                              raise core.StateError(
-                                  "Queue observer requires a short result; operator resolution required"
-                              )
-                          result = self.publish(
-                              rid, parent, confirmed=True,
-                              native_read=native_read, _locked=locked,
-                          )
-          '''
-          updated[path] = s[:a] + replacement + s[b:]
-          runtime_patch = ""
-          for path, text in updated.items():
-              ast.parse(text)
-              runtime_patch += "".join(difflib.unified_diff(
-                  original[path].splitlines(True), text.splitlines(True),
-                  fromfile="a/" + path, tofile="b/" + path))
-          tree = ast.parse(script)
-          assignment = next(n for n in tree.body if isinstance(n, ast.Assign)
-                            and any(isinstance(t, ast.Name) and t.id == "runtime_patch" for t in n.targets))
-          lines = script.splitlines(True)
-          script = "".join(lines[:assignment.lineno - 1]) + "runtime_patch = " + repr(runtime_patch) + "\n" + "".join(lines[assignment.end_lineno:])
-          exec(compile(script, "issue18-pinned-builder", "exec"), {})
+          assert all(not line or line.startswith("          ") for line in block.splitlines())
+          builder = "\n".join(line[10:] for line in block.splitlines()) + "\n"
+          anchor = 'exec(compile(script, "issue18-pinned-builder", "exec"), {})'
+          assert builder.count(anchor) == 1
+          corrections = '''for before, after in (
+              ("c80c856d992780a9f4ba2e88c9ce920c1a7a0f89", "c80c0bbbbc0b28590c3d59f878d1ff8f6e7426ca"),
+              ("564b94e8021c0855f6c7c70a43e1b2860d7898e6", "296cd81146dbee3a8ce7c5a64a77bfdc61017ae6"),
+              ('assert blob(new_test.encode()) == "dc0e3dd602aefadff123a49ad03f36fc00e97008"',
+               'compile(new_test, "tests/test_outbound_delivery.py", "exec")'),
+          ):
+              assert script.count(before) == 1
+              script = script.replace(before, after, 1)
+          exec(compile(script, "issue18-pinned-builder", "exec"), {})'''
+          builder = builder.replace(anchor, corrections)
+          exec(compile(builder, "issue18-assembly", "exec"), {})
           PY
       - name: Test the committed candidate without native sends
         run: |
