@@ -1,7 +1,7 @@
-# Finite-session native broker release candidate
+# Finite-session native broker
 
-Status: 1.3.0-rc.1 source candidate. Actual-Pro candidate qualification and
-installed actual-Claude smoke remain release gates. Installation is not activation.
+Status: 1.3.0 source release. Live native and actual-Claude qualification passed
+for the recorded release environment. Installation is not activation.
 
 ## Bounded current-state inspection
 

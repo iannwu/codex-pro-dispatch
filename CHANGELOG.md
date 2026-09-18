@@ -4,6 +4,8 @@ All notable changes to Codex Pro Dispatch are documented here.
 
 ## Unreleased
 
+## [1.3.0] - 2026-09-18
+
 - Add `worker set --confirm-worker`, which records `user-confirmed-worker`.
   The user chooses any available model and reasoning effort in the dedicated
   conversation; the helper still verifies no model. `--confirm-pro` remains a
@@ -14,8 +16,9 @@ All notable changes to Codex Pro Dispatch are documented here.
   never-armed recovery keeps its first-send path; armed work stays collect-only.
   Explicit recover-start after physical-quiescence can fence a crash or reboot
   that left no graceful transport-audit; missing audit is never unsent.
-  Automatic startup stays unsupported. Native overlap, app reopen, laptop reboot,
-  and legacy migration remain live gates.
+  Automatic startup stays unsupported. Native overlap and listener replacement
+  were qualified on the release implementation; app reopen, laptop reboot, and
+  legacy migration remain environment-specific recovery gates.
 - Move resident admission into bounded native calls instead of an independently
   living waiter process. Owner nonrenewal withdraws readiness and closes the
   socket; it does not time out accepted Pro work or authorize a resend.

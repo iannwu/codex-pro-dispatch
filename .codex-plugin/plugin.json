@@ -1,7 +1,7 @@
 {
   "name": "codex-pro-dispatch",
-  "version": "1.3.0-rc.1",
-  "description": "A fail-closed macOS desktop Codex workflow for dispatching one bounded assignment to a dedicated ChatGPT Pro conversation.",
+  "version": "1.3.0",
+  "description": "A fail-closed macOS desktop workflow for dispatching bounded work from Codex or Claude Code to a dedicated ChatGPT conversation.",
   "author": {
     "name": "Iann Wu",
     "url": "https://github.com/iannwu"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Pro Dispatch",
-    "shortDescription": "Safe Codex-to-Pro dispatch",
-    "longDescription": "Desktop-only on the official ChatGPT app for macOS. Dispatch bounded work from Codex to a dedicated ChatGPT Pro conversation with at-most-one sends, collect-only recovery, and exact reassembly of long results from continuation chunks.",
+    "shortDescription": "Native ChatGPT dispatch",
+    "longDescription": "Desktop-only on the official ChatGPT app for macOS. Dispatch bounded work from Codex or Claude Code to dedicated ChatGPT conversations with at-most-one sends, collect-only recovery, and up to two configured workers.",
     "developerName": "Iann Wu",
     "category": "Developer Tools",
     "capabilities": [
@@ -29,9 +29,9 @@
     ],
     "websiteURL": "https://github.com/iannwu/codex-pro-dispatch",
     "defaultPrompt": [
-      "Delegate this bounded task to my ChatGPT Pro worker.",
-      "Ask my Pro worker for an independent code review.",
-      "Recover my current Pro dispatch without resending."
+      "Delegate this bounded task to my ChatGPT worker.",
+      "Ask my ChatGPT worker for an independent code review.",
+      "Recover my current dispatch without resending."
     ],
     "brandColor": "#111827"
   }

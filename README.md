@@ -41,18 +41,18 @@ extensions, Windows, or Linux.
 
 ## Install
 
-**Version: v1.3.0-rc.1.**
+**Version: v1.3.0.**
 
 Run these commands in your terminal:
 
 ```bash
-codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.3.0-rc.1
+codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.3.0
 codex plugin add codex-pro-dispatch@codex-pro-dispatch
 ```
 
 You need macOS, Python 3.9 or newer, Git, and a Codex CLI with plugin support. No extra Python packages are required. The workflow runs inside the official ChatGPT desktop app for macOS with Codex. The CLI installs the plugin; it cannot run the dispatch workflow on its own.
 
-This pins the v1.3.0 release candidate. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.3.0-rc.1-acceptance.md).
+This pins v1.3.0. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.3.0-acceptance.md).
 
 Restart the desktop app if the plugin does not appear.
 
@@ -173,7 +173,7 @@ For help, follow [SUPPORT.md](SUPPORT.md). Share redacted version and capability
 
 ## Verification and privacy
 
-The v1.3.0-rc.1 candidate adds the resident Claude client and deterministic prompt-admission checks. Its automated suites pass, while the candidate-specific live native gates remain pending. Read the [release receipt](docs/releases/v1.3.0-rc.1-acceptance.md) for the evidence and limits.
+v1.3.0 adds the resident Claude client, one or two configured workers, and deterministic prompt-admission checks. Automated suites and bounded live native qualification passed. Read the [release receipt](docs/releases/v1.3.0-acceptance.md) for the evidence and limits.
 
 The plugin checks the answer it reads from the app’s native history, reported as `bounded_native_summary` verification. It cannot prove that this is an exact copy of the original response or independently establish that ChatGPT has finished generating. Reported repository changes require separate commit verification.
 
@@ -186,7 +186,7 @@ The workflow can use short-lived private files during collection. App and termin
 For source inspection or development, install a pinned checkout instead of the plugin package:
 
 ```bash
-git clone --branch v1.2.2 https://github.com/iannwu/codex-pro-dispatch.git
+git clone --branch v1.3.0 https://github.com/iannwu/codex-pro-dispatch.git
 cd codex-pro-dispatch
 ./install.sh
 ```
@@ -206,7 +206,7 @@ For a source installation, run `./uninstall.sh` from its checkout. Recovery reco
 
 ## Development and documentation
 
-This README describes the v1.3.0-rc.1 workflow.
+This README describes the v1.3.0 workflow.
 
 - [Contributing](CONTRIBUTING.md): development and contribution guidance.
 - [Skill protocol](skills/codex-pro-dispatch/SKILL.md): dispatch, verification, and recovery rules.

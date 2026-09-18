@@ -17,7 +17,7 @@ class ReleaseActivationTests(unittest.TestCase):
         text = SKILL.read_text("utf-8")
         self.assertTrue(text.startswith("---\n"))
         self.assertLessEqual(len(text.splitlines()), 120)
-        self.assertIn('version: "1.3.0-rc.1"', text.split("---\n", 2)[1])
+        self.assertIn('version: "1.3.0"', text.split("---\n", 2)[1])
         normalized = " ".join(text.split())
         for required in (
             "## Contract",

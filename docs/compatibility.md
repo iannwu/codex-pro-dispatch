@@ -43,6 +43,7 @@ The helper's deterministic state logic is tested on macOS and Linux, but Linux C
 
 | Skill version | App version | App build | macOS | Native matrix | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| 1.3.0 | 26.915.31029 | 9771 | 26.6.2 arm64 | One- and two-worker native dispatch, collection, acknowledgement, listener replacement, and collect-only recovery passed; automatic startup remains unsupported | [Redacted release receipt](releases/v1.3.0-acceptance.md) |
 | 1.3.0-rc.1 | Not qualified | Not qualified | Not qualified | Local unit, package, and admission gates passed; live native acceptance is pending the parent desktop task | [Redacted RC receipt](releases/v1.3.0-rc.1-acceptance.md) |
 | 1.2.2 | 26.901.41600 | 7982 | 26.6.2 | Recovery checks passed; maintainer accepted the disclosed, unverified clipboard check | [Redacted release receipt](releases/v1.2.2-acceptance.md) |
 | 1.2.2-rc.1 | 26.901.41600 | 7982 | 26.6.2 | Recovery subset passed; full A–L stable gate remains pending | [Redacted recovery receipt](releases/v1.2.2-rc.1-recovery.md) |
