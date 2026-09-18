@@ -177,8 +177,19 @@ async function run(p,which="open"){
 const output=[];
 const context=vm.createContext({tools,setTimeout,clearTimeout,text:v=>output.push(v)});
 await vm.runInContext("(async()=>{\n"+p.calls[which]+"\n})()",context);
+let acknowledgment=null;
+if(which==="dispatch"&&output.length===2){
+acknowledgment=plain(output.shift());
+assert.equal(acknowledgment.kind,"native_send_acknowledged");
+assert.equal(acknowledgment.worker_conversation_id,worker);
+assert.equal(acknowledgment.no_resend,true);
+assert.equal(acknowledgment.outbound_readback_verified,false);
+assert.equal(typeof acknowledgment.evidence_file,"string");
+}
 assert.equal(output.length,1);
-return output[0].content?JSON.parse(output[0].content[0].text):plain(output[0]);
+const result=output[0].content?JSON.parse(output[0].content[0].text):plain(output[0]);
+if(acknowledgment)assert.equal(acknowledgment.request_id,result.request_id);
+return result;
 }
 const names=async()=>(await fs.readdir(d)).filter(n=>n.startsWith("pro-session-"));
 return {d,home,oldDir,old,binding,runtime,meta,broker,parent,worker,rid,clientSession,

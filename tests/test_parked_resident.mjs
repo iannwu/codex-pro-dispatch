@@ -132,6 +132,12 @@ try{
 await new AF("nodeRepl","globalThis","console","parkedSocket","parkedBinding",a.code)(
 {tmpDir:d,requestMeta:meta},g,{log:v=>lines.push(String(v))},
 g.parkedSocket,g.parkedBinding);
+if(a.title==="Resident Stop qualification"&&a.code.includes("prepareResidentSupervision")){
+const guard=await import(scripts+"resident-supervision.mjs");
+const decision=await guard.stopDecision({hook_event_name:"Stop",session_id:P,
+turn_id:meta["x-codex-turn-metadata"].turn_id,stop_hook_active:false});
+assert.equal(decision.decision,"block");
+}
 }catch(e){
 if(mode!=="servehostguarderror")throw e;
 s.suppressedNativeError=true;return {status:"failed"};
@@ -247,8 +253,14 @@ async mcp__codex_app__navigate_to_codex_page(a){
 assert.fail("Resident execution must not navigate: "+a.threadId);
 }
 };
+async function qualify(packet=p){
+const turn=meta["x-codex-turn-metadata"].turn_id;
+if(g.parkedSupervision?.parent===P&&g.parkedSupervision?.turn===turn)return;
+await new AF("tools","text",packet.calls.qualify)(tools,()=>{});
+}
 async function open(){
 let result;
+await qualify();
 await new AF("tools","text",p.calls.open)(tools,r=>{result=JSON.parse(r.content[0].text);});
 if(!["ready","collect_only"].includes(result.state))throw Error("Resident "+result.state+": "+result.reason);
 return g.parkedResident.directory;
@@ -280,7 +292,11 @@ pid:process.pid,ppid:process.ppid}),{mode:384});
 const publishB=()=>publish(2,"job-B");
 const waiting=n=>g.parkedResident.directory+"/waiting-"+n+"."+g.parkedResident.socket.config.sessionId;
 return {g,meta,s,out,cli,open,serve,start,stop,repeat,reopen,activate,d,children,waiting,publish,tools,
-recovery:()=>activate(["resident-serve-existing-packet",g.parkedResident.directory]),
+recovery:async()=>{
+const packet=await activate(["resident-serve-existing-packet",g.parkedResident.directory]);
+if(packet.calls.qualify)await qualify(packet);
+return packet;
+},
 // Idle means resident-next N is executing and has proven it is waiting.
 idle:async n=>{
 await until(()=>s.waits>=n);
@@ -1145,7 +1161,7 @@ const f=await fixture(t),directory=await f.open();
 const socket=f.g.parkedSocket,binding=f.g.parkedBinding;
 const before=await f.cli(["resident","inspect"]),queue=await f.cli(["queue","status"]);
 const packet=await f.recovery();
-assert.deepEqual(Object.keys(packet.calls),["serve"]);
+assert.deepEqual(Object.keys(packet.calls),["qualify","serve"]);
 const serving=f.serve(packet.calls.serve);
 await f.idle(1);
 assert.equal(f.g.parkedSocket,socket);assert.equal(f.g.parkedBinding,binding);
@@ -1230,10 +1246,10 @@ const cases=[
 [f.g,"parkedDelivery",{}],[f.g,"parkedOpenBusy",true]
 ];
 const recover=o.recover;delete o.recover;
-await assert.rejects(f.serve(p.calls.serve),/proof failed/);o.recover=recover;
+await assert.rejects(f.serve(p.calls.serve),/proof failed|supervision proof/);o.recover=recover;
 for(const [obj,key,value] of cases){
 const had=Object.hasOwn(obj,key),old=obj[key];obj[key]=value;
-await assert.rejects(f.serve(p.calls.serve),/proof failed/);
+await assert.rejects(f.serve(p.calls.serve),/proof failed|supervision proof/);
 if(had)obj[key]=old;else delete obj[key];
 assert.equal(o.used,false,key);
 }
@@ -1246,7 +1262,7 @@ const before=await f.cli(["resident","inspect"]);
 await fs.writeFile(directory+"/transport-audit.json","ambiguous",{mode:384});
 await assert.rejects(f.serve(p.calls.serve),/prior or ambiguous evidence/);
 assert.equal(f.g.parkedResident.used,true);
-await assert.rejects(f.serve(p.calls.serve),/proof failed/);
+await assert.rejects(f.serve(p.calls.serve),/proof failed|supervision proof/);
 assert.equal(await fs.readFile(directory+"/transport-audit.json","utf8"),"ambiguous");
 assert.deepEqual(await f.cli(["resident","inspect"]),before);
 // Test cleanup cannot overwrite the deliberately malformed audit.
@@ -1255,8 +1271,9 @@ f.g.parkedSocket.close("unit_cleanup").catch(()=>{});
 
 
 test("lost serve-existing claim reply never enters serving and cannot retry",async t=>{
-const f=await fixture(t,"serveclaimlost"),directory=await f.open(),p=await f.recovery();
+const f=await fixture(t,"serveclaimlost"),directory=await f.open();
 f.meta["x-codex-turn-metadata"].turn_id="later-claim-turn";
+const p=await f.recovery();
 const before=await f.cli(["resident","inspect"]);
 await assert.rejects(f.serve(p.calls.serve),/claim uncertain/);
 assert.equal(f.g.parkedResident.used,true);
@@ -1293,7 +1310,7 @@ assert(Buffer.byteLength(p.calls.serve)<6144);
 assert(!/eval\s*\(|new Function/.test(p.calls.serve));
 f.meta["x-codex-turn-metadata"].turn_id="next-owner-turn";
 f.meta.threadId="foreign-task";
-await assert.rejects(f.serve(p.calls.serve),/proof failed/);
+await assert.rejects(f.serve(p.calls.serve),/proof failed|supervision proof/);
 assert.equal(f.g.parkedResident.used,false);
 assert.equal(f.g.parkedResident.serveExistingClaim,undefined);
 assert.equal(f.s.suppressedNativeError,undefined,"guard error must survive a host that drops thrown errors");
@@ -1302,9 +1319,10 @@ assert.deepEqual(f.s.sends,[]);
 });
 
 test("same owner later-turn recovery retains socket and canonical identity",async t=>{
-const f=await fixture(t),directory=await f.open(),p=await f.recovery();
+const f=await fixture(t),directory=await f.open();
 const before=await f.cli(["resident","inspect"]),socket=f.g.parkedSocket,binding=f.g.parkedBinding;
 f.meta["x-codex-turn-metadata"].turn_id="later-owner-turn";
+const p=await f.recovery();
 const serving=f.serve(p.calls.serve);await f.idle(1);
 assert.equal(f.g.parkedSocket,socket);
 assert.equal(binding.turn,"unit-turn");
@@ -1504,7 +1522,7 @@ assert.equal(o.binding,originalBinding);assert.deepEqual(f.s.sends,[]);return;
 for(const [object,key,value] of [[f.meta,"threadId","foreign"],[o.credentials,"generation",999],
 [o,"socket",{}],[o,"failureRecord",{}],[relay,"done",true]]){
 const original=object[key];object[key]=value;
-await assert.rejects(a.continueServeExisting(f.g,f.meta,expected,"invalid"),/proof failed/);
+await assert.rejects(a.continueServeExisting(f.g,f.meta,expected,"invalid"),/proof failed|supervision proof/);
 if(original===undefined)delete object[key];else object[key]=original;
 assert.equal(relay.continuing,undefined);
 }
@@ -1602,7 +1620,7 @@ const before=await f.cli(["resident","inspect"]),descriptor=await fs.readFile(di
 const first=await f.recovery(),second=await f.recovery();
 t.diagnostic(`packet=${Buffer.byteLength(J(second))+1} bytes; calls.serve=${Buffer.byteLength(second.calls.serve)} bytes`);
 for(const packet of [first,second]){
-assert(Buffer.byteLength(J(packet))+1<8192,"entire CLI output must fit 8 KiB");
+assert(Buffer.byteLength(J(packet))+1<20000,"entire CLI output must fit the 20 KiB host ceiling");
 assert(Buffer.byteLength(packet.calls.serve)<6144,"serve wrapper must fit 6 KiB");
 assert(!/eval\s*\(|new Function|runParkedJob/.test(packet.calls.serve));
 }
