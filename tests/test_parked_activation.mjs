@@ -182,7 +182,7 @@ eq(code,0);
 eq(p.trusted.maxConcurrentRequests,2);
 eq(p.trusted.workers.map(w=>w.conversation_id),["unit-pro","unit-other"]);
 });
-test("resident packet declares the exact outer execution contract and extracts calls byte-for-byte",t=>{
+test("resident packet declares the exact outer execution contract and loads pinned calls without model transcription",async t=>{
 const f=fixture(t,"--confirm-worker"),client=f.d+"/client";fs.mkdirSync(client,{mode:448});
 activatePool(f,[{slot:"slot-a",conversation_id:"unit-pro",label:"A",
 model_confirmation:"user-confirmed-worker",configured_at:"fixture"}]);
@@ -198,11 +198,34 @@ const digest=createHash("sha256").update(raw).digest("hex");
 for(const stage of ["qualify","open","serve"]){
 const [selectedCode,selected]=f.invoke(["packet-call",packet,stage,digest]);
 eq(selectedCode,0);eq(selected.tool,"functions.exec");
-eq(selected.arguments.code,p.calls[stage]);
-eq(selected.codeBytes,Buffer.byteLength(p.calls[stage]));
-eq(selected.codeSha256,createHash("sha256").update(p.calls[stage]).digest("hex"));
+assert.doesNotMatch(selected.arguments.code,/tools\.mcp__node_repl__js\s*\(\s*\{/);
+assert.ok(selected.codeBytes<6000);
+if(stage==="qualify"||stage==="serve")assert.match(selected.arguments.code.split("\n")[0],/^\/\/ @exec:/);
+assert.ok(selected.arguments.code.indexOf("unsupported_listener_surface")<selected.arguments.code.indexOf("tools.exec_command"));
+assert.match(selected.arguments.code,new RegExp(process.execPath.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")));
+eq(selected.targetCodeBytes,Buffer.byteLength(p.calls[stage]));
+eq(selected.targetCodeSha256,createHash("sha256").update(p.calls[stage]).digest("hex"));
+const [bodyCode,body]=f.invoke(["packet-body",packet,stage,digest]);
+eq(bodyCode,0);eq(body,{kind:"resident_packet_body",stage,code:p.calls[stage]});
 eq(selected.directNativeFallback,false);
 }
+const selected=f.invoke(["packet-call",packet,"open",digest])[1];
+const body=f.invoke(["packet-body",packet,"open",digest])[1];
+let nativeArgs,emitted;
+const tools={exec_command:async()=>({exit_code:0,output:JSON.stringify(body)}),
+write_stdin:async()=>{},mcp__node_repl__js:async args=>(nativeArgs=args,{content:[{type:"text",text:"ok"}]}),
+mcp__codex_app__read_thread:async()=>{},mcp__codex_app__send_message_to_thread:async()=>{},
+mcp__codex_app__navigate_to_codex_page:async()=>{}};
+const AF=Object.getPrototypeOf(async()=>{}).constructor;
+await new AF("tools","text",selected.arguments.code)(tools,value=>{emitted=value;});
+assert.equal(typeof nativeArgs.code,"string");
+eq(emitted,{content:[{type:"text",text:"ok"}]});
+let shellCalls=0;
+await assert.rejects(new AF("tools","text",selected.arguments.code)({exec_command:async()=>{shellCalls++;}},()=>{}),/unsupported_listener_surface/);
+eq(shellCalls,0);
+const changed={...body,code:body.code.slice(0,-1)+(body.code.endsWith("x")?"y":"x")};
+await assert.rejects(new AF("tools","text",selected.arguments.code)({...tools,
+exec_command:async()=>({exit_code:0,output:JSON.stringify(changed)})},()=>{}),/Pinned packet body differs/);
 const [badCode,bad]=f.invoke(["packet-call",packet,"open","0".repeat(64)]);
 assert.notEqual(badCode,0);assert.match(bad.error,/digest differs/);
 });
