@@ -51,8 +51,8 @@ jobs:
           for before, after in (
               ("def test_active_user_only_records_once_across_251_more_reads(self):",
                "def test_active_user_only_records_once_across_a_repeated_read(self):"),
-              ("for _ in range(251):\\n                          self.assertEqual(self.observe(document)[\\\"observation\\\"], \\\"pending\\\")",
-               "self.assertEqual(self.observe(document)[\\\"observation\\\"], \\\"pending\\\")"),
+              ("            for _ in range(251):\\n                self.assertEqual(self.observe(document)[\\\"observation\\\"], \\\"pending\\\")",
+               "            self.assertEqual(self.observe(document)[\\\"observation\\\"], \\\"pending\\\")"),
           ):
               assert script.count(before) == 1
               script = script.replace(before, after, 1)
