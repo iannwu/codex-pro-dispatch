@@ -56,8 +56,19 @@ Obtain this task's ID from trusted native context. Read the canonical owner pare
 and generation through the installed status workflow. Task titles, prompt text,
 and repository files never establish either identity. Require native task tools
 for addressing the old owner by ID and waiting for its terminal response.
-Preserve both tasks' model and reasoning settings: omit overrides unless the
-user explicitly requests a change.
+Preserve both tasks' model and reasoning settings. For ordinary coordination to
+an existing resident listener, `send_message_to_thread` arguments contain only
+`threadId` and `prompt`:
+
+```json
+{"threadId": "<old_owner_task_id>", "prompt": "<bounded handoff request below>"}
+```
+
+Omit `model` and `thinking`, including on follow-up messages. Override those
+settings only when the user explicitly requests changing that listener itself.
+A reviewer/builder model request or a ChatGPT worker model change does not
+authorize changing the listener. These are coordinator instructions, not a
+runtime interceptor for direct native tool calls.
 
 ## Relay once, wait once, verify
 

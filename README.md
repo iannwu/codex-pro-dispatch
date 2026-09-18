@@ -1,16 +1,43 @@
 # Codex Pro Dispatch
 
-**Delegate tasks to ChatGPT from the native Codex desktop app on macOS.**
-
-Get help with code reviews, research, and implementation, then bring the results back into your original Codex task.
-
-This unofficial plugin is not affiliated with, endorsed by, or maintained by OpenAI. The current supported workflow requires a dedicated ChatGPT conversation. You choose its model and reasoning effort there.
-
-**Desktop-only:** It does not run from ChatGPT on the web, Codex CLI alone, IDE extensions, Windows, or Linux.
-
 [![CI](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml/badge.svg)](https://github.com/iannwu/codex-pro-dispatch/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/iannwu/codex-pro-dispatch)](https://github.com/iannwu/codex-pro-dispatch/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Dispatch work from Codex or Claude Code to ChatGPT through the official native Mac apps.
+
+**No browser control. No pop-up browsers. No computer-use automation.**
+
+Codex Pro Dispatch supports:
+
+- ChatGPT Pro or Sol with the reasoning level you choose in ChatGPT
+- up to two configured workers; concurrent dispatch requires live qualification
+- recovery across interruptions and listener restarts after live qualification
+- durable request identity and inspectable results
+
+## How it works
+
+```text
+Codex       -> ChatGPT
+Claude Code -> Codex listener -> ChatGPT
+```
+
+From Codex, the current task dispatches work directly to a dedicated ChatGPT
+worker conversation and collects the result back into the originating task.
+
+From Claude Code, a local request goes through a resident Codex listener. The
+listener performs the native ChatGPT dispatch and returns the collected result
+to Claude Code.
+
+The bridge uses native conversation controls in the official ChatGPT desktop
+app for macOS with Codex. It does not use browser automation, Accessibility,
+AppleScript, CDP, clipboard automation, or a separate daemon.
+
+This project is independent and unofficial. It is not affiliated with,
+endorsed by, or maintained by OpenAI.
+
+**Desktop-only:** It does not run from ChatGPT on the web, Codex CLI alone, IDE
+extensions, Windows, or Linux.
 
 ## Install
 
@@ -49,7 +76,9 @@ You do **not** need a connector for reviewing content included in the prompt.
 
 ### Use it from Claude Code
 
-For a source installation, register the same global skill for Claude Code:
+For a source installation, first complete [Source installation and
+removal](#source-installation-and-removal), then register the same global skill
+for Claude Code:
 
 ```bash
 python3 ~/.agents/skills/codex-pro-dispatch/scripts/register-claude.py
@@ -92,7 +121,7 @@ from local tests. It does not start automatically after Codex reopen or reboot.
 - **Native macOS desktop only.** ChatGPT on the web, Codex CLI alone, IDE extensions, Windows, and Linux cannot run this workflow.
 - **You choose the model in ChatGPT.** Select any available model and reasoning effort in the dedicated conversation before you dispatch. The plugin does not select, route, or verify models.
 - **Compatible native controls.** The app must let Codex identify both conversations, send a message, read it back, collect a response, and restore the original task. If any required control is missing, the workflow stops.
-- **Explicit invocation.** Start requests with `$codex-pro-dispatch`.
+- **Explicit invocation.** Use `$codex-pro-dispatch` in Codex or `/codex-pro-dispatch` in Claude Code.
 - **Shared context is explicit.** ChatGPT does not automatically see your Codex task, local files, uncommitted changes, or worktree. Include the relevant material in the assignment or provide authorized repository access.
 
 The workflow does not fall back to browser or UI automation when native controls are unavailable.
@@ -113,7 +142,7 @@ Use $codex-pro-dispatch to send the implementation described above to my ChatGPT
 
 See the [GitHub verification protocol](skills/codex-pro-dispatch/references/github-verification.md) for the full requirements.
 
-## If a task is interrupted
+## Recovery and at-most-once delivery
 
 Ask Codex to recover the existing assignment:
 

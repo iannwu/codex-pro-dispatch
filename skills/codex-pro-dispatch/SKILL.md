@@ -11,7 +11,7 @@ metadata:
 Use the official combined ChatGPT/Codex desktop app. The helper owns receipts; the native host supplies tools. Installation authorizes neither sends nor sessions.
 The user picks any available model and reasoning effort in the worker conversation; `worker set --confirm-worker` records that conversation, never a verified model.
 
-Use the listener task only for listener operations. Never change its model or reasoning unless explicitly requested.
+Use the listener task only for listener operations. For ordinary coordination to an existing resident listener, call `send_message_to_thread` with only `threadId` and `prompt`; omit `model` and `thinking`. Override those settings only when the user explicitly requests changing that listener itself. A reviewer/builder model request or a ChatGPT worker model change does not authorize changing the listener.
 
 ## Choose the workflow
 ### Claude Code setup and first use

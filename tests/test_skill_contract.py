@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import unittest
 from pathlib import Path
 
@@ -72,6 +73,29 @@ class SkillContractTests(unittest.TestCase):
             self.assertIn("collection, durable save", text)
             self.assertIn("may read canonical status and notify", text)
             self.assertIn("must not collect, save, acknowledge, or start a replacement lifecycle", text)
+
+    def test_listener_coordination_preserves_model_settings(self) -> None:
+        handoff = (SKILL.parent / "references/new-owner-handoff.md").read_text(
+            encoding="utf-8"
+        )
+        for document in (SKILL.read_text(encoding="utf-8"), handoff):
+            text = " ".join(document.split())
+            for required in (
+                "`send_message_to_thread`",
+                "only `threadId` and `prompt`",
+                "`model` and `thinking`",
+                "only when the user explicitly requests changing that listener itself",
+                "A reviewer/builder model request or a ChatGPT worker model change does not authorize changing the listener",
+            ):
+                with self.subTest(required=required):
+                    self.assertIn(required, text)
+        coordination = handoff.split("Preserve both tasks' model", 1)[1].split(
+            "## Relay once", 1
+        )[0]
+        examples = re.findall(r"```json\n(.*?)\n```", coordination, re.DOTALL)
+        self.assertEqual(len(examples), 1)
+        self.assertEqual(set(json.loads(examples[0])), {"threadId", "prompt"})
+        self.assertIn("including on follow-up messages", handoff)
 
     def test_skill_documents_the_exact_bounded_continuation_contract(self) -> None:
         text = STANDALONE.read_text(encoding="utf-8")
