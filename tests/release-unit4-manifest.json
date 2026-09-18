@@ -59,9 +59,15 @@
     },
     "reason": "Envelope and extracted history remain separate exclusive durable files but share one native persistence call; uncertain acknowledgments verify both. Real-CLI fixture copies every newly persisted file. Live latency qualification remains required."
   },
+  "reviewed_issue20_supervision_update": {
+    "previous_runtime_pins": {
+      "skills/codex-pro-dispatch/scripts/parked-runner.js": "310e6c48254a116a7df0587dc39aea12a51d140f6f4f77d34bf99f2979539d3a"
+    },
+    "reason": "A durable native send acknowledgment is surfaced before outbound readback without changing submission-count ownership or permitting resend."
+  },
   "runtime": {
     "skills/codex-pro-dispatch/scripts/parked-client.mjs": "45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072",
-    "skills/codex-pro-dispatch/scripts/parked-runner.js": "310e6c48254a116a7df0587dc39aea12a51d140f6f4f77d34bf99f2979539d3a",
+    "skills/codex-pro-dispatch/scripts/parked-runner.js": "071cee7b64b403484b053fc57e61731c359bd30e760941af99df5ed0f5382b07",
     "skills/codex-pro-dispatch/scripts/parked-socket.mjs": "7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7"
   },
   "schema_version": 1,
@@ -97,7 +103,7 @@
         "retained-config mismatch or a recreated socket path defeats closure proof"
       ],
       "pin_origin": "reviewed closed queued-resume patch; actual local CLI/fs/socket and synthetic native tools; worker configured with --confirm-worker since the model-neutral update; watch coalescing for load-stable command appearance",
-      "sha256": "cd231ae9af6670bc72b869061c81e505354c8f7b6a4543a9d8e4be8daebf0e61"
+      "sha256": "ddab0830dc60f6fe34dc71e2c13131396fe1220cbf55584149a72eecce8e14cf"
     },
     "tests/test_parked_runner.cjs": {
       "cases": [

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${PLUGIN_ROOT}/skills/codex-pro-dispatch/scripts/resident-supervision.mjs\" stop",
+            "timeout": 15,
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}

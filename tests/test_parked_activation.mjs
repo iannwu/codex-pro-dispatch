@@ -44,7 +44,7 @@ assert.equal(closed,true);
 test("packet pins match the exact bytes of the pinned scripts",t=>{
 const f=fixture(t),[code,p]=f.invoke(["packet","broker","parent","unit-pro"]);
 eq(code,0);
-eq(Object.keys(p.pins).sort(),["parked-client.mjs","parked-runner.js","parked-socket.mjs"]);
+eq(Object.keys(p.pins).sort(),["parked-client.mjs","parked-runner.js","parked-socket.mjs","resident-supervision.mjs"]);
 for(const [name,hash] of Object.entries(p.pins))
 eq(hash,sha256(root+"skills/codex-pro-dispatch/scripts/"+name));
 });

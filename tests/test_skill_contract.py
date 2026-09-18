@@ -13,6 +13,8 @@ CLAUDE_CLIENT = SKILL.parent / "references" / "claude-client.md"
 NATIVE_PROTOCOL = ROOT / "skills" / "codex-pro-dispatch" / "references" / "native-protocol.md"
 OPENAI_YAML = ROOT / "skills" / "codex-pro-dispatch" / "agents" / "openai.yaml"
 PLUGIN_MANIFEST = ROOT / ".codex-plugin" / "plugin.json"
+PLUGIN_HOOKS = ROOT / "hooks" / "hooks.json"
+PROJECT_HOOKS = ROOT / ".codex" / "hooks.json"
 VERSION = ROOT / "VERSION"
 PACKAGE_INIT = ROOT / "src" / "codex_pro_dispatch" / "__init__.py"
 README = ROOT / "README.md"
@@ -198,6 +200,23 @@ class SkillContractTests(unittest.TestCase):
         self.assertLessEqual(len(manifest["interface"]["shortDescription"]), 30)
         self.assertEqual(manifest["license"], "MIT")
         self.assertTrue(os.access(BUNDLED_HELPER, os.X_OK))
+
+    def test_stop_supervision_hooks_are_synchronous_and_packaged(self) -> None:
+        plugin = json.loads(PLUGIN_HOOKS.read_text(encoding="utf-8"))
+        project = json.loads(PROJECT_HOOKS.read_text(encoding="utf-8"))
+        for document in (plugin, project):
+            stop = document["hooks"]["Stop"]
+            self.assertEqual(len(stop), 1)
+            hook = stop[0]["hooks"][0]
+            self.assertEqual(hook["type"], "command")
+            self.assertFalse(hook["async"])
+            self.assertEqual(hook["timeout"], 15)
+            self.assertIn("resident-supervision.mjs\" stop", hook["command"])
+        self.assertIn("${PLUGIN_ROOT}", plugin["hooks"]["Stop"][0]["hooks"][0]["command"])
+        self.assertEqual(
+            project["hooks"]["Stop"][0]["hooks"][0]["command"],
+            'node "skills/codex-pro-dispatch/scripts/resident-supervision.mjs" stop',
+        )
 
     def test_repo_marketplace_exposes_the_root_plugin(self) -> None:
         marketplace = json.loads(
