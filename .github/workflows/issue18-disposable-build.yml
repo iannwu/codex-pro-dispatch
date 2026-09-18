@@ -26,566 +26,125 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-      - name: Apply the exact accepted patch and commit the test candidate
+      - name: Assemble the pinned accepted patch and commit the test candidate
         run: |
           python3 - <<'PY'
+          import ast
+          import difflib
           import hashlib
-          import json
-          import os
           from pathlib import Path
           import subprocess
-          
-          BASE = "f93c033ff5ba2425fae1e45607cf2b678386b22f"
-          WORKFLOW = ".github/workflows/issue18-disposable-build.yml"
-          assert os.environ["GITHUB_REPOSITORY"] == "iannwu/codex-pro-dispatch"
-          assert os.environ["GITHUB_REF"] == "refs/heads/codex/issue-18-delivery-status"
-          assert subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip() == os.environ["GITHUB_SHA"]
-          subprocess.run(["git", "merge-base", "--is-ancestor", BASE, "HEAD"], check=True)
-          assert subprocess.check_output(["git", "diff", "--name-only", BASE, "HEAD"]).decode().splitlines() == [WORKFLOW]
-          expected = {
-              "src/codex_pro_dispatch/core.py": "005ec8d0fe94636822f1f7d2718e640d8e0e05ff",
-              "src/codex_pro_dispatch/queue.py": "e41edb9e21efbb3df25e1509fd3d42d364154ec2",
-              "README.md": "6873e22edb7e33ee788dda736c895d53e22bb39f",
-              "tests/test_release_queue.py": "3995d8f3af56a0dfc01e9ac1d72e6d88fa5d7865",
-              "tests/test_parked_delivery_integration.mjs": "95e7ce3e92c61e62cf17ed882d28c3ca1d58282d",
-              "tests/release-unit4-manifest.json": "4fcdea50631c9cd72ecb90b9f5be187e8fc30947",
-          }
-          
-          def blob(raw):
-              return hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
-          
-          for path, sha in expected.items():
-              p = Path(path)
-              assert p.is_file() and not p.is_symlink()
-              assert blob(p.read_bytes()) == sha, path
-          assert not Path("tests/test_outbound_delivery.py").exists()
-          
-          runtime_patch = r'''--- a/src/codex_pro_dispatch/core.py
-          +++ b/src/codex_pro_dispatch/core.py
-          @@ -1944,12 +1944,10 @@
-               )
-           
-           
-          -def _native_response(raw: bytes, receipt: Mapping[str, Any]) -> tuple[bytes, dict[str, Any]]:
-          -    """Select a framed exchange from the desktop's lossy history summary.
-          -
-          -    This establishes summary association, not source-byte integrity or native
-          -    generation finality. Do not manufacture production evidence from it.
-          -    """
-          +def _native_outbound(
-          +    raw: bytes, receipt: Mapping[str, Any]
-          +) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
-          +    """Select exact outbound read-back independently of worker/reply progress."""
-               def invalid() -> None:
-                   raise MarkerError("native-read-invalid: unsupported or ambiguous native summary")
-           
-          @@ -1981,8 +1979,6 @@
-                   status = thread.get("status")
-                   if not isinstance(status, dict) or not isinstance(status.get("type"), str):
-                       invalid()
-          -        if status["type"] != "idle":
-          -            raise StateError("native-worker-not-idle: wait and read again; never resend")
-                   turns = data.get("turns")
-                   if not isinstance(turns, list):
-                       invalid()
-          @@ -2016,6 +2012,35 @@
-                       invalid()
-                   if sha256_text(content[0]["text"]) != receipt["wrapped_prompt_sha256"]:
-                       raise StateError("native-readback-mismatch: returned prompt differs; never resend")
-          +        flags = {}
-          +        for name, scope in (("envelope", data), ("thread", thread), ("turn", turn), ("user", user), ("user_text", content[0])):
-          +            for key in ("truncated", "textTruncated"):
-          +                value = scope.get(key)
-          +                if key in scope and type(value) is not bool:
-          +                    invalid()
-          +                if value is True:
-          +                    raise MarkerError("truncated-response: native summary reports shortening")
-          +                flags[f"{name}.{key}"] = value  # null means omitted, never false.
-          +        return content[0]["text"], data, turn, flags
-          +    except (ValueError, UnicodeError, RecursionError, TypeError, KeyError, IndexError):
-          +        invalid()
-          +
-          +
-          +def _native_response(raw: bytes, receipt: Mapping[str, Any]) -> tuple[bytes, dict[str, Any]]:
-          +    """Select a framed exchange from the desktop's lossy history summary.
-          +
-          +    This establishes summary association, not source-byte integrity or native
-          +    generation finality. Do not manufacture production evidence from it.
-          +    """
-          +    def invalid() -> None:
-          +        raise MarkerError("native-read-invalid: unsupported or ambiguous native summary")
-          +
-          +    try:
-          +        _, data, turn, flags = _native_outbound(raw, receipt)
-          +        thread = data["thread"]
-          +        user = turn["items"][0]
-          +        if thread["status"]["type"] != "idle":
-          +            raise StateError("native-worker-not-idle: wait and read again; never resend")
-                   if len(turn["items"]) == 1:
-                       raise StateError("native-reply-not-observed: assistant absent; never resend")
-                   if len(turn["items"]) != 2:
-          @@ -2023,16 +2048,14 @@
-                   assistant = turn["items"][1]
-                   if assistant.get("type") != "agentMessage" or not isinstance(assistant.get("text"), str):
-                       invalid()
-          -        flags = {}
-          -        for name, scope in (("envelope", data), ("thread", thread), ("turn", turn), ("user", user), ("user_text", content[0]), ("assistant", assistant)):
-          -            for key in ("truncated", "textTruncated"):
-          -                value = scope.get(key)
-          -                if key in scope and type(value) is not bool:
-          -                    invalid()
-          -                if value is True:
-          -                    raise MarkerError("truncated-response: native summary reports shortening")
-          -                flags[f"{name}.{key}"] = value  # null means omitted, never false.
-          +        for key in ("truncated", "textTruncated"):
-          +            value = assistant.get(key)
-          +            if key in assistant and type(value) is not bool:
-          +                invalid()
-          +            if value is True:
-          +                raise MarkerError("truncated-response: native summary reports shortening")
-          +            flags[f"assistant.{key}"] = value
-                   text = assistant["text"]
-                   if len(text.encode("utf-16-le")) // 2 >= 20000:
-                       raise MarkerError("native-read-limit: reject a response at the reader's boundary")
-          --- a/src/codex_pro_dispatch/queue.py
-          +++ b/src/codex_pro_dispatch/queue.py
-          @@ -898,9 +898,9 @@
-               def observe(self, rid, parent, confirmed=False, native_read=None):
-                   """Observe existing post-arm work; never claim, arm, or send.
-           
-          -        Pending snapshots do not mutate request/receipt records. A candidate
-          -        must pass the existing native-summary and short-envelope validators.
-          -        Publication and interrupted-publication recovery retain core authority.
-          +        Pending snapshots may record exact outbound delivery once, but never
-          +        stage or publish a response. Results still require the native-summary
-          +        and short-envelope validators; core retains publication authority.
-                   """
-                   from .resident import invocation
-                   if isinstance(invocation.get(), dict) and invocation.get().get("takeover_settlement") is True:
-          @@ -956,48 +956,39 @@
-                   if len(native_read) > 4 * 1024 * 1024:
-                       raise core.ConfigurationError("Native history exceeds 4 MiB")
-           
-          -            try:
-          -                response, association = core._native_response(native_read, receipt)
-          -            except core.StateError as exc:
-          -                reason = str(exc).partition(":")[0]
-          -                if staged is None and reason in {
-          -                    "native-worker-not-idle", "native-reply-not-observed"
-          -                }:
-          -                    return dict(
-          -                        self.metadata(r, _locked=locked),
-          -                        observation="pending",
-          -                        reason_code=reason,
-          -                        no_resend=True,
-          -                    )
-          -                raise
-          -
-          -            parsed = core._parse_result(response, rid)
-          -            if parsed.result_kind != "short":
-          -                raise core.StateError(
-          -                    "Queue observer requires a short result; operator resolution required"
-          -                )
-          -
-                       mutation = resident.collector_observation() if collector else contextlib.nullcontext()
-                       with mutation:
-          -                if receipt.get("outbound_prompt_verified") is not True:
-          -                    # _native_response already validated the complete JSON, unique
-          -                    # matching turn, item ordering, and exact wrapped-prompt hash.
-          -                    # Extract its returned text without normalization/reconstruction.
-          -                    data = json.loads(native_read.decode("utf-8"))
-          -                    turn = next(
-          -                        item for item in data["turns"]
-          -                        if item["id"] == association["turn_id"]
-          -                    )
-          -                    sent_prompt = turn["items"][0]["content"][0]["text"]
-          -                    core.mark_submitted(
-          -                        rid, sent_prompt, self.paths, _locked=locked
-          -                    )
-          -                elif receipt.get("submission_count") != 1:
-          -                    raise core.StateError("Verified submission count is invalid")
-          -
-          +                try:
-          +                    sent_prompt, _, _, _ = core._native_outbound(native_read, receipt)
-          +                    if receipt.get("outbound_prompt_verified") is not True:
-          +                        receipt = core.mark_submitted(
-          +                            rid, sent_prompt, self.paths, _locked=locked
-          +                        )
-          +                    elif (type(receipt.get("submission_count")) is not int
-          +                          or receipt["submission_count"] != 1
-          +                          or receipt.get("sent_prompt_sha256") != receipt["wrapped_prompt_sha256"]):
-          +                        raise core.StateError("Verified submission record is invalid")
-          +                    response, _ = core._native_response(native_read, receipt)
-          +                except core.StateError as exc:
-          +                    reason = str(exc).partition(":")[0]
-          +                    if staged is None and reason in {
-          +                        "native-worker-not-idle", "native-reply-not-observed"
-          +                    }:
-          +                        return dict(
-          +                            self.metadata(r, _locked=locked),
-          +                            observation="pending",
-          +                            reason_code=reason,
-          +                            no_resend=True,
-          +                        )
-          +                    raise
-          +
-          +                parsed = core._parse_result(response, rid)
-          +                if parsed.result_kind != "short":
-          +                    raise core.StateError(
-          +                        "Queue observer requires a short result; operator resolution required"
-          +                    )
-                           result = self.publish(
-                               rid, parent, confirmed=True,
-                               native_read=native_read, _locked=locked,
+
+          source = subprocess.check_output([
+              "git", "show", "d9a8dac13dca26e1abd9389a54654d9cc4bf7177:.github/workflows/issue18-disposable-build.yml"
+          ])
+          assert hashlib.sha1(b"blob " + str(len(source)).encode() + b"\0" + source).hexdigest() == "cfe17f859e7692da2f8dbb35e48d04055110b31a"
+          block = source.decode().split("          python3 - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
+          assert all(line.startswith("          ") for line in block.splitlines())
+          script = "\n".join(line[10:] for line in block.splitlines()) + "\n"
+          original = {}
+          updated = {}
+          path = "src/codex_pro_dispatch/core.py"
+          s = Path(path).read_text()
+          original[path] = s
+          a = s.index("def _native_response(")
+          b = s.index("\n\ndef complete_assignment(", a)
+          old = s[a:b]
+          start = old.index("    def invalid()")
+          cut = old.index('        if len(turn["items"]) == 1:')
+          flags_start = old.index("        flags = {}\n")
+          flags_end = old.index('        text = assistant["text"]\n')
+          exception = old[old.index("    except (ValueError, UnicodeError, RecursionError, TypeError, KeyError, IndexError):"):]
+          selector = ('def _native_outbound(\n'
+                      '    raw: bytes, receipt: Mapping[str, Any]\n'
+                      ') -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:\n'
+                      '    """Select exact outbound read-back independently of worker/reply progress."""\n'
+                      + old[start:cut])
+          idle = '        if status["type"] != "idle":\n            raise StateError("native-worker-not-idle: wait and read again; never resend")\n'
+          assert selector.count(idle) == 1
+          selector = selector.replace(idle, "")
+          selector += old[flags_start:flags_end].replace(', ("assistant", assistant)', '')
+          selector += '        return content[0]["text"], data, turn, flags\n' + exception
+          response = old[:start] + old[start:old.index("    def pairs(")] + '''    try:
+                  _, data, turn, flags = _native_outbound(raw, receipt)
+                  thread = data["thread"]
+                  user = turn["items"][0]
+                  if thread["status"]["type"] != "idle":
+                      raise StateError("native-worker-not-idle: wait and read again; never resend")
+          ''' + old[cut:flags_start] + '''        for key in ("truncated", "textTruncated"):
+                      value = assistant.get(key)
+                      if key in assistant and type(value) is not bool:
+                          invalid()
+                      if value is True:
+                          raise MarkerError("truncated-response: native summary reports shortening")
+                      flags[f"assistant.{key}"] = value
+          ''' + old[flags_end:]
+          updated[path] = s[:a] + selector + "\n\n" + response + s[b:]
+
+          path = "src/codex_pro_dispatch/queue.py"
+          s = Path(path).read_text()
+          original[path] = s
+          before = '''        Pending snapshots do not mutate request/receipt records. A candidate
+                  must pass the existing native-summary and short-envelope validators.
+                  Publication and interrupted-publication recovery retain core authority.
           '''
-          subprocess.run(["git", "apply", "--check", "-"], input=runtime_patch.encode(), check=True)
-          subprocess.run(["git", "apply", "-"], input=runtime_patch.encode(), check=True)
-          assert blob(Path("src/codex_pro_dispatch/core.py").read_bytes()) == "c80c856d992780a9f4ba2e88c9ce920c1a7a0f89"
-          assert blob(Path("src/codex_pro_dispatch/queue.py").read_bytes()) == "564b94e8021c0855f6c7c70a43e1b2860d7898e6"
-          
-          
-          def replace_once(text, old, new):
-              assert text.count(old) == 1, old
-              return text.replace(old, new, 1)
-          
-          p = Path("README.md")
-          s = p.read_text()
-          anchor = "## Verification and privacy\n\n"
-          s = replace_once(s, anchor, anchor + "`submission_count: 0` means no verified outbound read-back was recorded, not proof that no native send occurred; a verified delivery can be `submitted` while result observation remains `pending`.\n\n")
-          p.write_text(s)
-          
-          p = Path("tests/test_release_queue.py")
-          s = p.read_text()
-          s = replace_once(s, 'for kind in ("running", "missing", "worker", "prompt", "truncated", "footer"):', 'for kind in ("running", "missing", "worker", "prompt", "truncated"):')
-          s = replace_once(s, '                document["thread"]["status"]["type"] = "running"\n', '                document["thread"]["status"]["type"] = "running"\n                document["turns"] = []  # No current outbound evidence yet.\n')
-          s = replace_once(s, '                document["turns"][0]["items"][1]["truncated"] = True\n            else:\n                document["turns"][0]["items"][1]["text"] += "\\n"\n', '                document["turns"][0]["items"][0]["truncated"] = True\n')
-          p.write_text(s)
-          
-          p = Path("tests/test_parked_delivery_integration.mjs")
-          s = p.read_text()
-          old_hash = hashlib.sha256(p.read_bytes()).hexdigest()
-          s = replace_once(s, '      // Deliberate formatting and final LF test unedited evidence preservation.\n', '      if (prompt && !f.ready) document.turns[0].items.pop();\n      // Deliberate formatting and final LF test unedited evidence preservation.\n')
-          s = replace_once(s, '  assert.equal(first.collected.dispatch_status, "armed");', '  assert.equal(first.collected.dispatch_status, "submitted");')
-          s = replace_once(s, '  assert.equal(first.collected.send_may_have_occurred, true);\n', '  assert.equal(first.collected.send_may_have_occurred, true);\n  assert.equal(first.collected.sent_verified, true);\n  const delivered = (await f.cli(["status", "fixture-A"])).assignment;\n  assert.equal(delivered.submission_count, 1);\n  assert.equal(delivered.outbound_prompt_verified, true);\n  assert.equal(f.native.sends.length, 1);\n  assert.equal(JSON.parse(f.native.reads.at(-1)).turns[0].items.length, 1);\n')
-          s = replace_once(s, '  assert.equal(second.collected.answer.payload, "integration answer");\n  assert.equal(f.native.sends.length, 1);\n  assert.equal(f.commands.filter(r => r.command.includes("\'arm\'")).length, 1);\n', '  assert.equal(second.collected.answer.payload, "integration answer");\n  const completed = (await f.cli(["status", "fixture-A"])).assignment;\n  assert.equal(completed.submission_count, 1);\n  assert.equal(completed.submitted_at, delivered.submitted_at);\n  const publications = f.commands.filter(r =>\n    r.command.includes("\'queue\' \'observe\'") && r.exit_code === 0 &&\n    JSON.parse(r.stdout).observation === "published");\n  assert.equal(publications.length, 1);\n  assert.deepEqual((await f.invoke("collect")).answer, second.collected.answer);\n  assert.equal(f.native.sends.length, 1);\n  assert.equal(f.commands.filter(r => r.command.includes("\'arm\'")).length, 1);\n')
-          s = replace_once(s, '  assert.equal(collected.dispatch_status, "armed");', '  assert.equal(collected.dispatch_status, "submitted");\n  assert.equal(collected.sent_verified, true);\n  assert.equal((await f.cli(["status", "fixture-A"])).assignment.submission_count, 1);')
-          old_case = "active observation budget exhaustion preserves armed collect-only work"
-          new_case = "active observation budget exhaustion preserves submitted collect-only work"
-          s = replace_once(s, old_case, new_case)
-          p.write_text(s)
-          
-          p = Path("tests/release-unit4-manifest.json")
-          s = p.read_text()
-          manifest = json.loads(s)
-          assert manifest["tests"]["tests/test_parked_delivery_integration.mjs"]["sha256"] == old_hash
-          new_hash = hashlib.sha256(Path("tests/test_parked_delivery_integration.mjs").read_bytes()).hexdigest()
-          s = replace_once(s, old_hash, new_hash)
-          s = replace_once(s, old_case, new_case)
-          p.write_text(s)
-          
-          new_test = r'''"""Issue 18: exact native delivery is independent of assistant completion."""
-          import copy
-          import json
-          import sys
-          import tempfile
-          import threading
-          import unittest
-          from concurrent.futures import ThreadPoolExecutor
-          from pathlib import Path
-          from unittest.mock import patch
-          
-          sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-          from codex_pro_dispatch import core, resident
-          from codex_pro_dispatch.queue import Queue
-          
-          
-          class OutboundDeliveryTests(unittest.TestCase):
-              def setUp(self):
-                  temporary = tempfile.TemporaryDirectory(prefix="outbound-delivery-")
-                  self.addCleanup(temporary.cleanup)
-                  self.root = Path(temporary.name).resolve(strict=True)
-                  self.paths = core.RuntimePaths(self.root / "config", self.root / "state")
-                  self.rid, self.parent, self.worker = "delivery-A", "delivery-parent", "delivery-worker"
-                  core.save_worker(self.worker, confirm_pro=True, paths=self.paths)
-                  self.queue = Queue(self.paths)
-                  self.queue.submit(self.rid, "Exact delivery: 中文 🙂\n".encode(), "delivery-client")
-                  claim = self.queue.claim(self.parent, True, self.rid)
-                  self.prompt = claim["wrapped_prompt"]
-                  core.arm_assignment(self.rid, self.paths)
-          
-              def document(self, status="active", assistant=False):
-                  items = [{"id": "delivery-user", "type": "userMessage",
-                            "content": [{"type": "text", "text": self.prompt}]}]
-                  if assistant:
-                      items.append({"id": "delivery-answer", "type": "agentMessage",
-                                    "text": core.result_marker(self.rid) + "\nanswer\n"
-                                            + core.end_marker(self.rid)})
-                  return {"schemaVersion": 1,
-                          "thread": {"id": self.worker, "kind": "chatgpt", "status": {"type": status}},
-                          "turns": [{"id": "delivery-user", "items": items}]}
-          
-              def observe(self, document):
-                  return self.queue.observe(self.rid, self.parent, True,
-                                            json.dumps(document).encode("utf-8"))
-          
-              def receipt(self):
-                  return core.load_assignment(self.rid, self.paths)
-          
-              def bytes(self):
-                  return {str(p.relative_to(self.root)): p.read_bytes()
-                          for p in self.root.rglob("*") if p.is_file()}
-          
-              def assert_delivered_pending(self, observed):
-                  self.assertEqual(observed["observation"], "pending")
-                  self.assertEqual(observed["state"], "claimed")
-                  self.assertEqual(observed["dispatch_status"], "submitted")
-                  self.assertTrue(observed["sent_verified"])
-                  self.assertTrue(observed["send_may_have_occurred"])
-                  self.assertFalse(observed["send_authorized"])
-                  receipt = self.receipt()
-                  self.assertEqual(receipt["submission_count"], 1)
-                  self.assertTrue(receipt["submitted_at"])
-                  self.assertTrue(receipt["outbound_prompt_verified"])
-                  self.assertTrue(receipt["submission_observed"])
-                  self.assertTrue(receipt["no_resend"])
-                  self.assertEqual(receipt["sent_prompt_sha256"], receipt["wrapped_prompt_sha256"])
-                  self.assertNotIn("submission_may_have_occurred", receipt)
-                  self.assertNotIn("native_collection", receipt)
-                  record = self.queue.load(self.rid)
-                  self.assertNotIn("native_read", record)
-                  self.assertNotIn("answer", record)
-                  self.assertEqual(core.active_assignment(self.paths)["assignment_id"], self.rid)
-          
-              def test_active_user_only_records_once_across_251_more_reads(self):
-                  document = self.document()
-                  before = self.bytes()
-                  self.assert_delivered_pending(self.observe(document))
-                  saved = self.bytes()
-                  self.assertEqual({k for k in saved if saved[k] != before.get(k)},
-                                   {"state/assignments/" + self.rid + ".json"})
-                  receipt = self.receipt()
-                  with patch.object(core, "mark_submitted", side_effect=AssertionError("Duplicate record")):
-                      for _ in range(251):
-                          self.assertEqual(self.observe(document)["observation"], "pending")
-                  self.assertEqual(self.bytes(), saved)
-                  self.assertEqual(self.receipt(), receipt)
-                  self.assertEqual(self.queue.claim(self.parent, True, self.rid)["action"], "collect_only")
-                  with self.assertRaises(core.StateError):
-                      core.arm_assignment(self.rid, self.paths)
-          
-              def test_idle_user_only_records_delivery_without_a_result(self):
-                  observed = self.observe(self.document("idle"))
-                  self.assert_delivered_pending(observed)
-                  self.assertEqual(observed["reason_code"], "native-reply-not-observed")
-          
-              def test_stale_or_missing_current_marker_is_write_free_then_exact_verifies(self):
-                  before = self.bytes()
-                  for status in ("active", "idle"):
-                      for text in (None, "old prompt", core.wrap_prompt("old", "delivery-old")):
-                          document = self.document(status)
-                          if text is None:
-                              document["turns"] = []
-                          else:
-                              document["turns"][0]["items"][0]["content"][0]["text"] = text
-                          self.assertEqual(self.observe(document)["observation"], "pending")
-                          self.assertEqual(self.bytes(), before)
-                  self.assert_delivered_pending(self.observe(self.document()))
-          
-              def test_current_marker_hash_mismatch_is_write_free_and_never_rearms(self):
-                  before = self.bytes()
-                  for status in ("active", "idle"):
-                      document = self.document(status)
-                      document["turns"][0]["items"][0]["content"][0]["text"] += "x"
-                      with self.assertRaisesRegex(core.StateError, "native-readback-mismatch"):
-                          self.observe(document)
-                      self.assertEqual(self.bytes(), before)
-                  self.assertEqual(self.receipt()["submission_count"], 0)
-                  self.assertNotIn("submitted_at", self.receipt())
-                  self.assertTrue(self.receipt()["no_resend"])
-                  with self.assertRaises(core.StateError):
-                      core.arm_assignment(self.rid, self.paths)
-          
-              def test_concurrent_observers_record_at_most_once(self):
-                  barrier = threading.Barrier(2)
-                  document = self.document()
-          
-                  def observe():
-                      barrier.wait(timeout=5)
-                      return self.observe(document)
-          
-                  with patch.object(core, "mark_submitted", wraps=core.mark_submitted) as submitted:
-                      with ThreadPoolExecutor(max_workers=2) as pool:
-                          futures = [pool.submit(observe) for _ in range(2)]
-                          results = [future.result(timeout=15) for future in futures]
-                  self.assertEqual(submitted.call_count, 1)
-                  for result in results:
-                      self.assert_delivered_pending(result)
-          
-              def test_failed_write_and_lost_acknowledgment_recover_collect_only(self):
-                  document = self.document()
-                  before = self.bytes()
-                  with patch.object(core, "mark_submitted", side_effect=OSError("Before write")):
-                      with self.assertRaises(OSError):
-                          self.observe(document)
-                  self.assertEqual(self.bytes(), before)
-                  original = core.mark_submitted
-          
-                  def lost_ack(*args, **kwargs):
-                      original(*args, **kwargs)
-                      raise OSError("After durable delivery write")
-          
-                  with patch.object(core, "mark_submitted", side_effect=lost_ack):
-                      with self.assertRaises(OSError):
-                          self.observe(document)
-                  saved = self.bytes()
-                  with patch.object(core, "mark_submitted", side_effect=AssertionError("Duplicate record")):
-                      self.assert_delivered_pending(self.observe(document))
-                  self.assertEqual(self.bytes(), saved)
-          
-              def test_invalid_assistant_never_erases_verified_delivery_or_stages_history(self):
-                  queue_bytes = self.queue.path(self.rid).read_bytes()
-                  submitted_at = None
-                  for kind in ("footer", "type", "truncated", "extra", "cross-turn", "limit"):
-                      document = self.document("idle", True)
-                      turn = document["turns"][0]
-                      assistant = turn["items"][1]
-                      if kind == "footer":
-                          assistant["text"] += "\n"
-                      elif kind == "type":
-                          assistant["type"] = "userMessage"
-                      elif kind == "truncated":
-                          assistant["truncated"] = True
-                      elif kind == "extra":
-                          turn["items"].append({"id": "extra", "type": "agentMessage", "text": "extra"})
-                      elif kind == "cross-turn":
-                          document["turns"].append({"id": "other-turn", "items": [turn["items"].pop()]})
-                      else:
-                          assistant["text"] = "x" * 20000
-                      if kind == "cross-turn":
-                          self.assertEqual(self.observe(document)["observation"], "pending")
-                      else:
-                          with self.assertRaises(core.DispatchError):
-                              self.observe(document)
-                      receipt = self.receipt()
-                      self.assertEqual(receipt["status"], "submitted")
-                      self.assertEqual(receipt["submission_count"], 1)
-                      self.assertTrue(receipt["outbound_prompt_verified"])
-                      submitted_at = submitted_at or receipt["submitted_at"]
-                      self.assertEqual(receipt["submitted_at"], submitted_at)
-                      self.assertEqual(self.queue.path(self.rid).read_bytes(), queue_bytes)
-                  result = self.observe(self.document("idle", True))
-                  self.assertEqual(result["observation"], "published")
-                  self.assertEqual(result["answer"]["payload"], "answer")
-                  saved = self.bytes()
-                  self.assertEqual(self.observe(self.document("idle", True)), result)
-                  self.assertEqual(self.bytes(), saved)
-                  self.assertEqual(self.receipt()["submitted_at"], submitted_at)
-          
-              def test_active_even_with_framed_assistant_cannot_publish(self):
-                  self.assert_delivered_pending(self.observe(self.document("active", True)))
-          
-              def test_outbound_identity_shape_and_truncation_reject_before_any_write(self):
-                  cases = []
-                  for kind in ("worker", "duplicate-turn", "duplicate-item", "duplicate-candidate",
-                               "user-id", "user-order", "content", "status", "schema"):
-                      document = self.document()
-                      turn = document["turns"][0]
-                      user = turn["items"][0]
-                      if kind == "worker":
-                          document["thread"]["id"] = "wrong"
-                      elif kind == "duplicate-turn":
-                          document["turns"].append(copy.deepcopy(turn))
-                      elif kind == "duplicate-item":
-                          document["turns"].append({"id": "other", "items": [copy.deepcopy(user)]})
-                      elif kind == "duplicate-candidate":
-                          other = copy.deepcopy(turn)
-                          other["id"] = other["items"][0]["id"] = "other"
-                          document["turns"].append(other)
-                      elif kind == "user-id":
-                          user["id"] = "wrong"
-                      elif kind == "user-order":
-                          turn["items"].insert(0, {"id": "earlier", "type": "agentMessage", "text": "old"})
-                      elif kind == "content":
-                          user["content"].append({"type": "text", "text": "extra"})
-                      elif kind == "status":
-                          document["thread"]["status"] = "idle"
-                      else:
-                          document["schemaVersion"] = True
-                      cases.append(document)
-                  for scope_index in range(5):
-                      for key in ("truncated", "textTruncated"):
-                          for value in (True, "false", None):
-                              document = self.document()
-                              turn = document["turns"][0]
-                              user = turn["items"][0]
-                              (document, document["thread"], turn, user, user["content"][0])[scope_index][key] = value
-                              cases.append(document)
-                  before = self.bytes()
-                  for document in cases:
-                      with self.assertRaises(core.DispatchError):
-                          self.observe(document)
-                      self.assertEqual(self.bytes(), before)
-                  for raw in (b'{"schemaVersion":1,"schemaVersion":1}', b'{"x":NaN}',
-                              b'{"x":1e9999}', b'{"x":"\\ud800"}', b'\xef\xbb\xbf{}', b'{} trailing'):
-                      with self.assertRaises(core.MarkerError):
-                          self.queue.observe(self.rid, self.parent, True, raw)
-                      self.assertEqual(self.bytes(), before)
-          
-              def test_legacy_armed_collector_records_with_bound_authority_only(self):
-                  owner = {"version": 2, "generation": 1, "owner": "delivery-owner",
-                           "parent": self.parent, "worker": self.worker,
-                           "inflight": {"invocation": "delivery-call", "request": self.rid},
-                           "session": None, "qualification": {}}
-                  with core.state_lock(self.paths) as locked:
-                      core.atomic_write_json(self.paths.state_dir / "resident-owner.json", owner, _locked=locked)
-                  credentials = {k: owner[k] for k in ("generation", "owner", "parent", "worker")}
-                  resident.control("collector-open", credentials, self.paths)
-                  credentials["collector_only"] = True
-                  before = self.bytes()
-                  for field, value in (("generation", 2), ("owner", "wrong"),
-                                       ("parent", "wrong"), ("worker", "wrong"),
-                                       ("request_parent", "wrong")):
-                      token = resident.invocation.set({**credentials, field: value})
-                      try:
-                          with self.assertRaises(core.DispatchError):
-                              self.observe(self.document())
-                          self.assertEqual(self.bytes(), before)
-                      finally:
-                          resident.invocation.reset(token)
-                  token = resident.invocation.set(credentials)
-                  try:
-                      self.assert_delivered_pending(self.observe(self.document()))
-                      saved = self.bytes()
-                      self.assert_delivered_pending(self.observe(self.document()))
-                      self.assertEqual(self.bytes(), saved)
-                      self.assertEqual(saved["state/resident-owner.json"], before["state/resident-owner.json"])
-                      self.assertEqual(saved["state/resident-recovery.json"], before["state/resident-recovery.json"])
-                      self.assertIsNone(resident.collector_operation.get())
-                      with self.assertRaises(core.StateError):
-                          self.queue.claim(self.parent, True, self.rid)
-                      with self.assertRaises(core.DispatchError):
-                          core.arm_assignment(self.rid, self.paths)
-                  finally:
-                      resident.invocation.reset(token)
-          
-          
-          if __name__ == "__main__":
-              unittest.main()
+          after = '''        Pending snapshots may record exact outbound delivery once, but never
+                  stage or publish a response. Results still require the native-summary
+                  and short-envelope validators; core retains publication authority.
           '''
-          assert blob(new_test.encode()) == "dc0e3dd602aefadff123a49ad03f36fc00e97008"
-          Path("tests/test_outbound_delivery.py").write_text(new_test)
-          changed = sorted([*expected, "tests/test_outbound_delivery.py"])
-          subprocess.run(["git", "diff", "--check"], check=True)
-          subprocess.run(["git", "add", "--", *changed], check=True)
-          assert sorted(subprocess.check_output(["git", "diff", "--cached", "--name-only"]).decode().splitlines()) == changed
-          subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=True)
-          subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
-          subprocess.run(["git", "commit", "-m", "fix: record verified outbound delivery before assistant completion"], check=True)
-          candidate = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
-          assert subprocess.check_output(["git", "rev-parse", "HEAD^"]).decode().strip() == os.environ["GITHUB_SHA"]
-          with open(os.environ["GITHUB_ENV"], "a") as out:
-              out.write("CANDIDATE_SHA=" + candidate + "\n")
-          print(json.dumps({"base": BASE, "candidate": candidate, "files": changed}))
+          assert s.count(before) == 1
+          s = s.replace(before, after)
+          a = s.index("            try:\n                response, association = core._native_response(native_read, receipt)", s.index("    def observe("))
+          b = s.index('            return dict(result, observation="published", no_resend=True)', a)
+          replacement = '''            mutation = resident.collector_observation() if collector else contextlib.nullcontext()
+                      with mutation:
+                          try:
+                              sent_prompt, _, _, _ = core._native_outbound(native_read, receipt)
+                              if receipt.get("outbound_prompt_verified") is not True:
+                                  receipt = core.mark_submitted(
+                                      rid, sent_prompt, self.paths, _locked=locked
+                                  )
+                              elif (type(receipt.get("submission_count")) is not int
+                                    or receipt["submission_count"] != 1
+                                    or receipt.get("sent_prompt_sha256") != receipt["wrapped_prompt_sha256"]):
+                                  raise core.StateError("Verified submission record is invalid")
+                              response, _ = core._native_response(native_read, receipt)
+                          except core.StateError as exc:
+                              reason = str(exc).partition(":")[0]
+                              if staged is None and reason in {
+                                  "native-worker-not-idle", "native-reply-not-observed"
+                              }:
+                                  return dict(
+                                      self.metadata(r, _locked=locked),
+                                      observation="pending",
+                                      reason_code=reason,
+                                      no_resend=True,
+                                  )
+                              raise
+
+                          parsed = core._parse_result(response, rid)
+                          if parsed.result_kind != "short":
+                              raise core.StateError(
+                                  "Queue observer requires a short result; operator resolution required"
+                              )
+                          result = self.publish(
+                              rid, parent, confirmed=True,
+                              native_read=native_read, _locked=locked,
+                          )
+          '''
+          updated[path] = s[:a] + replacement + s[b:]
+          runtime_patch = ""
+          for path, text in updated.items():
+              ast.parse(text)
+              runtime_patch += "".join(difflib.unified_diff(
+                  original[path].splitlines(True), text.splitlines(True),
+                  fromfile="a/" + path, tofile="b/" + path))
+          tree = ast.parse(script)
+          assignment = next(n for n in tree.body if isinstance(n, ast.Assign)
+                            and any(isinstance(t, ast.Name) and t.id == "runtime_patch" for t in n.targets))
+          lines = script.splitlines(True)
+          script = "".join(lines[:assignment.lineno - 1]) + "runtime_patch = " + repr(runtime_patch) + "\n" + "".join(lines[assignment.end_lineno:])
+          exec(compile(script, "issue18-pinned-builder", "exec"), {})
           PY
       - name: Test the committed candidate without native sends
         run: |
