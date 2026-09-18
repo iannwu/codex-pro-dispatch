@@ -159,6 +159,7 @@ async function fixture(t, options = {}) {
           ]
         }] : []
       };
+      if (prompt && !f.ready) document.turns[0].items.pop();
       // Deliberate formatting and final LF test unedited evidence preservation.
       const raw = JSON.stringify(document, null, 2) + "\n";
       native.reads.push(raw);
@@ -281,13 +282,27 @@ test("pending then explicit actual collect-only recovery, without another send",
   f.ready = false;
   const first = await f.drive();
   assert.equal(first.returned.result.observation, "pending");
-  assert.equal(first.collected.dispatch_status, "armed");
+  assert.equal(first.collected.dispatch_status, "submitted");
   assert.equal(first.collected.send_may_have_occurred, true);
+  assert.equal(first.collected.sent_verified, true);
+  const delivered = (await f.cli(["status", "fixture-A"])).assignment;
+  assert.equal(delivered.submission_count, 1);
+  assert.equal(delivered.outbound_prompt_verified, true);
+  assert.equal(f.native.sends.length, 1);
+  assert.equal(JSON.parse(f.native.reads.at(-1)).turns[0].items.length, 1);
   assert.equal((await f.invoke("submit")).wake.status, "collect_only");
   f.ready = true;
   const second = await f.drive("observe");
   assert.equal(second.returned.result.observation, "published");
   assert.equal(second.collected.answer.payload, "integration answer");
+  const completed = (await f.cli(["status", "fixture-A"])).assignment;
+  assert.equal(completed.submission_count, 1);
+  assert.equal(completed.submitted_at, delivered.submitted_at);
+  const publications = f.commands.filter(r =>
+    r.command.includes("'queue' 'observe'") && r.exit_code === 0 &&
+    JSON.parse(r.stdout).observation === "published");
+  assert.equal(publications.length, 1);
+  assert.deepEqual((await f.invoke("collect")).answer, second.collected.answer);
   assert.equal(f.native.sends.length, 1);
   assert.equal(f.commands.filter(r => r.command.includes("'arm'")).length, 1);
 });
@@ -348,7 +363,7 @@ test("active delivery automatically observes pending work without a second send"
   assert.equal((await f.invoke("collect")).answer.payload, "integration answer");
 });
 
-test("active observation budget exhaustion preserves armed collect-only work", async t => {
+test("active observation budget exhaustion preserves submitted collect-only work", async t => {
   const f = await fixture(t);
   f.ready = false;
   // Unit-only tiny budget: this is not a native duration qualification.
@@ -356,7 +371,9 @@ test("active observation budget exhaustion preserves armed collect-only work", a
   const { returned, collected } = await f.drive();
   assert.equal(returned.result.observation, "pending");
   assert.equal(returned.result.active_wait.observation_passes, 1);
-  assert.equal(collected.dispatch_status, "armed");
+  assert.equal(collected.dispatch_status, "submitted");
+  assert.equal(collected.sent_verified, true);
+  assert.equal((await f.cli(["status", "fixture-A"])).assignment.submission_count, 1);
   assert.equal(collected.send_may_have_occurred, true);
   assert.equal(f.native.sends.length, 1);
   assert.equal((await f.invoke("submit")).wake.status, "collect_only");

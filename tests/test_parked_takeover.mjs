@@ -244,8 +244,8 @@ print(json.dumps(dict(credentials=c,workers=[dict(slot=x["slot"],conversation_id
   assert.equal(sends.length,1);
   assert.equal(commands.filter(x=>x.includes("'arm-for-send'")).length,1);
   const old=python('print(json.dumps(core.load_assignment("inherited",p)))');
-  assert.equal(old.status,inherited==="armed"?"armed":inherited==="running_prepared"?"prepared":"abandoned");
-  assert.equal(old.submission_count,0);
+  assert.equal(old.status,inherited==="armed"?"submitted":inherited==="running_prepared"?"prepared":"abandoned");
+  assert.equal(old.submission_count,inherited==="armed"?1:0);
   if(inherited==="running_prepared"){
    const slot=python('print(json.dumps(resident.control("inspect",{},p)["owner"]["slots"][0]))');
    assert.equal(slot.phase,"collect_only");assert.equal(slot.request,"inherited");

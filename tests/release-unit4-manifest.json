@@ -75,12 +75,12 @@
         "native send error uses real indeterminate CLI and preserved reason",
         "different runner authority is rejected before claim or native work",
         "active delivery automatically observes pending work without a second send",
-        "active observation budget exhaustion preserves armed collect-only work",
+        "active observation budget exhaustion preserves submitted collect-only work",
         "collect-only recovery publishes a complete receipt whose queue stage is missing",
         "large history stays off the native wire without changing one-send behavior"
       ],
       "pin_origin": "reviewed resident-failure patch; complete_without_stage added",
-      "sha256": "0a3e103cf48453d8651fe295b1a17629310e890d7b11819a90ba35c13c046c60"
+      "sha256": "d02e2daa2356f6c9d9aa7f618cba957ef0c6d6f592b011e69616795d3d4bf0a9"
     },
     "tests/test_parked_queued_resume.mjs": {
       "cases": [

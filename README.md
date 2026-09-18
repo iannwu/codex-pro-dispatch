@@ -173,6 +173,8 @@ For help, follow [SUPPORT.md](SUPPORT.md). Share redacted version and capability
 
 ## Verification and privacy
 
+`submission_count: 0` means no verified outbound read-back was recorded, not proof that no native send occurred; a verified delivery can be `submitted` while result observation remains `pending`.
+
 v1.3.0 adds the resident Claude client, one or two configured workers, and deterministic prompt-admission checks. Automated suites and bounded live native qualification passed. Read the [release receipt](docs/releases/v1.3.0-acceptance.md) for the evidence and limits.
 
 The plugin checks the answer it reads from the app’s native history, reported as `bounded_native_summary` verification. It cannot prove that this is an exact copy of the original response or independently establish that ChatGPT has finished generating. Reported repository changes require separate commit verification.
