@@ -52,7 +52,7 @@ codex plugin add codex-pro-dispatch@codex-pro-dispatch
 
 You need macOS, Python 3.9 or newer, Git, and a Codex CLI with plugin support. No extra Python packages are required. The workflow runs inside the official ChatGPT desktop app for macOS with Codex. The CLI installs the plugin; it cannot run the dispatch workflow on its own.
 
-This pins v1.3.1. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.3.0-acceptance.md).
+This pins v1.3.1. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md), the [native acceptance matrix](docs/acceptance.md), and the [v1.3.1 release receipt](docs/releases/v1.3.1-acceptance.md).
 
 Restart the desktop app if the plugin does not appear.
 
@@ -89,11 +89,22 @@ the resident listener owned by Codex. If no listener is ready, it returns the
 documented Codex setup prompt. Registration does not start a listener, grant
 shell permission, or authorize a send. See the [Claude client guide](skills/codex-pro-dispatch/references/claude-client.md).
 
+`./install.sh` links the helper and global skill, but does not install the
+required Stop hook. To run a resident listener from source, use the source
+checkout as the Listener project and review and trust its `.codex/hooks.json`.
+The global source-skill link alone cannot qualify resident service. The packaged
+plugin includes its own hook for plugin use.
+
 Resident service keeps a dedicated Codex task turn active until shutdown. Codex
 shares the session details once, then automatically waits on the original serve
 execution. No periodic confirmation is needed. A completed owner turn or a
 detached cell is not an available listener; app closure and host cancellation
 are not supported availability guarantees.
+
+Before a resident listener starts, the installed synchronous Stop hook and the
+Listener task's executor and continuation are qualified in one no-dispatch
+check. This keeps an owner from completing while active work still needs its
+original serve execution. A failed qualification leaves the listener unavailable.
 
 ## What happens
 
@@ -175,7 +186,7 @@ For help, follow [SUPPORT.md](SUPPORT.md). Share redacted version and capability
 
 `submission_count: 0` means no verified outbound read-back was recorded, not proof that no native send occurred; a verified delivery can be `submitted` while result observation remains `pending`.
 
-v1.3.0 adds the resident Claude client, one or two configured workers, and deterministic prompt-admission checks. Automated suites and bounded live native qualification passed. Read the [release receipt](docs/releases/v1.3.0-acceptance.md) for the evidence and limits.
+v1.3.1 adds a synchronous Stop-hook qualification and original-serve supervision for resident listeners. The release passed the live Claude-to-Listener acceptance check; see the [v1.3.1 release receipt](docs/releases/v1.3.1-acceptance.md). v1.3.0's resident client, configured worker pool, and deterministic prompt-admission checks remain documented in its [historical release receipt](docs/releases/v1.3.0-acceptance.md).
 
 The plugin checks the answer it reads from the app’s native history, reported as `bounded_native_summary` verification. It cannot prove that this is an exact copy of the original response or independently establish that ChatGPT has finished generating. Reported repository changes require separate commit verification.
 
