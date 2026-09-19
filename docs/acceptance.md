@@ -48,6 +48,12 @@ Expected:
 
 For resident candidates, use a disposable native session before any live send:
 
+- Before opening, run the one-time no-dispatch qualification in the Listener
+  task. Confirm the installed synchronous Stop hook blocks an attempted final
+  response while the original qualification cell is pending, and that the
+  Listener itself exposes the declared executor and continuation controls.
+  A missing hook, changed turn, or missing control must leave the listener
+  unavailable without creating admission or sending a request.
 - Await repeated idle admission observations in the same serving evaluation.
   Verify no independent waiting process, model turn, chat read or navigation.
 - Stop renewing admission while the native runtime remains alive. Verify that
@@ -56,6 +62,8 @@ For resident candidates, use a disposable native session before any live send:
 - Exercise cleanup while receive is waiting. Verify close finishes without a
   deadlock and preserves the observed-command and ready records.
 - Confirm an accepted slow request is not cancelled by the admission detector.
+- While a request is active, verify every yield waits on the original serve
+  cell and an attempted owner finalization remains blocked until joined cleanup.
 
 Record native-host results separately from synthetic tests. Nonrenewal does not
 prove host cancellation, kernel-loss cleanup or recovery after a laptop reboot.

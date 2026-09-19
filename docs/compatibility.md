@@ -21,6 +21,18 @@ The skill repeats this preflight on every invocation. `pro-dispatch doctor --nat
 
 The recovered workflow verifies bounded protocol envelopes in the returned history summary. It does not claim original source-byte integrity or authoritative generation finality. See the skill verification scope.
 
+## Resident listener qualification
+
+Resident availability has two additional native requirements. The installed
+project or plugin must provide its synchronous Stop hook, and the Listener task
+itself must expose the declared executor and continuation controls. A one-time,
+no-dispatch qualification verifies that the hook blocks finalization while the
+original qualification cell is pending. Only that task and turn may use the
+fresh qualification to open or start serving the listener. Retained post-arm
+continuation has separate checks. A missing hook, changed turn, or missing
+Listener control means resident service is unavailable; there is no fallback
+transport.
+
 ## Supported environment
 
 - macOS
@@ -43,6 +55,7 @@ The helper's deterministic state logic is tested on macOS and Linux, but Linux C
 
 | Skill version | App version | App build | macOS | Native matrix | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| 1.3.1 | 26.915.31029 | 9771 | 26.6.2 arm64 | Stop-hook qualification, original-serve supervision, one-send Claude dispatch, collection, acknowledgement, and post-request listener liveness passed | [Redacted release receipt](releases/v1.3.1-acceptance.md) |
 | 1.3.0 | 26.915.31029 | 9771 | 26.6.2 arm64 | One- and two-worker native dispatch, collection, acknowledgement, listener replacement, and collect-only recovery passed; automatic startup remains unsupported | [Redacted release receipt](releases/v1.3.0-acceptance.md) |
 | 1.3.0-rc.1 | Not qualified | Not qualified | Not qualified | Local unit, package, and admission gates passed; live native acceptance is pending the parent desktop task | [Redacted RC receipt](releases/v1.3.0-rc.1-acceptance.md) |
 | 1.2.2 | 26.901.41600 | 7982 | 26.6.2 | Recovery checks passed; maintainer accepted the disclosed, unverified clipboard check | [Redacted release receipt](releases/v1.2.2-acceptance.md) |
