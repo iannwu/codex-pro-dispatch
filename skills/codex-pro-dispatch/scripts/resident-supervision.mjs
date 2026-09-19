@@ -82,6 +82,40 @@ function location(paths, parent, turn) {
   const key = hash(parent + '\0' + turn);
   return {directory, challenge: join(directory, key + '.json'), observed: join(directory, key + '.observed.json')};
 }
+function terminalFiles(paths, owner, turn) {
+  const directory = join(paths.state_dir, 'resident-supervision');
+  const stem = owner.generation + '-' + owner.owner;
+  return {directory, pending: join(directory, 'pending-' + stem + '-' + hash(turn) + '.json'),
+    terminal: join(directory, 'terminal-' + stem + '.json')};
+}
+function terminalRecord(owner) {
+  return {version: 1, generation: owner.generation, owner: owner.owner,
+    parent: owner.parent, session: owner.session ?? null,
+    state: 'terminally_detached', send_authorized: false};
+}
+async function terminalStop(owner, status, event) {
+  if (!Number.isSafeInteger(owner.generation) || owner.generation < 1 ||
+      !id(owner.owner) || !id(owner.parent)) fail();
+  const files = terminalFiles(status.paths, owner, event.turn_id);
+  await fs.mkdir(files.directory, {mode: 0o700}).catch(error => { if (error.code !== 'EEXIST') throw error; });
+  await privateDirectory(files.directory);
+  const pending = {version: 1, generation: owner.generation, owner: owner.owner,
+    parent: owner.parent, turn: event.turn_id, ownerSha256: hash(JSON.stringify(owner)),
+    statusSha256: hash(JSON.stringify(status))};
+  try {
+    const observed = await json(files.pending);
+    if (!same(observed, pending)) fail();
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    await exclusive(files.pending, pending);
+    return false;
+  }
+  if (event.stop_hook_active !== true) return false;
+  await exclusive(files.terminal, terminalRecord(owner));
+  const current = await authority();
+  if (!same(current.owner, owner) || !same(current.status, status)) fail();
+  return true;
+}
 function nativeIdentity(meta, trusted) {
   const parent = meta?.threadId, turn = meta?.['x-codex-turn-metadata']?.turn_id;
   if (!id(parent) || !id(turn) || parent !== trusted.parent) fail();
@@ -334,7 +368,13 @@ export async function stopDecision(event) {
       return {}; // Finalization only; no admission, collection, or send authority.
     }
     if (owner.inflight != null || owner.slots?.some(slot => slot.request !== null || slot.invocation !== null) ||
-        status.active_assignment != null) return block(waitReason);
+        status.active_assignment != null || status.active_assignments?.length) {
+      // The host sets stop_hook_active only on a continuation created by this
+      // hook. Require one identical reentry before releasing the dead turn.
+      // The marker is supervision evidence only and grants no runtime action.
+      if (await terminalStop(owner, status, event)) return {};
+      return block(waitReason);
+    }
     const session = owner.session;
     if (!session) return block(waitReason);
     await privateDirectory(session.directory);
