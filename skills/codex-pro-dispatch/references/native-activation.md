@@ -44,11 +44,11 @@ without reconstructing it:
     node "$ACT" packet-call "$PACKET" serve "$PACKET_SHA256"
 
 Pass the returned short, opaque `arguments` unchanged to the declared executor.
-That bootstrap revalidates the pinned packet and loads the exact stage body
-inside the executor, so the model never transcribes the native call. The
-selector never evaluates code or provides a direct-native fallback. A missing
-stage, changed digest, truncated result, or unavailable executor ends the
-attempt.
+The selector materializes the digest-named stage in the packet's private
+directory. The bootstrap verifies and loads that exact file inside the executor,
+so the model never transcribes the native call. The selector never evaluates
+code or provides a direct-native fallback. A missing stage, changed digest,
+truncated result, or unavailable executor ends the attempt.
 
 
 ## Retained post-arm continuation after a turn ends
