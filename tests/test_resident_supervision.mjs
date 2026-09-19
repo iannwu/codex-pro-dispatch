@@ -71,6 +71,7 @@ async function fixture(t, active = true) {
       for (const entry of await fs.readdir(join(root, base), {recursive: true, withFileTypes: true})) {
         if (entry.isFile()) {
           const path = join(entry.parentPath, entry.name);
+          if (/\/resident-supervision\/(?:pending|terminal)-/.test(path)) continue;
           result[path.slice(root.length)] = sha(await fs.readFile(path));
         }
       }
@@ -85,22 +86,31 @@ async function fixture(t, active = true) {
   return {root, guard, trusted, authority, update, hook, snapshot, joined};
 }
 
-test('owner finalization is blocked after one successful send, preserving both requests', async t => {
+test('terminal serve-cell finalization is released on one unchanged reentry, preserving requests', async t => {
   const f = await fixture(t);
-  const before = await f.snapshot();
+  f.authority.status.active_assignments = [
+    {assignment_id: rid, status: 'submitted', no_resend: true, submission_count: 1},
+    {assignment_id: 'incident-unobserved-B', status: 'submitted', no_resend: true, submission_count: 1}
+  ];
+  await f.update();
   const nativeSendAttempts = 1; // The reproduced send has already returned.
   const decision = await f.hook();
   assert.equal(decision.decision, 'block');
+  assert.deepEqual(await f.hook({...event, stop_hook_active: true}), {});
+  assert.deepEqual(await f.hook({...event, stop_hook_active: true}), {});
   assert.match(decision.reason, /ORIGINAL/);
   assert.equal(nativeSendAttempts, 1);
-  assert.deepEqual(await f.snapshot(), before);
+  assert.equal(f.authority.owner.slots[0].phase, 'running');
+  assert.equal(f.authority.status.active_assignments.length, 2);
 });
 
-test('stop_hook_active is never an escape hatch', async t => {
+test('changed canonical state never qualifies a terminal reentry', async t => {
   const f = await fixture(t);
-  const before = await f.snapshot();
-  for (let i = 0; i < 3; i++) assert.equal((await f.hook({...event, stop_hook_active: true})).decision, 'block');
-  assert.deepEqual(await f.snapshot(), before);
+  assert.equal((await f.hook({...event, stop_hook_active: true})).decision, 'block');
+  f.authority.owner.slots[1].request = 'new-request';
+  f.authority.owner.slots[1].phase = 'reserved';
+  await f.update();
+  assert.equal((await f.hook({...event, stop_hook_active: true})).decision, 'block');
 });
 
 test('idle serving still blocks without its joined barrier', async t => {

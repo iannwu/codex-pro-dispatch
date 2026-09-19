@@ -255,6 +255,28 @@ def write(paths, locked, v):
     core.atomic_write_json(paths.state_dir / "resident-owner.json", v, _locked=locked)
 
 
+def supervision_state(paths, owner):
+    """Project read-only Stop supervision state for the current owner."""
+    if owner is None:
+        return "absent"
+    path = (paths.state_dir / "resident-supervision" /
+            f"terminal-{owner['generation']}-{owner['owner']}.json")
+    if not os.path.lexists(path):
+        return "active"
+    from .queue import read_private
+    try:
+        value = json.loads(read_private(path, limit=16384))
+    except (ValueError, UnicodeError, core.DispatchError, OSError) as exc:
+        raise core.StateError("Terminal resident supervision evidence is invalid") from exc
+    expected = {"version": 1, "generation": owner["generation"],
+                "owner": owner["owner"], "parent": owner["parent"],
+                "session": owner.get("session"), "state": "terminally_detached",
+                "send_authorized": False}
+    if value != expected:
+        raise core.StateError("Terminal resident supervision evidence differs")
+    return "terminally_detached"
+
+
 def _handoff_from_native(paths, credentials):
     """Internal commit used only by the native context gate, never a CLI action.
 
@@ -1807,7 +1829,10 @@ def control(action, credentials, paths=None):
         core.reservation_guard(paths, locked)
         v = read(paths, locked)
         if action == "inspect":
-            return {"ok": True, "owner": v}
+            return {"ok": True, "owner": v,
+                    "owner_state": supervision_state(paths, v)}
+        if supervision_state(paths, v) == "terminally_detached" and action != "recover-start":
+            raise core.StateError("Resident owner is terminally detached; explicit recovery required")
         if action == "claim-serve-existing":
             return claim_serve_existing(paths, locked, v, c)
         if action == "replace-unused-serving":

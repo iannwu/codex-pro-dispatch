@@ -134,6 +134,27 @@ class ResidentTests(unittest.TestCase):
             self.next()
         self.assertEqual(before, path.read_bytes())
 
+    def test_inspect_projects_terminal_detachment_without_changing_owner(self):
+        before = (self.paths.state_dir / "resident-owner.json").read_bytes()
+        self.assertEqual(self.call("inspect")["owner_state"], "active")
+        directory = self.paths.state_dir / "resident-supervision"
+        directory.mkdir(mode=0o700)
+        marker = directory / f"terminal-{self.c['generation']}-{self.c['owner']}.json"
+        marker.write_text(json.dumps({
+            "version": 1, "generation": self.c["generation"],
+            "owner": self.c["owner"], "parent": self.c["parent"],
+            "session": self.c.get("session"),
+            "state": "terminally_detached", "send_authorized": False,
+        }))
+        marker.chmod(0o600)
+        inspected = self.call("inspect")
+        self.assertEqual(inspected["owner_state"], "terminally_detached")
+        for key in ("generation", "owner", "parent", "session"):
+            self.assertEqual(inspected["owner"][key], self.c[key])
+        self.assertEqual(before, (self.paths.state_dir / "resident-owner.json").read_bytes())
+        with self.assertRaisesRegex(core.StateError, "terminally detached"):
+            self.call("check")
+
     def session_binding(self):
         directory = self.paths.state_dir.parent / "session"
         directory.mkdir(mode=0o700)
