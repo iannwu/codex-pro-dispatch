@@ -2,14 +2,18 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
-## Unreleased
+## [1.3.1] - 2026-09-18
 
-- Require a synchronous Codex Stop-hook qualification before fresh resident
-  activation and unused serve-existing recovery. The hook blocks the Listener
-  from finalizing while resident work is active, while the existing 60-second
-  owner-loss detector remains unchanged. Surface a durable native send
-  acknowledgment before readback without changing submission-count ownership
-  or permitting another send.
+### Fixed
+
+- Keep the resident Listener supervised while active work is running, so a
+  completed owner turn cannot strand an armed request.
+- Record verified outbound delivery before assistant completion, preserving
+  at-most-once recovery when readback arrives later.
+- Execute trusted activation stages from private, digest-verified files so the
+  listener cannot truncate or reconstruct worker bindings.
+- Release safe unbound collect-only ownership while preserving historical
+  request evidence and preventing a resend.
 
 ## [1.3.0] - 2026-09-18
 
