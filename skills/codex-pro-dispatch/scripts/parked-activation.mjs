@@ -1307,7 +1307,7 @@ const newline=code.indexOf("\n"),directive=code.startsWith("// @exec:")&&newline
 const bootstrap=directive+residentSurfaceGuard+`\nconst loaded=await tools.exec_command(${J({cmd:command,login:false,tty:false,
 yield_time_ms:30000,max_output_tokens:50000})});
 if(loaded.exit_code!==0||typeof loaded.output!=="string")throw Error("Pinned packet body unavailable"+(loaded.session_id?"; preserve helper session "+loaded.session_id:""));
-if(new TextEncoder().encode(loaded.output).length!==${expectedBytes}||!loaded.output.startsWith(${J(directive)}))
+if(unescape(encodeURIComponent(loaded.output)).length!==${expectedBytes}||!loaded.output.startsWith(${J(directive)}))
 throw Error("Pinned packet body differs");
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 await new AsyncFunction("tools","text",`+J('"use strict";\n')+`+loaded.output)(tools,text);`;
