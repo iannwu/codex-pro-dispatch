@@ -3,7 +3,7 @@ name: codex-pro-dispatch
 description: Set up or use codex-pro-dispatch for explicitly requested native ChatGPT consultation in a dedicated worker conversation, Claude client registration, or recovery. Not for ordinary local coding or implicit delegation.
 metadata:
   short-description: Explicit native ChatGPT dispatch
-  version: "1.3.0"
+  version: "1.3.1"
 ---
 
 # Codex Pro Dispatch

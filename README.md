@@ -41,18 +41,18 @@ extensions, Windows, or Linux.
 
 ## Install
 
-**Version: v1.3.0.**
+**Version: v1.3.1.**
 
 Run these commands in your terminal:
 
 ```bash
-codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.3.0
+codex plugin marketplace add iannwu/codex-pro-dispatch --ref v1.3.1
 codex plugin add codex-pro-dispatch@codex-pro-dispatch
 ```
 
 You need macOS, Python 3.9 or newer, Git, and a Codex CLI with plugin support. No extra Python packages are required. The workflow runs inside the official ChatGPT desktop app for macOS with Codex. The CLI installs the plugin; it cannot run the dispatch workflow on its own.
 
-This pins v1.3.0. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.3.0-acceptance.md).
+This pins v1.3.1. App updates can affect compatibility, so every invocation checks the required native controls before proceeding. See [compatibility](docs/compatibility.md) and the [release checks and limitations](docs/releases/v1.3.0-acceptance.md).
 
 Restart the desktop app if the plugin does not appear.
 
@@ -188,7 +188,7 @@ The workflow can use short-lived private files during collection. App and termin
 For source inspection or development, install a pinned checkout instead of the plugin package:
 
 ```bash
-git clone --branch v1.3.0 https://github.com/iannwu/codex-pro-dispatch.git
+git clone --branch v1.3.1 https://github.com/iannwu/codex-pro-dispatch.git
 cd codex-pro-dispatch
 ./install.sh
 ```
@@ -208,7 +208,7 @@ For a source installation, run `./uninstall.sh` from its checkout. Recovery reco
 
 ## Development and documentation
 
-This README describes the v1.3.0 workflow.
+This README describes the v1.3.1 workflow.
 
 - [Contributing](CONTRIBUTING.md): development and contribution guidance.
 - [Skill protocol](skills/codex-pro-dispatch/SKILL.md): dispatch, verification, and recovery rules.
