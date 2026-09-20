@@ -89,11 +89,12 @@ the resident listener owned by Codex. If no listener is ready, it returns the
 documented Codex setup prompt. Registration does not start a listener, grant
 shell permission, or authorize a send. See the [Claude client guide](skills/codex-pro-dispatch/references/claude-client.md).
 
-`./install.sh` links the helper and global skill, but does not install the
-required Stop hook. To run a resident listener from source, use the source
-checkout as the Listener project and review and trust its `.codex/hooks.json`.
-The global source-skill link alone cannot qualify resident service. The packaged
-plugin includes its own hook for plugin use.
+`./install.sh` links the helper and global skill and merges the required
+synchronous Stop hook into `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`).
+The hook pins the physical source-checkout `resident-supervision.mjs`; keep that
+checkout in place. After installation, fully restart the Codex desktop app,
+review and trust the hook with `/hooks`, and start a new Listener task before
+resident qualification. The packaged plugin continues to use its bundled hook.
 
 Resident service keeps a dedicated Codex task turn active until shutdown. Codex
 shares the session details once, then automatically waits on the original serve
@@ -204,7 +205,7 @@ cd codex-pro-dispatch
 ./install.sh
 ```
 
-This creates symlinks at `~/.local/bin/pro-dispatch` and `~/.agents/skills/codex-pro-dispatch`. Keep that checkout in place while installed. Add `~/.local/bin` to your `PATH` if needed. The installer does not use `sudo`, install dependencies, start a daemon, or launch at login.
+This creates symlinks at `~/.local/bin/pro-dispatch` and `~/.agents/skills/codex-pro-dispatch`, and safely adds one pinned synchronous Stop hook to `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`). Existing unrelated hooks are preserved. Malformed configuration or another resident-supervision hook causes installation to stop without replacing it. Keep that checkout in place while installed. Add `~/.local/bin` to your `PATH` if needed. Fully restart the Codex desktop app, review and trust the hook with `/hooks`, and start a new Listener task before qualification. The installer does not use `sudo`, install dependencies, start a daemon, or launch at login.
 
 To remove the plugin package while retaining recovery records:
 
@@ -215,7 +216,13 @@ codex plugin marketplace remove codex-pro-dispatch
 
 Source installations also expose `pro-dispatch recover '<assignment-id>'` for inspecting recovery state. Use the skill in the desktop app to collect the response and return to your task.
 
-For a source installation, run `./uninstall.sh` from its checkout. Recovery records are retained by default. `./uninstall.sh --purge-state` irreversibly deletes worker configuration and receipts, and is refused while an assignment remains unresolved.
+For a source installation, run `./uninstall.sh` from its checkout. It removes
+only the exact installed resident Stop handler and preserves unrelated hook
+configuration; malformed, changed, or ambiguous resident hook state is refused
+before installation links are removed. Recovery records are retained by
+default. `./uninstall.sh --purge-state` irreversibly deletes worker
+configuration and receipts, and is refused while an assignment remains
+unresolved.
 
 ## Development and documentation
 

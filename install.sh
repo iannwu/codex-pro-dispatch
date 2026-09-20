@@ -8,6 +8,8 @@ BIN_TARGET="${BIN_DIR}/pro-dispatch"
 SKILL_TARGET="${HOME}/.agents/skills/codex-pro-dispatch"
 EXPECTED_BIN="${ROOT}/bin/pro-dispatch"
 EXPECTED_SKILL="${ROOT}/skills/codex-pro-dispatch"
+HOOK_TARGET="${CODEX_HOME}/hooks.json"
+EXPECTED_SUPERVISOR="${EXPECTED_SKILL}/scripts/resident-supervision.mjs"
 LEGACY_SKILL_TARGET="${CODEX_HOME}/skills/codex-pro-dispatch"
 MIGRATE_LEGACY=false
 
@@ -94,6 +96,9 @@ for name in parked-runner.js parked-socket.mjs parked-client.mjs parked-activati
   fi
 done
 
+# Install one user-level hook so source installs work from any trusted project.
+python3 "${ROOT}/hooks/source-hook.py" install "$HOOK_TARGET" "$EXPECTED_SUPERVISOR"
+
 mkdir -p "$BIN_DIR" "${HOME}/.agents/skills"
 chmod +x "$EXPECTED_BIN"
 
@@ -107,8 +112,10 @@ fi
 echo "Installed source-visible links:"
 echo "  $BIN_TARGET -> $EXPECTED_BIN"
 echo "  $SKILL_TARGET -> $EXPECTED_SKILL"
+echo "  $HOOK_TARGET -> $EXPECTED_SUPERVISOR (synchronous Stop hook)"
 echo
 echo "No native session was started and no worker configuration was changed."
-echo "If skill discovery is unavailable, stop; do not restart the app."
+echo "Restart the Codex desktop app, review and trust the installed hook with /hooks,"
+echo "then start a new Listener task before resident qualification."
 echo "After native ownership and qualification gates pass, invoke explicitly:"
 echo "  \$codex-pro-dispatch"

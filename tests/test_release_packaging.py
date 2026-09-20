@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+ROOT_PAYLOAD = re.compile(r"\$\{ROOT\}/([A-Za-z0-9_./-]+)")
 
 
 @unittest.skipUnless(platform.system() == "Darwin", "macOS source installer")
@@ -47,6 +49,15 @@ class ReleasePackagingTests(unittest.TestCase):
             ROOT / "skills/codex-pro-dispatch",
             target / "skills/codex-pro-dispatch",
         )
+        (target / "hooks").mkdir()
+        shutil.copy2(ROOT / "hooks/source-hook.py", target / "hooks/source-hook.py")
+        referenced = {
+            relative
+            for script in ("install.sh", "uninstall.sh")
+            for relative in ROOT_PAYLOAD.findall((ROOT / script).read_text(encoding="utf-8"))
+        }
+        missing = sorted(relative for relative in referenced if not (target / relative).exists())
+        self.assertEqual(missing, [], f"fixture omits installer payload: {missing}")
         return target
 
     def process(self, arguments, body=""):

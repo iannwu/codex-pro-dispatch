@@ -8,6 +8,8 @@ SKILL_TARGET="${HOME}/.agents/skills/codex-pro-dispatch"
 LEGACY_SKILL_TARGET="${CODEX_HOME}/skills/codex-pro-dispatch"
 EXPECTED_BIN="${ROOT}/bin/pro-dispatch"
 EXPECTED_SKILL="${ROOT}/skills/codex-pro-dispatch"
+HOOK_TARGET="${CODEX_HOME}/hooks.json"
+EXPECTED_SUPERVISOR="${EXPECTED_SKILL}/scripts/resident-supervision.mjs"
 PURGE_STATE=false
 
 if [[ "${1:-}" == "--purge-state" ]]; then
@@ -45,6 +47,7 @@ remove_owned_link() {
 verify_owned_link "$BIN_TARGET" "$EXPECTED_BIN"
 verify_owned_link "$SKILL_TARGET" "$EXPECTED_SKILL"
 verify_owned_link "$LEGACY_SKILL_TARGET" "$EXPECTED_SKILL"
+python3 "${ROOT}/hooks/source-hook.py" check-remove "$HOOK_TARGET" "$EXPECTED_SUPERVISOR"
 
 if $PURGE_STATE; then
   if ! "$EXPECTED_BIN" purge --yes; then
@@ -53,6 +56,8 @@ if $PURGE_STATE; then
     exit 1
   fi
 fi
+
+python3 "${ROOT}/hooks/source-hook.py" remove "$HOOK_TARGET" "$EXPECTED_SUPERVISOR"
 
 remove_owned_link "$BIN_TARGET" "$EXPECTED_BIN"
 remove_owned_link "$SKILL_TARGET" "$EXPECTED_SKILL"
