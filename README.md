@@ -216,7 +216,13 @@ codex plugin marketplace remove codex-pro-dispatch
 
 Source installations also expose `pro-dispatch recover '<assignment-id>'` for inspecting recovery state. Use the skill in the desktop app to collect the response and return to your task.
 
-For a source installation, run `./uninstall.sh` from its checkout. Recovery records are retained by default. `./uninstall.sh --purge-state` irreversibly deletes worker configuration and receipts, and is refused while an assignment remains unresolved.
+For a source installation, run `./uninstall.sh` from its checkout. It removes
+only the exact installed resident Stop handler and preserves unrelated hook
+configuration; malformed, changed, or ambiguous resident hook state is refused
+before installation links are removed. Recovery records are retained by
+default. `./uninstall.sh --purge-state` irreversibly deletes worker
+configuration and receipts, and is refused while an assignment remains
+unresolved.
 
 ## Development and documentation
 
