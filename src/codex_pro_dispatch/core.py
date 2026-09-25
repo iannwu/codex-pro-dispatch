@@ -131,6 +131,7 @@ class WorkerPool:
     workers: tuple[WorkerPoolEntry, ...]
     legacy_worker_sha256: str | None
     file_sha256: str
+    authority_path: str | None = None
 
 
 # Both markers record that the user confirmed the intended worker conversation.
@@ -707,7 +708,7 @@ def save_worker(
     confirmation = "user-confirmed-worker" if confirm_worker else "user-confirmed-pro"
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
-        legacy_worker_mutation_guard(runtime)
+        legacy_worker_mutation_guard(runtime, _locked=locked)
         from .resident import guard
         guard(runtime, locked, configuration=True)
         current = active_assignment(runtime, _locked=locked)
@@ -867,7 +868,7 @@ def _pool_from_value(value: Mapping[str, Any], *, file_sha256: str) -> WorkerPoo
     )
 
 
-def _load_worker_pool_unlocked(runtime: RuntimePaths, *, _locked) -> WorkerPool:
+def _load_legacy_pool(runtime: RuntimePaths, *, _locked) -> WorkerPool:
     _locked.validate(runtime)
     raw = _authority_file_bytes(runtime.worker_pool_file)
     try:
@@ -886,23 +887,68 @@ def _load_worker_pool_unlocked(runtime: RuntimePaths, *, _locked) -> WorkerPool:
     return pool
 
 
+def authority_snapshot(paths: RuntimePaths, *, _locked):
+    """Decode one authority snapshot without recursive loaders or nested locks."""
+    _locked.validate(paths)
+    owner_path = paths.state_dir / "resident-owner.json"
+    owner = read_json(owner_path) if os.path.lexists(owner_path) else None
+    if owner is not None and (type(owner.get("version")) is not int
+                              or owner["version"] not in (1, 2, 3, 4)):
+        raise StateError("Unsupported resident owner; preserve evidence")
+    if owner is not None and owner["version"] == 4:
+        raw = owner.get("worker_pool_json")
+        if not isinstance(raw, str):
+            raise StateError("Missing embedded worker pool")
+        try:
+            payload = decode(raw.encode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("pool object required")
+            pool = _pool_from_value(payload, file_sha256=sha256_text(raw))
+        except (ValueError, UnicodeError, TypeError) as exc:
+            raise StateError("Invalid embedded worker pool") from exc
+        if pool.legacy_worker_sha256 != _sha256_authority_file(paths.worker_file):
+            raise StateError("Legacy worker migration witness changed")
+        qualification = owner.get("qualification")
+        if not isinstance(qualification, dict) or "pool_witness_sha256" not in qualification:
+            raise StateError("Missing listener migration witness")
+        witness = qualification["pool_witness_sha256"]
+        if witness != _sha256_authority_file(paths.worker_pool_file):
+            raise StateError("Legacy pool migration witness changed")
+    else:
+        pool = (_load_legacy_pool(paths, _locked=_locked)
+                if os.path.lexists(paths.worker_pool_file) else None)
+    if owner is not None and owner["version"] in (3, 4):
+        if pool is None:
+            raise StateError("Resident owner has no worker pool")
+        from .resident import validate_pool_owner
+        validate_pool_owner(owner, pool)
+    if pool is not None:
+        pool = WorkerPool(pool.workers, pool.legacy_worker_sha256, pool.file_sha256,
+                          str(owner_path if owner and owner["version"] == 4 else paths.worker_pool_file))
+    return owner, pool
+
+
+def _load_worker_pool_unlocked(runtime: RuntimePaths, *, _locked):
+    pool = authority_snapshot(runtime, _locked=_locked)[1]
+    if pool is None:
+        raise ConfigurationError(f"Missing worker pool: {runtime.worker_pool_file}")
+    return pool
+
+
 @_snapshot
 def load_worker_pool(paths: RuntimePaths | None = None, *, _locked=None) -> WorkerPool:
-    runtime = paths or default_paths()
-    if not os.path.lexists(runtime.worker_pool_file):
-        raise ConfigurationError(f"Missing worker pool: {runtime.worker_pool_file}")
-    return _load_worker_pool_unlocked(runtime, _locked=_locked)
+    return _load_worker_pool_unlocked(paths or default_paths(), _locked=_locked)
 
 
+@_snapshot
 def worker_pool_active(paths: RuntimePaths | None = None, *, _locked=None) -> bool:
-    runtime = paths or default_paths()
-    return os.path.lexists(runtime.worker_pool_file)
+    return authority_snapshot(paths or default_paths(), _locked=_locked)[1] is not None
 
 
 @_snapshot
 def configured_workers(paths: RuntimePaths | None = None, *, _locked=None) -> tuple[WorkerPoolEntry, ...]:
     runtime = paths or default_paths()
-    if os.path.lexists(runtime.worker_pool_file):
+    if worker_pool_active(runtime, _locked=_locked):
         return _load_worker_pool_unlocked(runtime, _locked=_locked).workers
     worker = load_worker(runtime, _locked=_locked)
     return (WorkerPoolEntry(
@@ -916,6 +962,7 @@ def configured_workers(paths: RuntimePaths | None = None, *, _locked=None) -> tu
 
 def worker_pool_payload(pool: WorkerPool) -> dict[str, Any]:
     return {
+        "authority_path": pool.authority_path,
         "schema_version": 1,
         "legacy_worker_sha256": pool.legacy_worker_sha256,
         "file_sha256": pool.file_sha256,
@@ -967,7 +1014,7 @@ def worker_pool_runtime_status(
     owner = resident.read(runtime, _locked)
     if owner is None:
         readiness = "enrollment_required"
-    elif owner.get("version") != 3:
+    elif owner.get("version") not in (3, 4):
         readiness = "legacy_owner_requires_explicit_migration"
     elif any(item["phase"] == "cancel_pending" for item in owner["slots"]):
         readiness = "takeover_settlement_required"
@@ -991,8 +1038,8 @@ def worker_pool_runtime_status(
     }
 
 
-def legacy_worker_mutation_guard(runtime: RuntimePaths) -> None:
-    if os.path.lexists(runtime.worker_pool_file):
+def legacy_worker_mutation_guard(runtime: RuntimePaths, *, _locked) -> None:
+    if worker_pool_active(runtime, _locked=_locked):
         raise StateError(
             "Worker pool is active; legacy scalar-worker mutation is fenced"
         )
@@ -1038,7 +1085,7 @@ def activate_worker_pool(
     from .native_storage import read_evidence
     with state_lock(runtime, token=_locked, create=False) as locked:
         reservation_guard(runtime, locked)
-        if os.path.lexists(runtime.worker_pool_file):
+        if worker_pool_active(runtime, _locked=locked):
             raise BusyError("Worker pool is already active; no rewrite is allowed")
         actual_legacy = _sha256_authority_file(runtime.worker_file)
         if actual_legacy != expected_legacy_sha256:
@@ -1088,7 +1135,7 @@ def activate_worker_pool(
         owner_path = runtime.state_dir / "resident-owner.json"
         if os.path.lexists(owner_path):
             owner = read_json(owner_path)
-            if owner.get("version") == 3:
+            if owner.get("version") in (3, 4):
                 raise StateError("Schema-3 resident owner requires the worker pool")
             if owner.get("version") in {1, 2} and (
                 owner.get("inflight") is not None
@@ -1231,7 +1278,7 @@ def active_assignments(paths: RuntimePaths | None = None,
         value for value in list_assignments(runtime, _locked=_locked)
         if value.get("status") in ACTIVE_STATUSES
     ]
-    if os.path.lexists(runtime.worker_pool_file):
+    if worker_pool_active(runtime, _locked=_locked):
         pool = _load_worker_pool_unlocked(runtime, _locked=_locked)
         configured = {worker.conversation_id: worker.slot for worker in pool.workers}
         seen_workers: set[str] = set()
@@ -1374,7 +1421,7 @@ def prepare_assignment(
         guard(runtime, locked, resolved_id)
         from . import resident
         caller = resident.invocation.get()
-        if os.path.lexists(runtime.worker_pool_file):
+        if worker_pool_active(runtime, _locked=locked):
             pool = _load_worker_pool_unlocked(runtime, _locked=locked)
             owner = resident.read(runtime, locked)
             selected = worker_config
@@ -1387,7 +1434,7 @@ def prepare_assignment(
             if worker_slot is not None and selected.slot != worker_slot:
                 raise StateError("Selected worker slot differs from the pool claim")
             worker = selected
-            if owner is not None and owner.get("version") == 3:
+            if owner is not None and owner.get("version") in (3, 4):
                 if (not isinstance(caller, dict) or caller.get("collector_only") is True
                         or (caller.get("takeover_settlement") is True
                             and resident.settlement_operation.get() != "prepare_cancel")):
@@ -1421,7 +1468,7 @@ def prepare_assignment(
             )
         existing_active = active_assignments(runtime, _locked=locked)
         if existing_active:
-            if not os.path.lexists(runtime.worker_pool_file) or any(
+            if not worker_pool_active(runtime, _locked=locked) or any(
                 value.get("worker_conversation_id") == worker.conversation_id
                 for value in existing_active
             ) or len(existing_active) >= 2:
@@ -1524,7 +1571,7 @@ def _transition(
                 details={"assignment_id": assignment_id, "status": current},
             )
         if target == "armed":
-            if os.path.lexists(runtime.worker_pool_file):
+            if worker_pool_active(runtime, _locked=locked):
                 raise StateError(
                     "Pool assignments require the slot-specific arm-for-send operation"
                 )
@@ -2175,7 +2222,7 @@ def reset_worker(
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
-        legacy_worker_mutation_guard(runtime)
+        legacy_worker_mutation_guard(runtime, _locked=locked)
         from .resident import guard
         guard(runtime, locked, configuration=True)
         if not force:
@@ -2202,7 +2249,7 @@ def purge_local_state(
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
-        legacy_worker_mutation_guard(runtime)
+        legacy_worker_mutation_guard(runtime, _locked=locked)
         from .resident import guard
         guard(runtime, locked, configuration=True)
         if os.path.lexists(runtime.state_dir / "queue"):

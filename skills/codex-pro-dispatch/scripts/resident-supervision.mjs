@@ -208,7 +208,7 @@ export async function waitSupervision(g, meta, trusted) {
 // active_assignment is also null when multiple assignments remain unresolved.
 function unboundOwner(owner, status) {
   const slots = owner.slots, pool = status.worker_pool, active = status.active_assignments;
-  return owner.version === 3 && owner.session === null && owner.inflight == null &&
+  return [3, 4].includes(owner.version) && owner.session === null && owner.inflight == null &&
     Number.isSafeInteger(owner.generation) && owner.generation > 0 &&
     id(owner.owner) && id(owner.parent) &&
     /^[a-f0-9]{64}$/.test(owner.worker_pool_sha256) &&

@@ -49,7 +49,7 @@ body.slice(0,newline+1)+residentSurfaceGuard+"\n"+body.slice(newline+1):resident
 // writes; neither verifies a model. The literals stay inline because several
 // gate functions are serialized into packets and cannot see module scope.
 const pins={
-"resident-supervision.mjs":"94050ac2d197da70a894dc2426d91432f5ae3eab55d0b6facf92806c6f80a084",
+"resident-supervision.mjs":"4bd9ec39192652374eeaf2634d5118caac464c3823a4e01a2aebbb2ed7e6a7be",
   "parked-runner.js":"071cee7b64b403484b053fc57e61731c359bd30e760941af99df5ed0f5382b07",
 "parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
 "parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
@@ -275,7 +275,7 @@ return JSON.stringify([v,a]);
 
 async function privateDirectory(path){
 const stat=await fs.lstat(path);
-if(await fs.realpath(path)!==path||!stat.isDirectory()||stat.uid!==process.getuid()||
+if(await fs.realpath(path)!==path||!stat.isDirectory()||stat.uid!==ownerUid||
 (stat.mode&0o077)!==0)throw Error("Physical owner-only client directory required");
 }
 
@@ -326,7 +326,16 @@ const startCredentials={...expected,owner:attempt,parent:trusted.parent};
 if(trusted.worker_pool_sha256){
 startCredentials.worker_pool_sha256=trusted.worker_pool_sha256;
 }else startCredentials.worker=trusted.worker;
-const acquired=await cli(["resident","start",J(startCredentials)]);
+let acquired;
+if(expected.startup_operation){
+const current=(await cli(["resident","inspect"])).owner;
+const startup=current?.qualification?.startup;
+if(current?.version!==4||current.session!==null||
+["generation","owner","parent","worker_pool_sha256"].some(k=>current[k]!==expected[k])||
+startup?.operation_id!==expected.startup_operation||startup.native_task!==meta.threadId||startup.native_turn!==turn)
+throw Error("Startup acquisition is stale");
+acquired={state:"ready",owner:(await cli(["resident","check",J(expected)])).owner};
+}else acquired=await cli(["resident","start",J(startCredentials)]);
 if(!["ready","collect_only"].includes(acquired.state))return acquired;
 const credentials=acquired.owner;
 // Replacement already excludes new reservations by the old generation.
@@ -493,7 +502,7 @@ async function handoffPacket(newParent){
 if(typeof newParent!=="string"||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(newParent))
 throw Error("Native replacement task ID required");
 const v=(await cli(["resident","inspect"])).owner;
-if(v?.version!==3||v.parent===newParent)throw Error("Different replacement task and schema-3 owner required");
+if(![3,4].includes(v?.version)||v.parent===newParent)throw Error("Different replacement task and schema-3 owner required");
 const expected={generation:v.generation,owner:v.owner,parent:v.parent,worker_pool_sha256:v.worker_pool_sha256,new_parent:newParent};
 const sourceHash=createHash("sha256").update(await fs.readFile(fileURLToPath(import.meta.url))).digest("hex");
 return {kind:"native_handoff_packet",sendAuthorized:false,calls:{handoff:buildHandoffCall(expected,sourceHash)}};
@@ -560,7 +569,7 @@ text(value(await tools.mcp__node_repl__js({code:commitCode,timeout_ms:60000,titl
 
 async function takeoverPacket(){
 const status=await cli(["status","--current"]),v=(await cli(["resident","inspect"])).owner;
-if(v?.version!==3)throw Error("Takeover requires a schema-3 resident owner");
+if(![3,4].includes(v?.version))throw Error("Takeover requires a schema-3 resident owner");
 const expected={generation:v.generation,owner:v.owner,parent:v.parent,worker_pool_sha256:v.worker_pool_sha256,
 configDir:status.paths?.config_dir,stateDir:status.paths?.state_dir};
 if(typeof expected.configDir!=="string"||typeof expected.stateDir!=="string")throw Error("Current status lacks canonical paths");
@@ -864,7 +873,81 @@ const body=servePool.toString().replace("createRunner(tools,text)","("+createRun
 return joinedServe(`const poolRecoveryPlan=${poolRecoveryPlan.toString()},recoverPoolRequests=${recoverPoolRequests.toString()};\nawait (${body})(tools,text,${J(trusted)},${J(parent)},${J(attempt)},${J(residentLifecycle)},undefined,poolRecoveryPlan,recoverPoolRequests);`,attempt);
 }
 
-async function poolResidentPacket(broker,parent,workers,root){
+export async function captureListenerStart(g,meta,plan,root){
+const parent=meta?.threadId,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(typeof parent!=="string"||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(parent)||
+typeof turn!=="string"||!turn||g.parkedOpenBusy)throw Error("identity_invalid");
+if(plan?.version!==1||!Array.isArray(plan.workers)||plan.workers.length<1||plan.workers.length>2)
+throw Error("Invalid listener plan");
+g.listenerStartup=Object.freeze({parent,turn,plan:J(plan),root});
+return {parent,workers:plan.workers.map(w=>w.conversation_id)};
+}
+
+export function validateListenerWorkers(plan,reads){
+if(!Array.isArray(reads)||reads.length!==plan.workers.length)throw Error("Worker identity read required");
+for(let i=0;i<reads.length;i++){
+const r=reads[i];
+if(r?.isError||r?.content?.length!==1||r.content[0]?.type!=="text")throw Error("Worker identity unavailable");
+let v;try{v=JSON.parse(r.content[0].text);}catch{throw Error("Worker identity unavailable");}
+if(v?.schemaVersion!==1||v.thread?.kind!=="chatgpt"||v.thread.id!==plan.workers[i].conversation_id||
+v.truncated===true||v.thread.truncated===true)throw Error("Worker identity differs");
+}
+}
+
+export async function commitListenerStart(g,meta,plan,reads){
+const saved=g.listenerStartup,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
+if(!saved||saved.parent!==meta?.threadId||saved.turn!==turn||saved.plan!==J(plan))throw Error("identity_invalid");
+validateListenerWorkers(plan,reads);
+await fs.mkdir(saved.root,{recursive:true,mode:448});
+await privateDirectory(saved.root);
+if(plan.same_workers&&plan.current_owner?.session){
+const ready=await residentStatus(plan.current_owner.session.directory);
+if(ready.admissionObserved===true)return {...ready,ok:true,state:"ready",send_authorized:false};
+}
+const code=`import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${J(join(dir,"../../../src"))})\nfrom codex_pro_dispatch import core,listener\np=json.load(sys.stdin)\npaths=core.RuntimePaths(Path(p['plan']['expected']['config_dir']),Path(p['plan']['expected']['state_dir']))\ntry:\n r=listener.commit(paths,p['plan'],p['parent'],p['turn'])\nexcept core.DispatchError as e:\n r={'ok':True,'state':'blocked','reason':str(e),'details':e.details,'send_authorized':False}\nprint(json.dumps(r))`;
+const result=await new Promise(resolve=>{
+const child=execFile("python3",["-c",code],{timeout:30000,maxBuffer:1048576},(error,out)=>{
+if(error){resolve({ok:false,state:"blocked",reason:"commit_unknown",send_authorized:false});return;}
+try{resolve(JSON.parse(out));}catch{resolve({ok:false,state:"blocked",reason:"commit_unknown",send_authorized:false});}
+});
+child.stdin.on("error",()=>resolve({ok:false,state:"blocked",reason:"commit_unknown",send_authorized:false}));
+child.stdin.end(J({plan,parent:saved.parent,turn:saved.turn}));
+});
+if(result.state!=="next_action")return {...result,next_action:
+result.state==="stale"?"Generate a fresh listener start packet from current authority":
+result.reason?.includes("legacy_exclusion_unknown")?"Restart the Mac, do not resume old listeners, then retry with the user's factual quiescence confirmation":
+result.reason?.includes("join_required")?"Gracefully stop the original serving cell and wait for its original continuation to record its join":
+result.reason?.includes("cooldown")?"Retry after the stored cooldown":
+result.reason?.includes("recovery")||result.reason?.includes("pool_not_idle")?"Use existing recovery for the named or occupied request, preserving its destination":
+"Preserve evidence and inspect the exact failed predicate; commit_unknown requires canonical operation inspection before retry"};
+if(result.owner.session!==null)return {...result,state:"blocked",reason:"bound_startup_requires_existing_context",next_action:"Inspect the original native open/serve context; never replay a consumed serve call"};
+const packet=await poolResidentPacket(saved.parent,saved.parent,plan.workers,saved.root,result);
+const directory=await fs.mkdtemp(saved.root.replace(/\/$/,"")+"/listener-start-");
+await fs.chmod(directory,448);
+const path=join(directory,"activation.json"),raw=Buffer.from(J(packet));
+const h=await fs.open(path,"wx",384);try{await h.writeFile(raw);await h.sync();}finally{await h.close();}
+return {...result,next_packet:path,next_packet_sha256:createHash("sha256").update(raw).digest("hex"),
+next_action:"Use packet-call qualify, complete the actual Stop roundtrip, then open and supervise the original serve cell. Ownership is not readiness."};
+}
+
+export async function listenerStartPacket(plan,root){
+const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
+const header=`const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
+const a=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});`;
+const capture=`{${header}console.log(JSON.stringify(await a.captureListenerStart(globalThis,nodeRepl.requestMeta,${J(plan)},${J(root)})));}`;
+const body=`function value(r){if(r?.isError||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Native startup failed");return JSON.parse(r.content[0].text);}
+const identity=value(await tools.mcp__node_repl__js(${J({code:capture,timeout_ms:60000,title:"Capture listener startup identity"})}));
+const reads=[];for(const id of identity.workers)reads.push(await tools.mcp__codex_app__read_thread({threadId:id,turnLimit:1,includeOutputs:false}));
+const commit='{'+${J(header)}+'console.log(JSON.stringify(await a.commitListenerStart(globalThis,nodeRepl.requestMeta,'+${J(J(plan))}+','+JSON.stringify(reads)+')));}';
+text(value(await tools.mcp__node_repl__js({code:commit,timeout_ms:60000,title:"Guarded listener startup"})));`;
+return {ok:true,kind:"native_listener_start_packet",state:"next_action",send_authorized:false,
+desired_ids:plan.workers.map(w=>w.conversation_id),current_owner:plan.current_owner,
+execution:residentExecution,calls:{start:guardResidentBody(body)},
+next_action:"Save this packet privately, extract start with packet-call and its raw SHA-256, and execute its arguments unchanged in the Listener task."};
+}
+
+async function poolResidentPacket(broker,parent,workers,root,acquired){
 if(broker!==parent||!validId(broker)||!Array.isArray(workers)||
 workers.length<1||workers.length>2||
 workers.some(worker=>!validId(typeof worker==="string"?worker:worker?.conversation_id)))
@@ -885,7 +968,7 @@ worker_pool_sha256:s.worker_pool.file_sha256,workerPoolSha256:s.worker_pool.file
 resident:true,maxConcurrentRequests:configured.length,
 leaseMs:null,idleMs:45000,replyMs:3900000,maxSnapshots:6,observationMs:50000,activeJobMs:3600000};
 const attempt=randomBytes(16).toString("hex"),expected={generation:ownership.owner?.generation??0,
-worker_pool_sha256:trusted.worker_pool_sha256};
+worker_pool_sha256:trusted.worker_pool_sha256,...(acquired?{...acquired.owner,startup_operation:acquired.operation_id}: {})};
 const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
 const open=`{
 const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
@@ -1275,7 +1358,7 @@ return buffer.subarray(0,used);
 }
 
 async function readResidentPacketStage(packetFile,stage,expectedPacketSha256){
-if(!["qualify","open","serve"].includes(stage)||
+if(!["start","qualify","open","serve"].includes(stage)||
 typeof expectedPacketSha256!=="string"||!/^[a-f0-9]{64}$/.test(expectedPacketSha256))
 throw Error("Invalid resident packet selector");
 const raw=await privateBytes(packetFile,1048576);
@@ -1286,7 +1369,7 @@ try{decoded=new TextDecoder("utf-8",{fatal:true}).decode(raw);}catch{throw Error
 let packet;
 try{packet=JSON.parse(decoded);}catch{throw Error("Invalid resident packet JSON");}
 const execution=packet?.execution;
-if(!["native_activation_packet","native_serve_existing_packet","native_post_arm_continuation_packet"].includes(packet?.kind)||
+if(!["native_listener_start_packet","native_activation_packet","native_serve_existing_packet","native_post_arm_continuation_packet"].includes(packet?.kind)||
 J(execution)!==J(residentExecution)||typeof packet.calls?.[stage]!=="string"||!packet.calls[stage])
 throw Error("Unsupported resident packet call");
 const code=packet.calls[stage],bytes=Buffer.from(code,"utf8");
@@ -1906,7 +1989,8 @@ return {commandReady:true,...value,meaning:"start one receive; not send permissi
 if(typeof process!=="undefined"&&process.argv[1]&&await fs.realpath(process.argv[1])===fileURLToPath(import.meta.url))try{
 const [action,...args]=process.argv.slice(2);
 let result;
-if(action==="packet"&&args.length===3) result=await packet(...args);
+if(action==="listener-start-packet"&&args.length===2) result=await listenerStartPacket(JSON.parse(args[0]),args[1]);
+else if(action==="packet"&&args.length===3) result=await packet(...args);
 else if(action==="packet-call"&&args.length===3)
 result=await readResidentPacketCall(args[0],args[1],args[2]);
 else if(action==="resident-packet"&&[3,4].includes(args.length))

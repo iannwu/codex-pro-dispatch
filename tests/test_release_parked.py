@@ -94,7 +94,7 @@ class ReleaseParkedTests(unittest.TestCase):
         package = ROOT / "src/codex_pro_dispatch"
         self.assertEqual(
             {p.relative_to(package).as_posix() for p in package.rglob("*.py")},
-            {"__init__.py", "cli.py", "core.py", "queue.py", "native_storage.py", "resident.py"},
+            {"__init__.py", "cli.py", "core.py", "queue.py", "native_storage.py", "resident.py", "listener.py"},
         )
         forbidden = {
             "native_client", "native_endpoint", "native_broker",

@@ -21,6 +21,12 @@ copy; it never activates a listener, grants permissions, or authorizes a send.
 
 ### Native Codex owner
 
+For "start listener", a replacement Listener task, or new worker conversations,
+use [listener-start.md](references/listener-start.md) first. `pro-dispatch listener
+start` generates the exact guarded native procedure. Let the runtime choose the
+transition; do not improvise owner recovery or edit pool files. This procedure
+takes precedence over the older same-pool setup and takeover recipes below.
+
 For standalone dispatch, recovery, or an explicitly authorized continuation, read [standalone-dispatch.md](references/standalone-dispatch.md) and [native-protocol.md](references/native-protocol.md)
 before acting. Repository work also requires [github-verification.md](references/github-verification.md).
 
@@ -33,7 +39,7 @@ Fresh resident activation and unused serve-existing require the installed synchr
 Before qualification, verify that the Listener task itself exposes the packet's declared `functions.exec` executor and `functions.wait` continuation. A coordinator having those tools does not qualify a delegated Listener turn. Missing tools mean `unsupported_listener_surface`: do not qualify, acquire a generation, open, or translate an outer packet body into direct `mcp__node_repl__js` calls. Save one packet privately and use `packet-call` with its raw SHA-256 when exact extraction is needed; pass its short opaque `arguments` unchanged to the declared executor. The bootstrap loads the exact pinned stage inside that executor, so the model does not transcribe its native body during activation.
 Explicit recover-start after physical-quiescence can fence a crash or reboot that left no graceful transport-audit, without treating absence as unsent. An explicit pool may use one or two conversations on one listener after live overlap qualification. Never replay consumed open/serve calls. Check `resident-status`, never race listeners.
 
-When the user asks a new task to replace the current resident listener owner, read [new-owner-handoff.md](references/new-owner-handoff.md). Use the installed `resident-takeover-packet` first: native identity plus one host-idle check fences
+For older same-pool recovery explicitly selected by the startup result, read [new-owner-handoff.md](references/new-owner-handoff.md). The installed `resident-takeover-packet` uses native identity plus one host-idle check to fence
 the old generation, cancels unarmed work, and preserves collect-only recovery. Relay is an optional fallback only for an active old task. Takeover is not readiness.
 
 ## Repository access through ChatGPT

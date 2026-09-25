@@ -41,6 +41,7 @@ from .core import (
     reset_worker,
     save_worker,
     worker_pool_payload,
+    worker_pool_active,
     worker_pool_runtime_status,
 )
 
@@ -100,6 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resident-invocation", type=json.loads,
                         help="Trusted runner invocation, not client request data")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    listener = subparsers.add_parser("listener", help="Generate guarded listener startup")
+    listener.add_argument("operation", choices=["start"])
+    listener.add_argument("--worker-1", required=True)
+    listener.add_argument("--worker-2")
+    listener.add_argument("--client-root", default=str(Path.home() / ".cpd-client"))
+    listener.add_argument("--confirm-quiescent", help="User's factual confirmation that old native execution terminated; never ordinary start authorization")
 
     resident = subparsers.add_parser("resident", help="Canonical resident ownership")
     resident.add_argument("operation", choices=["inspect", "enroll", "start", "check", "bind-session", "claim-serve-existing", "replace-unused-serving", "admit", "begin", "end", "collector-open", "collector-close", "recover-start", "serve-open", "rollback-check", "handoff", "settle"])
@@ -310,6 +318,16 @@ def worker_payload(worker: Any) -> dict[str, Any]:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     paths = default_paths()
+    if args.command == "listener":
+        from . import listener
+        import subprocess
+        packet = listener.plan(paths, [w for w in (args.worker_1, args.worker_2) if w], args.confirm_quiescent)
+        script = Path(__file__).resolve().parents[2] / "skills/codex-pro-dispatch/scripts/parked-activation.mjs"
+        result = subprocess.run(["node", str(script), "listener-start-packet", json.dumps(packet),
+                                 args.client_root], capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise StateError("Listener packet generation failed", details={"error": result.stderr[:2000]})
+        return json.loads(result.stdout)
 
     if args.command == "queue":
         from .queue import Queue, read_private
@@ -395,7 +413,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "ok": True,
                 "worker_pool": worker_pool_payload(pool),
                 "pool_status": worker_pool_runtime_status(pool, paths),
-                "path": str(paths.worker_pool_file),
+                "path": pool.authority_path or str(paths.worker_pool_file),
             }
         if not args.native_controls_confirmed:
             raise DispatchError(
@@ -440,7 +458,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     for worker in pool.workers
                 ],
             },
-            "path": str(paths.worker_pool_file),
+            "path": pool.authority_path or str(paths.worker_pool_file),
         }
 
     if args.command == "prepare":
@@ -565,7 +583,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # Omit history from the wire, not from integrity/ownership checks.
             try:
                 with state_lock(paths, create=False) as locked:
-                    pool = load_worker_pool(paths, _locked=locked) if paths.worker_pool_file.exists() else None
+                    pool = load_worker_pool(paths, _locked=locked) if worker_pool_active(paths, _locked=locked) else None
                     active_values = active_assignments(paths, _locked=locked)
                     value = {
                         "ok": True,
