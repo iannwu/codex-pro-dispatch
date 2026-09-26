@@ -68,10 +68,21 @@ def validate_pool_owner(v, pool):
     if v.get("version") == 4:
         expected |= {"worker_pool_json", "send_fence"}
         fence = v.get("send_fence")
-        if (not isinstance(fence, dict) or set(fence) != {"profile", "armed_since_barrier"}
-                or type(fence.get("profile")) is not int or fence["profile"] != 1
+        profile = fence.get("profile") if isinstance(fence, dict) else None
+        fields = {"profile", "armed_since_barrier"}
+        if profile == 2:
+            fields.add("unexcluded_workers")
+        if (not isinstance(fence, dict) or set(fence) != fields
+                or type(profile) is not int or profile not in (1, 2)
                 or type(fence.get("armed_since_barrier")) is not bool):
             raise core.StateError("Invalid listener send fence; preserve evidence")
+        if profile == 2:
+            workers = fence["unexcluded_workers"]
+            if (not isinstance(workers, list) or any(not isinstance(w, str) for w in workers)
+                    or workers != sorted(set(workers))):
+                raise core.StateError("Invalid exposed destination set; preserve evidence")
+            for worker in workers:
+                core.validate_identifier(worker, field="exposed_worker")
     if set(v) != expected or type(v.get("generation")) is not int or v["generation"] < 1:
         raise core.StateError("Invalid resident pool owner record; preserve it")
     for field in ("owner", "parent"):
@@ -258,7 +269,7 @@ def inspect_session_for_explicit_recovery(paths, owner, *, _locked):
     return "no_graceful_audit"
 
 
-def exclusion_proof(paths, locked, owner, physical=None):
+def exclusion_proof(paths, locked, owner, physical=None, target_workers=None):
     """One bounded lineage barrier. Terminal receipts are never execution joins."""
     locked.validate(paths)
     if physical is not None:
@@ -274,11 +285,29 @@ def exclusion_proof(paths, locked, owner, physical=None):
             raise core.StateError("Physical exclusion evidence differs from expected owner")
         if owner:
             inspect_session_for_explicit_recovery(paths, owner, _locked=locked)
-        return {"kind": "physical_quiescence", "evidence": physical}
-    if owner is None or owner.get("version") != 4:
+        return {"kind": "physical_quiescence", "evidence": physical, "unexcluded_workers": []}
+    if (owner is None or owner.get("version") != 4
+            or owner["send_fence"]["profile"] != 2):
         raise core.StateError("legacy_exclusion_unknown: restart the Mac, do not resume old listeners, then confirm the restart")
-    if owner["send_fence"]["armed_since_barrier"] is False:
-        return {"kind": "unused_profile_1"}
+    prior_workers = {slot["worker_conversation_id"] for slot in owner["slots"]}
+    targets = set(target_workers) if target_workers is not None else prior_workers
+    exposed = set(owner["send_fence"]["unexcluded_workers"])
+    joined = None
+    if owner["send_fence"]["armed_since_barrier"]:
+        try:
+            joined = original_join(paths, locked, owner)
+        except core.DispatchError:
+            # A missing or invalid join excludes nothing. Keep every destination.
+            exposed.update(prior_workers)
+    overlap = sorted(targets & exposed)
+    if overlap:
+        raise core.StateError("original_execution_join_required: destination_exposed; use fresh chats or physical recovery",
+                              details={"exposed_workers": overlap})
+    return {"kind": "original_execution_join" if joined else "destination_exclusion",
+            "unexcluded_workers": sorted(exposed), **({"joined": joined} if joined else {})}
+
+
+def original_join(paths, locked, owner):
     require_closed_session(paths, owner, _locked=locked)
     if owner.get("session") is None:
         raise core.StateError("original_execution_join_required")
@@ -298,7 +327,7 @@ def exclusion_proof(paths, locked, owner, physical=None):
             or audit.get("reason") != "resident_stopped"):
         raise core.StateError("original_execution_join_required")
     core.validate_identifier(joined["invocation"], field="invocation")
-    return {"kind": "original_execution_join", "joined": joined}
+    return joined
 
 
 def write(paths, locked, v, *, physical=None):
@@ -312,14 +341,26 @@ def write(paths, locked, v, *, physical=None):
         if rotation or not prior or prior.get("version") != 4:
             if prior and v.get("generation") != prior["generation"] + 1:
                 raise core.StateError("Listener rotation must advance exactly one generation")
-            barrier = exclusion_proof(paths, locked, prior, physical)
-            v["send_fence"] = {"profile": 1, "armed_since_barrier": False}
+            barrier = exclusion_proof(paths, locked, prior, physical,
+                                      [s["worker_conversation_id"] for s in v["slots"]])
+            v["send_fence"] = {"profile": 2, "armed_since_barrier": False,
+                               "unexcluded_workers": barrier["unexcluded_workers"]}
             v["qualification"] = dict(v["qualification"], last_exclusion=barrier)
         elif prior["send_fence"]["armed_since_barrier"] and not v["send_fence"]["armed_since_barrier"]:
             raise core.StateError("Listener send fence cannot be cleared without rotation")
+        if prior and not rotation:
+            if v["send_fence"].get("profile") != prior["send_fence"]["profile"]:
+                raise core.StateError("Send profile changes require physical migration")
+            if v["send_fence"].get("unexcluded_workers") != prior["send_fence"].get("unexcluded_workers"):
+                raise core.StateError("Exposed destinations cannot change without rotation")
+            if (prior["send_fence"]["armed_since_barrier"]
+                    and v.get("session") != prior.get("session")):
+                raise core.StateError("Armed session cannot be cleared or replaced within a generation")
         pool = core._pool_from_value(json.loads(v["worker_pool_json"]),
                                      file_sha256=core.sha256_text(v["worker_pool_json"]))
         validate_pool_owner(v, pool)
+        if len((json.dumps(v, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")) > 4 * 1024 * 1024:
+            raise core.StateError("Resident authority size limit reached; preserve exposed destinations and use physical recovery")
     core.atomic_write_json(path, v, _locked=locked)
 
 

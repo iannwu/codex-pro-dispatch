@@ -22,21 +22,30 @@ def snapshot(paths, locked):
     return owner, pool, expected
 
 
-def idle(paths, locked, owner):
+def idle_blockers(paths, locked, owner):
     if owner and owner.get("version") not in (3, 4):
         raise core.StateError("Scalar owner requires existing explicit migration")
+    blockers = []
     if owner and any(s["phase"] != "idle" or s["request"] is not None
                      or s["invocation"] is not None for s in owner["slots"]):
-        raise core.BusyError("pool_not_idle: use existing recovery for the occupied request")
+        blockers.append({"reason": "pool_not_idle", "next_action": "Use existing recovery for occupied slots"})
     claims = [r for r in Queue(paths).records(_locked=locked) if r["state"] == "claimed"]
     active = core.active_assignments(paths, _locked=locked)
-    if claims or active:
-        request = (claims[0]["request_id"] if claims else active[0]["assignment_id"])
-        raise core.BusyError("request_recovery_required", details={"request_id": request})
+    requests = sorted({r["request_id"] for r in claims} | {a["assignment_id"] for a in active})
+    if requests:
+        blockers.append({"reason": "request_recovery_required", "request_ids": requests,
+                         "next_action": "Use existing recovery for these exact requests"})
     if owner and resident._recovery_marker(paths, owner) is not None:
-        raise core.BusyError("recovery_owner_present: finish existing recovery")
+        blockers.append({"reason": "recovery_owner_present", "next_action": "Finish existing recovery"})
     if core.active_cooldown(paths, _locked=locked):
-        raise core.BusyError("cooldown: retry after the stored cooldown")
+        blockers.append({"reason": "cooldown", "next_action": "Retry after stored cooldown"})
+    return blockers
+
+
+def idle(paths, locked, owner):
+    blockers = idle_blockers(paths, locked, owner)
+    if blockers:
+        raise core.BusyError(blockers[0]["reason"], details={"blockers": blockers})
 
 
 def plan(paths, workers, confirmation=None):
@@ -63,7 +72,7 @@ def plan(paths, workers, confirmation=None):
                 "kind": "legacy_quiescence" if owner else "fresh_deployment",
                 "physical_quiescence": True, "expected_owner_sha256": expected["owner_sha256"],
                 "config_dir": str(paths.config_dir), "state_dir": str(paths.state_dir),
-                "implementation": "listener-start profile 1",
+                "implementation": "listener-start profile 2",
                 "observations": confirmation,
                 "authorization": "Explicit listener start with factual quiescence confirmation",
             }
@@ -99,9 +108,19 @@ def commit(paths, packet, parent, turn):
         if actual != expected:
             return {"ok": True, "state": "stale", "reason": "expected_state_changed",
                     "send_authorized": False}
-        idle(paths, locked, owner)
-        # Check before constructing authority. The writer independently checks again.
-        resident.exclusion_proof(paths, locked, owner, packet.get("physical"))
+        blockers = idle_blockers(paths, locked, owner)
+        proof_error = None
+        try:
+            resident.exclusion_proof(paths, locked, owner, packet.get("physical"),
+                                     [w.conversation_id for w in pool.workers])
+        except core.DispatchError as exc:
+            proof_error = exc
+            blockers.append({"reason": str(exc), "details": exc.details,
+                             "next_action": "Resolve earlier blockers first; then use fresh destinations or factual physical recovery as applicable"})
+        if blockers:
+            if len(blockers) == 1 and proof_error:
+                raise type(proof_error)(str(proof_error), details={"blockers": blockers})
+            raise core.BusyError(blockers[0]["reason"], details={"blockers": blockers})
         qualification = dict(owner["qualification"]) if owner else {}
         qualification.update(pool_witness_sha256=expected["pool_witness_sha256"], startup={
             "operation_id": operation, "predecessor": expected,
@@ -114,7 +133,7 @@ def commit(paths, packet, parent, turn):
                             "request": None, "invocation": None, "phase": "idle"}
                            for w in pool.workers],
                  "session": None, "qualification": qualification,
-                 "send_fence": {"profile": 1, "armed_since_barrier": False}}
+                 "send_fence": {"profile": 2, "armed_since_barrier": False, "unexcluded_workers": []}}
         qualification["startup"]["acquired"] = {k: value[k] for k in ("generation", "owner", "parent")}
         resident.write(paths, locked, value, physical=packet.get("physical"))
         return {"ok": True, "state": "next_action", "reason": "owner_acquired",

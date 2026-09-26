@@ -1041,7 +1041,7 @@ def worker_pool_runtime_status(
 def legacy_worker_mutation_guard(runtime: RuntimePaths, *, _locked) -> None:
     if worker_pool_active(runtime, _locked=_locked):
         raise StateError(
-            "Worker pool is active; legacy scalar-worker mutation is fenced"
+            "Worker pool is active; use listener start for destination changes"
         )
 
 
@@ -1086,7 +1086,7 @@ def activate_worker_pool(
     with state_lock(runtime, token=_locked, create=False) as locked:
         reservation_guard(runtime, locked)
         if worker_pool_active(runtime, _locked=locked):
-            raise BusyError("Worker pool is already active; no rewrite is allowed")
+            raise BusyError("Worker pool is already active; use listener start for destination changes")
         actual_legacy = _sha256_authority_file(runtime.worker_file)
         if actual_legacy != expected_legacy_sha256:
             raise StateError("Expected legacy worker hash differs; activation writes nothing")

@@ -138,7 +138,7 @@ class ListenerStartTests(unittest.TestCase):
             v = resident.read(self.paths, locked)
             v["send_fence"]["armed_since_barrier"] = True
             resident.write(self.paths, locked, v)
-        p = listener.plan(self.paths, ["new-01"])
+        p = listener.plan(self.paths, ["worker-a"])
         with self.assertRaisesRegex(core.StateError, "join_required"):
             listener.commit(self.paths, p, "replacement", "turn")
 
@@ -199,7 +199,7 @@ class ListenerStartTests(unittest.TestCase):
         path = directory / "resident-joined.json"
         path.write_text(json.dumps(dict(joined, generation=old["generation"]-1)))
         path.chmod(0o600)
-        p = listener.plan(self.paths, ["new-01"])
+        p = listener.plan(self.paths, ["worker-a"])
         before = self.snapshot()
         with self.assertRaisesRegex(core.StateError, "join_required"):
             listener.commit(self.paths, p, "replacement", "turn")
@@ -209,6 +209,9 @@ class ListenerStartTests(unittest.TestCase):
         self.assertEqual(result["owner"]["generation"], old["generation"]+1)
         self.assertFalse(self.owner()["send_fence"]["armed_since_barrier"])
         self.assertEqual(json.loads(path.read_text()), joined)
+        listener.commit(self.paths, listener.plan(self.paths, ["new-01"]), "third", "turn")
+        listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "fourth", "turn")
+        self.assertEqual(self.owner()["send_fence"]["unexcluded_workers"], [])
 
     def test_old_startup_operation_is_not_reusable_after_another_rotation(self):
         self.fresh()
@@ -218,3 +221,88 @@ class ListenerStartTests(unittest.TestCase):
         before = self.snapshot()
         self.assertEqual(listener.commit(self.paths, p, "replacement", "turn")["state"], "stale")
         self.assertEqual(before, self.snapshot())
+
+    def test_disjoint_replacement_carries_exposure_and_blocks_later_reuse(self):
+        old = self.fresh()
+        with core.state_lock(self.paths) as locked:
+            v = resident.read(self.paths, locked)
+            v["send_fence"]["armed_since_barrier"] = True
+            resident.write(self.paths, locked, v)
+        listener.commit(self.paths, listener.plan(self.paths, ["new-01"]), "p2", "t2")
+        self.assertEqual(self.owner()["send_fence"], {
+            "profile": 2, "armed_since_barrier": False,
+            "unexcluded_workers": ["worker-a", "worker-b"]})
+        listener.commit(self.paths, listener.plan(self.paths, ["new-02"]), "p3", "t3")
+        before = self.snapshot()
+        with self.assertRaisesRegex(core.StateError, "destination_exposed"):
+            listener.commit(self.paths, listener.plan(self.paths, ["worker-a"]), "p4", "t4")
+        self.assertEqual(before, self.snapshot())
+        with core.state_lock(self.paths) as locked:
+            v = resident.read(self.paths, locked)
+            v["send_fence"]["unexcluded_workers"] = []
+            with self.assertRaisesRegex(core.StateError, "cannot change"):
+                resident.write(self.paths, locked, v)
+        listener.commit(self.paths, listener.plan(self.paths, ["worker-a"], "Fixture all old executors terminated"), "p4", "t4")
+        self.assertEqual(self.owner()["send_fence"]["unexcluded_workers"], [])
+        with self.assertRaises(core.StateError): resident.control("check", old, self.paths)
+
+    def test_armed_session_cannot_be_detached_within_generation(self):
+        old = self.fresh()
+        self._bind_session(old)
+        with core.state_lock(self.paths) as locked:
+            v = resident.read(self.paths, locked)
+            v["send_fence"]["armed_since_barrier"] = True
+            resident.write(self.paths, locked, v)
+            v["session"] = None
+            with self.assertRaisesRegex(core.StateError, "Armed session"):
+                resident.write(self.paths, locked, v)
+
+    def test_profile_one_needs_physical_migration_even_if_unused(self):
+        self.fresh()
+        with core.state_lock(self.paths) as locked:
+            v = resident.read(self.paths, locked)
+            v["send_fence"] = {"profile": 1, "armed_since_barrier": False}
+            core.atomic_write_json(self.paths.state_dir / "resident-owner.json", v, _locked=locked)
+        with self.assertRaisesRegex(core.StateError, "legacy_exclusion_unknown"):
+            listener.commit(self.paths, listener.plan(self.paths, ["new"]), "p2", "t2")
+        listener.commit(self.paths, listener.plan(self.paths, ["new"], "Fixture terminated"), "p2", "t2")
+        self.assertEqual(self.owner()["send_fence"]["profile"], 2)
+
+    def test_reports_request_and_exclusion_blockers_without_mutation(self):
+        old = self.fresh()
+        q = Queue(self.paths)
+        q.submit("request", b"preserve", "client")
+        token = resident.invocation.set(dict(old, request="request", invocation="call"))
+        try:
+            q.claim("parent", True, "request")
+        finally:
+            resident.invocation.reset(token)
+        with core.state_lock(self.paths) as locked:
+            value = resident.read(self.paths, locked)
+            value["send_fence"]["armed_since_barrier"] = True
+            resident.write(self.paths, locked, value)
+        packet = listener.plan(self.paths, ["worker-a"])
+        before = self.snapshot()
+        with self.assertRaises(core.BusyError) as caught:
+            listener.commit(self.paths, packet, "replacement", "turn")
+        blockers = caught.exception.details["blockers"]
+        self.assertIn("request_recovery_required", [b["reason"] for b in blockers])
+        self.assertIn("destination_exposed", blockers[-1]["reason"])
+        self.assertEqual(before, self.snapshot())
+
+    def test_replaced_credentials_cannot_claim_submit_or_release(self):
+        old = self.fresh()
+        q = Queue(self.paths)
+        q.submit("request", b"preserve", "client")
+        listener.commit(self.paths, listener.plan(self.paths, ["new"]), "new-parent", "turn")
+        before = self.snapshot()
+        token = resident.invocation.set(dict(old, request="request", invocation="old-call"))
+        try:
+            for action in (lambda: q.claim("parent", True, "request"),
+                           lambda: core.mark_submitted("request", "late prompt", self.paths),
+                           lambda: q.release("request", "parent")):
+                with self.assertRaises(core.DispatchError):
+                    action()
+                self.assertEqual(before, self.snapshot())
+        finally:
+            resident.invocation.reset(token)

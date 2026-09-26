@@ -2,7 +2,10 @@
 
 Use this procedure when the user asks to start a listener, replace its task, or
 use new worker chats. It extends the existing skill; there is no separate daemon
-or scheduler. Never infer readiness from a successful ownership change.
+or scheduler. The user's start request authorizes the entire supported procedure
+and its bounded retries. Do not ask again whether to start or implement recovery.
+Ask only for genuinely ambiguous destinations or a missing physical fact.
+Never infer readiness from a successful ownership change.
 
 1. Resolve the physical installed `pro-dispatch` and sibling
    `parked-activation.mjs`. Confirm that `pro-dispatch listener start --help`
@@ -37,11 +40,16 @@ or scheduler. Never infer readiness from a successful ownership change.
    only when the current bound session has live admission. Report its capacity,
    session path, ordinal, and generated rendezvous command.
 
+Report all returned `details.blockers` together. Resolve request recovery and
+cooldown before asking for a physical action; a reboot must not reveal a known
+second blocker that could have been reported first.
+
 `ready` means the same selected pool already has an observed live admission
 waiter; do not acquire again. `stale` means regenerate from canonical state.
-`commit_unknown` means inspect the canonical startup operation before retrying
-the same packet in the same native turn. Retrying the same committed operation
-does not increment its generation. If a session is already bound, use the
+`commit_unknown` and `stale` both mean regenerate start once from canonical
+state. Stop on repeated uncertainty or contention. The same committed operation
+is idempotent in the same turn; a new turn can safely rotate an unused owner.
+If a session is already bound, use the
 existing native context and exact serve-existing eligibility; never invent a
 replacement for a lost acknowledgment.
 
@@ -62,9 +70,12 @@ is no reboot automation.
 
 For a schema-4 listener that has armed work, use the original generated graceful
 stop and wait for its original continuation to record the join. If that
-execution is inaccessible, physical termination is the fallback. A listener
-that has never armed since its proven barrier can be replaced without a host
-status guess. The runtime makes this decision.
+execution is inaccessible, physical termination is the fallback. Profile-2 listeners can also be replaced with disjoint fresh worker chats even
+when an old execution cannot be joined. The runtime retains every exposed old
+destination and rejects its later reuse without physical recovery. A valid join
+excludes only the current session, never earlier exposed destinations. The
+runtime makes this decision; do not compute or edit the set yourself. Legacy
+schema 3 and profile 1 require one physical migration before this policy applies.
 
 Destination changes require an idle pool. Unresolved work keeps its existing
 worker and no-resend status; use the named existing recovery action first.

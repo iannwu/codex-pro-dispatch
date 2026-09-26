@@ -907,16 +907,16 @@ if(ready.admissionObserved===true)return {...ready,ok:true,state:"ready",send_au
 const code=`import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${J(join(dir,"../../../src"))})\nfrom codex_pro_dispatch import core,listener\np=json.load(sys.stdin)\npaths=core.RuntimePaths(Path(p['plan']['expected']['config_dir']),Path(p['plan']['expected']['state_dir']))\ntry:\n r=listener.commit(paths,p['plan'],p['parent'],p['turn'])\nexcept core.DispatchError as e:\n r={'ok':True,'state':'blocked','reason':str(e),'details':e.details,'send_authorized':False}\nprint(json.dumps(r))`;
 const result=await new Promise(resolve=>{
 const child=execFile("python3",["-c",code],{timeout:30000,maxBuffer:1048576},(error,out)=>{
-if(error){resolve({ok:false,state:"blocked",reason:"commit_unknown",send_authorized:false});return;}
-try{resolve(JSON.parse(out));}catch{resolve({ok:false,state:"blocked",reason:"commit_unknown",send_authorized:false});}
+if(error){resolve({ok:false,state:"commit_unknown",reason:"commit_unknown",send_authorized:false});return;}
+try{resolve(JSON.parse(out));}catch{resolve({ok:false,state:"commit_unknown",reason:"commit_unknown",send_authorized:false});}
 });
-child.stdin.on("error",()=>resolve({ok:false,state:"blocked",reason:"commit_unknown",send_authorized:false}));
+child.stdin.on("error",()=>resolve({ok:false,state:"commit_unknown",reason:"commit_unknown",send_authorized:false}));
 child.stdin.end(J({plan,parent:saved.parent,turn:saved.turn}));
 });
 if(result.state!=="next_action")return {...result,next_action:
-result.state==="stale"?"Generate a fresh listener start packet from current authority":
+result.state==="stale"||result.state==="commit_unknown"?"Regenerate listener start once from canonical state; stop on a repeated stale or uncertain result. Existing authorization covers this retry":
 result.reason?.includes("legacy_exclusion_unknown")?"Restart the Mac, do not resume old listeners, then retry with the user's factual quiescence confirmation":
-result.reason?.includes("join_required")?"Gracefully stop the original serving cell and wait for its original continuation to record its join":
+result.reason?.includes("join_required")?"Use fresh worker chats, or gracefully stop and observe the original join; if inaccessible, use factual physical recovery":
 result.reason?.includes("cooldown")?"Retry after the stored cooldown":
 result.reason?.includes("recovery")||result.reason?.includes("pool_not_idle")?"Use existing recovery for the named or occupied request, preserving its destination":
 "Preserve evidence and inspect the exact failed predicate; commit_unknown requires canonical operation inspection before retry"};
