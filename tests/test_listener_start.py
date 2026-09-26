@@ -1,6 +1,8 @@
 """Real locked startup transactions in disposable authority, never production."""
 import copy
 import json
+import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 import unittest
@@ -306,3 +308,69 @@ class ListenerStartTests(unittest.TestCase):
                 self.assertEqual(before, self.snapshot())
         finally:
             resident.invocation.reset(token)
+
+    def reboot_fixture(self):
+        old, _ = self._enrolled_owner()
+        directory, binding = self._bind_session(old)
+        old = self.owner()
+        claim = {k: old[k] for k in ("generation", "owner", "parent", "session", "worker_pool_sha256")}
+        path = directory / "resident-serve-existing.json"
+        path.write_text(json.dumps(claim)); path.chmod(0o600)
+        return old, directory, time.time() + 600
+
+    def test_observed_reboot_migrates_disjoint_destinations_without_confirmation(self):
+        old, directory, boot = self.reboot_fixture()
+        packet = listener.plan(self.paths, ["fresh"])
+        before = self.snapshot()
+        with patch.object(resident, "machine_boot_time", return_value=boot):
+            result = listener.commit(self.paths, packet, "replacement", "turn")
+        owner = self.owner()
+        self.assertEqual(result["reason"], "owner_acquired")
+        self.assertEqual(owner["send_fence"]["unexcluded_workers"], ["worker-a", "worker-b"])
+        self.assertEqual(owner["qualification"]["last_exclusion"]["kind"], "machine_observed_reboot")
+        self.assertEqual(owner["qualification"]["last_exclusion"]["authorization"], "machine_observed:kern.boottime")
+        after = self.snapshot()
+        before.pop(str(self.paths.state_dir / "resident-owner.json"))
+        after.pop(str(self.paths.state_dir / "resident-owner.json"))
+        self.assertEqual(before, after)
+
+    def test_observed_reboot_rejects_overlap_new_evidence_and_unavailable_boot(self):
+        old, directory, boot = self.reboot_fixture()
+        with patch.object(resident, "machine_boot_time", return_value=boot):
+            with self.assertRaisesRegex(core.StateError, "legacy_exclusion_unknown"):
+                listener.commit(self.paths, listener.plan(self.paths, ["worker-a"]), "p2", "turn")
+        # Even a restored old mtime cannot erase this file's current ctime.
+        for path in [self.paths.state_dir / "resident-owner.json", *directory.rglob('*'), directory]:
+            os.utime(path, (1, 1))
+        before = self.snapshot()
+        for observed in (None, time.time() - 600, time.time() + 100):
+            with patch.object(resident, "machine_boot_time", return_value=observed):
+                with self.assertRaisesRegex(core.StateError, "legacy_exclusion_unknown"):
+                    listener.commit(self.paths, listener.plan(self.paths, ["fresh"]), "p2", "turn")
+        self.assertEqual(before, self.snapshot())
+        with patch.object(resident, "machine_boot_time", return_value=boot):
+            self.assertEqual(listener.commit(self.paths, listener.plan(self.paths, ["fresh"]), "p2", "turn")["reason"], "owner_acquired")
+
+    def test_observed_reboot_rejects_live_socket_or_wrong_consumed_claim(self):
+        old, directory, boot = self.reboot_fixture()
+        before = self.snapshot()
+        with patch.object(resident, "machine_boot_time", return_value=boot), \
+                patch.object(resident, "_unix_listener_is_live", return_value=True):
+            with self.assertRaisesRegex(core.StateError, "legacy_exclusion_unknown"):
+                listener.commit(self.paths, listener.plan(self.paths, ["fresh"]), "p2", "turn")
+        self.assertEqual(before, self.snapshot())
+        (directory / "resident-serve-existing.json").write_text('{}')
+        before = self.snapshot()
+        with patch.object(resident, "machine_boot_time", return_value=boot):
+            with self.assertRaisesRegex(core.StateError, "legacy_exclusion_unknown"):
+                listener.commit(self.paths, listener.plan(self.paths, ["fresh"]), "p2", "turn")
+        self.assertEqual(before, self.snapshot())
+
+    def test_observed_reboot_invalid_descriptor_preserves_fallback(self):
+        old, directory, boot = self.reboot_fixture()
+        (directory / "session.json").write_text('{}')
+        before = self.snapshot()
+        with patch.object(resident, "machine_boot_time", return_value=boot):
+            with self.assertRaisesRegex(core.StateError, "legacy_exclusion_unknown"):
+                listener.commit(self.paths, listener.plan(self.paths, ["fresh"]), "p2", "turn")
+        self.assertEqual(before, self.snapshot())

@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -269,6 +270,95 @@ def inspect_session_for_explicit_recovery(paths, owner, *, _locked):
     return "no_graceful_audit"
 
 
+def machine_boot_time():
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        class Timeval(ctypes.Structure):
+            _fields_ = [("sec", ctypes.c_long), ("usec", ctypes.c_int)]
+        value = Timeval()
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        read = ctypes.CDLL(None, use_errno=True).sysctlbyname
+        read.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                         ctypes.c_void_p, ctypes.c_size_t]
+        read.restype = ctypes.c_int
+        if read(b"kern.boottime", ctypes.byref(value), ctypes.byref(size), None, 0) == 0:
+            boot = value.sec + value.usec / 1000000
+            if size.value == ctypes.sizeof(value) and 0 <= value.usec < 1000000 and 0 < boot < time.time():
+                return boot
+    except (OSError, AttributeError):
+        pass
+    return None
+
+
+def observed_reboot(paths, locked, owner, target_workers):
+    """A consumed legacy session predating this OS boot cannot retain its VM."""
+    try:
+        return _observed_reboot(paths, locked, owner, target_workers)
+    except (core.DispatchError, OSError, ValueError, KeyError):
+        return None
+
+
+def _observed_reboot(paths, locked, owner, target_workers):
+    if not owner or owner.get("version") != 3:
+        return None
+    boot = machine_boot_time()
+    if boot is None:
+        return None
+    session, directory = _bound_session_location(owner)
+    if directory is None:
+        return None
+    _require_bound_descriptor(paths, owner, session, directory)
+    from .queue import read_private
+    expected = {key: owner[key] for key in
+                ("generation", "owner", "parent", "session", "worker_pool_sha256")}
+    try:
+        with core.Directory(paths.state_dir) as authority:
+            with os.fdopen(authority.open("resident-owner.json"), "rb") as source:
+                owner_info = os.fstat(source.fileno())
+                owner_raw = source.read(4 * 1024 * 1024 + 1)
+                if len(owner_raw) > 4 * 1024 * 1024 or json.loads(owner_raw) != owner:
+                    return None
+                after = os.fstat(source.fileno())
+                if (owner_info.st_mtime_ns, owner_info.st_ctime_ns, owner_info.st_size) != (
+                        after.st_mtime_ns, after.st_ctime_ns, after.st_size):
+                    return None
+        consumed = json.loads(read_private(directory / "resident-serve-existing.json", limit=16384))
+        if consumed != expected:
+            return None
+        pending = [(directory, 0)]
+        count = 0
+        latest = max(owner_info.st_mtime, owner_info.st_ctime)
+        while pending:
+            path, depth = pending.pop()
+            info = path.lstat()
+            count += 1
+            if (count > 256 or depth > 2 or info.st_uid != os.getuid()
+                    or stat.S_ISLNK(info.st_mode)):
+                return None
+            latest = max(latest, info.st_mtime, info.st_ctime)
+            if latest + 300 >= boot:
+                return None
+            if stat.S_ISDIR(info.st_mode):
+                for child in path.iterdir():
+                    if count + len(pending) >= 256:
+                        return None
+                    pending.append((child, depth + 1))
+        if _unix_listener_is_live(directory / "wake.sock"):
+            return None
+    except (OSError, ValueError):
+        return None
+    locked.validate(paths)
+    prior_workers = sorted(slot["worker_conversation_id"] for slot in owner["slots"])
+    if target_workers is None or set(target_workers) & set(prior_workers):
+        return None
+    return {"kind": "machine_observed_reboot", "boot_time_us": int(boot * 1000000),
+            "authorization": "machine_observed:kern.boottime",
+            "latest_evidence_change_us": int(latest * 1000000), "unexcluded_workers": prior_workers,
+            "owner_sha256": hashlib.sha256(owner_raw).hexdigest()}
+
+
 def exclusion_proof(paths, locked, owner, physical=None, target_workers=None):
     """One bounded lineage barrier. Terminal receipts are never execution joins."""
     locked.validate(paths)
@@ -288,6 +378,9 @@ def exclusion_proof(paths, locked, owner, physical=None, target_workers=None):
         return {"kind": "physical_quiescence", "evidence": physical, "unexcluded_workers": []}
     if (owner is None or owner.get("version") != 4
             or owner["send_fence"]["profile"] != 2):
+        reboot = observed_reboot(paths, locked, owner, target_workers)
+        if reboot is not None:
+            return reboot
         raise core.StateError("legacy_exclusion_unknown: restart the Mac, do not resume old listeners, then confirm the restart")
     prior_workers = {slot["worker_conversation_id"] for slot in owner["slots"]}
     targets = set(target_workers) if target_workers is not None else prior_workers

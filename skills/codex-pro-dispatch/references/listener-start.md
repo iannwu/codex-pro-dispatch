@@ -59,7 +59,17 @@ Schema-3 idle slots, task deletion, `notLoaded`, an error reading the task, a
 missing socket, a stopped transport, and ordinary start authorization are not
 proof that every earlier sender terminated. Do not ask to reopen a deleted task.
 
-For legacy unknown execution, the supported action is: restart the Mac, do not
+For a consumed legacy session, startup first checks the Mac's actual boot time
+under the canonical lock. If the owner and all retained session evidence predate
+that boot by at least five minutes (both modification and change timestamps), the exact
+consumed claim matches, and the socket is not live, startup can migrate to fresh
+destinations automatically. It records machine evidence, not user confirmation,
+and retains the old destinations as exposed. Let the runtime make this decision;
+do not add `--confirm-quiescent` or ask for another reboot when this check passes.
+This assumes ordinary system timekeeping. Large wall-clock corrections and
+administrative timestamp manipulation are outside this cooperative-storage proof.
+
+If legacy execution still cannot be excluded, the fallback is: restart the Mac, do not
 resume old listeners, then explicitly confirm that physical termination occurred.
 Only after the user supplies that fact may the next command include
 `--confirm-quiescent '<their factual observation>'`. The runtime binds this
@@ -75,7 +85,8 @@ when an old execution cannot be joined. The runtime retains every exposed old
 destination and rejects its later reuse without physical recovery. A valid join
 excludes only the current session, never earlier exposed destinations. The
 runtime makes this decision; do not compute or edit the set yourself. Legacy
-schema 3 and profile 1 require one physical migration before this policy applies.
+schema 3 and profile 1 require physical migration before this policy applies;
+schema 3 can use the machine-observed restart described above.
 
 Destination changes require an idle pool. Unresolved work keeps its existing
 worker and no-resend status; use the named existing recovery action first.
