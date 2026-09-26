@@ -49,7 +49,7 @@ body.slice(0,newline+1)+residentSurfaceGuard+"\n"+body.slice(newline+1):resident
 // writes; neither verifies a model. The literals stay inline because several
 // gate functions are serialized into packets and cannot see module scope.
 const pins={
-"resident-supervision.mjs":"4bd9ec39192652374eeaf2634d5118caac464c3823a4e01a2aebbb2ed7e6a7be",
+"resident-supervision.mjs":"6bffa061732fbd07bd04488100d2af4a1bf4653cb3854e6884f25966d30a206f",
   "parked-runner.js":"071cee7b64b403484b053fc57e61731c359bd30e760941af99df5ed0f5382b07",
 "parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
 "parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
