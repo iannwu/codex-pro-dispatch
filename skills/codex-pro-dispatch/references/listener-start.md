@@ -9,7 +9,15 @@ Never infer readiness from a successful ownership change.
 
 1. Resolve the physical installed `pro-dispatch` and sibling
    `parked-activation.mjs`. Confirm that `pro-dispatch listener start --help`
-   exists. An older installation needs this capability installed, not a manual
+   exists. Run `pro-dispatch listener check` from the Listener task working
+   directory and with its normal `CODEX_HOME` first. It asks Codex for the current
+   hook trust status without writing approvals or acquiring an owner. On macOS it
+   prefers the ChatGPT app bundled binary; use `--codex /absolute/path/to/codex`
+   for another Listener host. `listener start` repeats this check automatically.
+   `listener_hook_not_ready` requires the user to review the exact Stop hook in
+   `/hooks`; do not launch qualification or ask for a reboot. A passing check is
+   only configuration preflight, never live qualification or admission.
+   An older installation needs this capability installed, not a manual
    edit to its state.
 2. Discover the requested ChatGPT conversations with native task tools. Resolve
    titles to exact IDs. If titles are ambiguous, ask which ID. The user's chosen

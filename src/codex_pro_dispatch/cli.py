@@ -103,8 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     listener = subparsers.add_parser("listener", help="Generate guarded listener startup")
-    listener.add_argument("operation", choices=["start"])
-    listener.add_argument("--worker-1", required=True)
+    listener.add_argument("operation", choices=["start", "check"])
+    listener.add_argument("--worker-1")
+    listener.add_argument("--codex", help="Codex binary used by the Listener host for read-only hook discovery")
     listener.add_argument("--worker-2")
     listener.add_argument("--client-root", default=str(Path.home() / ".cpd-client"))
     listener.add_argument("--confirm-quiescent", help="User's factual confirmation that old native execution terminated; never ordinary start authorization")
@@ -319,8 +320,13 @@ def worker_payload(worker: Any) -> dict[str, Any]:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     paths = default_paths()
     if args.command == "listener":
-        from . import listener
+        from . import listener, hook_preflight
         import subprocess
+        if args.operation == "start" and not args.worker_1:
+            raise ConfigurationError("--worker-1 is required for listener start")
+        hook_status = hook_preflight.check(args.codex)
+        if args.operation == "check":
+            return hook_status
         packet = listener.plan(paths, [w for w in (args.worker_1, args.worker_2) if w], args.confirm_quiescent)
         script = Path(__file__).resolve().parents[2] / "skills/codex-pro-dispatch/scripts/parked-activation.mjs"
         result = subprocess.run(["node", str(script), "listener-start-packet", json.dumps(packet),

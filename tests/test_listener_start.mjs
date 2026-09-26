@@ -106,7 +106,7 @@ test('native task and turn, worker identity, and exact plan bind commit',async t
 
 test('CLI packet selects and executes startup across sorted serialization',async t=>{
  const f=await fixture(t);
- const raw=execFileSync('python3',[root+'bin/pro-dispatch','listener','start','--worker-1','new-01',
+ const raw=execFileSync('python3',[root+'bin/pro-dispatch','listener','start','--codex',root+'tests/fake_hook_codex.py','--worker-1','new-01',
   '--confirm-quiescent','Isolated fixture has no old executors'],{encoding:'utf8'});
  const p=JSON.parse(raw);assert.equal(p.kind,'native_listener_start_packet');
  assert.match(p.calls.start,/Activation pin changed/);
