@@ -1370,7 +1370,9 @@ let packet;
 try{packet=JSON.parse(decoded);}catch{throw Error("Invalid resident packet JSON");}
 const execution=packet?.execution;
 if(!["native_listener_start_packet","native_activation_packet","native_serve_existing_packet","native_post_arm_continuation_packet"].includes(packet?.kind)||
-J(execution)!==J(residentExecution)||typeof packet.calls?.[stage]!=="string"||!packet.calls[stage])
+!execution||Array.isArray(execution)||Object.keys(execution).length!==Object.keys(residentExecution).length||
+Object.entries(residentExecution).some(([key,value])=>!Object.hasOwn(execution,key)||execution[key]!==value)||
+typeof packet.calls?.[stage]!=="string"||!packet.calls[stage])
 throw Error("Unsupported resident packet call");
 const code=packet.calls[stage],bytes=Buffer.from(code,"utf8");
 return {code,bytes};

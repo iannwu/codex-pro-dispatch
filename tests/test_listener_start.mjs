@@ -104,10 +104,40 @@ test('native task and turn, worker identity, and exact plan bind commit',async t
  await assert.rejects(fs.stat(f.root+'/state/resident-owner.json'),{code:'ENOENT'});
 });
 
-test('CLI startup produces a source pinned packet without starting anything',async t=>{
+test('CLI packet selects and executes startup across sorted serialization',async t=>{
  const f=await fixture(t);
- const raw=execFileSync('python3',[root+'bin/pro-dispatch','listener','start','--worker-1','new-01'],{encoding:'utf8'});
+ const raw=execFileSync('python3',[root+'bin/pro-dispatch','listener','start','--worker-1','new-01',
+  '--confirm-quiescent','Isolated fixture has no old executors'],{encoding:'utf8'});
  const p=JSON.parse(raw);assert.equal(p.kind,'native_listener_start_packet');
  assert.match(p.calls.start,/Activation pin changed/);
+ const packetFile=f.root+'/cli-start.json';
+ await fs.writeFile(packetFile,raw,{mode:0o600});
+ const hash=createHash('sha256').update(raw).digest('hex');
+ const selected=JSON.parse(execFileSync('node',[root+'skills/codex-pro-dispatch/scripts/parked-activation.mjs',
+  'packet-call',packetFile,'start',hash],{encoding:'utf8'}));
+ assert.equal(selected.tool,'functions.exec');
+ assert.equal(selected.directNativeFallback,false);
  await assert.rejects(fs.stat(f.root+'/state/resident-owner.json'),{code:'ENOENT'});
+ const native=tools({}),out=[];
+ let loaderCalls=0;
+ native.exec_command=async({cmd})=>{
+  assert.equal(++loaderCalls,1);assert(cmd.includes(selected.stageFile));
+  return {exit_code:0,output:execFileSync('/bin/sh',['-c',cmd],{encoding:'utf8'})};
+ };
+ await new AF('tools','text',selected.arguments.code)(native,value=>out.push(value));
+ assert.equal(out[0].state,'next_action');
+ assert.equal(out[0].reason,'owner_acquired');
+ assert.equal(loaderCalls,1);
+ const reversed=JSON.stringify({...p,execution:Object.fromEntries(Object.entries(p.execution).reverse())});
+ await fs.writeFile(packetFile,reversed,{mode:0o600});
+ assert.equal((await a.readResidentPacketCall(packetFile,'start',createHash('sha256').update(reversed).digest('hex'))).tool,'functions.exec');
+ const swapped={...p.execution,continuation2:p.execution.continuation};delete swapped.continuation;
+ for(const execution of [{...p.execution,version:'1'},{...p.execution,extra:true},
+  {...p.execution,directNativeFallback:true},swapped,'abcde',5,null,[]]){
+  const changed=JSON.stringify({...p,execution});
+  await fs.writeFile(packetFile,changed,{mode:0o600});
+  await assert.rejects(a.readResidentPacketCall(packetFile,'start',createHash('sha256').update(changed).digest('hex')),
+   /Unsupported resident packet call/);
+ }
+ assert.equal(JSON.parse(await fs.readFile(f.root+'/state/resident-owner.json','utf8')).generation,1);
 });
