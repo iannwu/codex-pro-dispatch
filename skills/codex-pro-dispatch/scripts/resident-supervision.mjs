@@ -19,9 +19,16 @@ const fail = () => { throw Error('Resident supervision proof missing or changed;
 
 async function cli(args) {
   return await new Promise((resolve, reject) => {
-    execFile('python3', [helper, ...args], {timeout: 3000, maxBuffer: 1048576}, (error, out) => {
+    execFile('python3', [helper, ...args], {timeout: 3000, maxBuffer: 1048576}, (error, out, stderr) => {
       try {
-        if (error) throw Error('Canonical supervision read failed');
+        if (error) {
+          const diagnostic = {operation: args.join(' '), code: error.code ?? null,
+            signal: error.signal ?? null, killed: error.killed === true,
+            stderr: (stderr ?? '').slice(0, 2048)};
+          const failure = new Error('Canonical supervision read failed: ' + JSON.stringify(diagnostic), {cause: error});
+          failure.name = 'SupervisionReadError';
+          throw failure;
+        }
         const value = JSON.parse(out);
         if (value?.ok !== true) throw Error('Canonical supervision read rejected');
         resolve(value);
@@ -208,7 +215,7 @@ export async function waitSupervision(g, meta, trusted) {
 // active_assignment is also null when multiple assignments remain unresolved.
 function unboundOwner(owner, status) {
   const slots = owner.slots, pool = status.worker_pool, active = status.active_assignments;
-  return owner.version === 3 && owner.session === null && owner.inflight == null &&
+  return [3, 4].includes(owner.version) && owner.session === null && owner.inflight == null &&
     Number.isSafeInteger(owner.generation) && owner.generation > 0 &&
     id(owner.owner) && id(owner.parent) &&
     /^[a-f0-9]{64}$/.test(owner.worker_pool_sha256) &&
@@ -395,8 +402,9 @@ export async function stopDecision(event) {
     // A joined proof from a superseded generation cannot release another owner.
     if (!same((await cli(['resident', 'inspect'])).owner, owner)) fail();
     return {};
-  } catch {
-    return block(waitReason + ' Supervision evidence could not be verified.');
+  } catch (error) {
+    return block(waitReason + ' Supervision evidence could not be verified.' +
+      (error.name === 'SupervisionReadError' ? ' ' + error.message : ''));
   }
 }
 

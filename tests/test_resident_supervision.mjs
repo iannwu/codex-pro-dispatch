@@ -335,6 +335,37 @@ test('Stop guard never renews the original 60-second admission detector', async 
   await assert.rejects(native(g, meta, 'serve-root', 2, undefined, true), /ended or occupied/);
 });
 
+test('helper failure retains exit diagnostics and keeps Stop blocked without state writes', async t => {
+  const f = await fixture(t, false);
+  const before = await f.snapshot();
+  await fs.writeFile(join(f.root, 'skills/codex-pro-dispatch/scripts/pro-dispatch'),
+    'import sys\nsys.stderr.write("fixture read failure")\nsys.exit(23)\n');
+  await assert.rejects(f.guard.prepareSupervision({}, meta, f.trusted), error => {
+    assert.equal(error.name, 'SupervisionReadError');
+    assert.match(error.message, /"code":23/);
+    assert.match(error.message, /fixture read failure/);
+    assert.equal(error.cause.code, 23);
+    return true;
+  });
+  const decision = await f.hook();
+  assert.equal(decision.decision, 'block');
+  assert.match(decision.reason, /resident inspect/);
+  assert.match(decision.reason, /"code":23/);
+  assert.deepEqual(await f.snapshot(), before);
+});
+
+test('helper deadline retains termination diagnostics without granting availability', async t => {
+  const f = await fixture(t, false);
+  await fs.writeFile(join(f.root, 'skills/codex-pro-dispatch/scripts/pro-dispatch'),
+    'import time\ntime.sleep(10)\n');
+  await assert.rejects(f.guard.prepareSupervision({}, meta, f.trusted), error => {
+    assert.equal(error.name, 'SupervisionReadError');
+    assert.match(error.message, /"killed":true/);
+    assert.match(error.message, /"signal":"SIGTERM"/);
+    return true;
+  });
+});
+
 test('unconfigured ordinary tasks are not trapped when canonical owner is conclusively absent', async t => {
   const f = await fixture(t, false);
   f.authority.owner = null; f.authority.status = {ok: false}; await f.update();

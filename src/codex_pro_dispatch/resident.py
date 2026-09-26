@@ -8,6 +8,7 @@ import os
 import re
 import socket
 import stat
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -37,8 +38,8 @@ def read(paths, locked):
     if not os.path.lexists(path):
         return None
     v = core.read_json(path)
-    if v.get("version") == 3:
-        return _read_pool_owner(paths, locked, v)
+    if v.get("version") in (3, 4):
+        return core.authority_snapshot(paths, _locked=locked)[0]
     keys = {"version", "generation", "owner", "parent", "worker", "inflight", "qualification"}
     if (type(v.get("version")) is not int or v["version"] not in (1, 2)
             or set(v) != (keys | {"session"} if v["version"] == 2 else keys)
@@ -61,9 +62,28 @@ def read(paths, locked):
     return v
 
 
-def _read_pool_owner(paths, locked, v):
+def validate_pool_owner(v, pool):
+    """Pure schema validator. Never load authority or acquire a lock here."""
     expected = {"version", "generation", "owner", "parent", "worker_pool_sha256",
                 "slots", "session", "qualification"}
+    if v.get("version") == 4:
+        expected |= {"worker_pool_json", "send_fence"}
+        fence = v.get("send_fence")
+        profile = fence.get("profile") if isinstance(fence, dict) else None
+        fields = {"profile", "armed_since_barrier"}
+        if profile == 2:
+            fields.add("unexcluded_workers")
+        if (not isinstance(fence, dict) or set(fence) != fields
+                or type(profile) is not int or profile not in (1, 2)
+                or type(fence.get("armed_since_barrier")) is not bool):
+            raise core.StateError("Invalid listener send fence; preserve evidence")
+        if profile == 2:
+            workers = fence["unexcluded_workers"]
+            if (not isinstance(workers, list) or any(not isinstance(w, str) for w in workers)
+                    or workers != sorted(set(workers))):
+                raise core.StateError("Invalid exposed destination set; preserve evidence")
+            for worker in workers:
+                core.validate_identifier(worker, field="exposed_worker")
     if set(v) != expected or type(v.get("generation")) is not int or v["generation"] < 1:
         raise core.StateError("Invalid resident pool owner record; preserve it")
     for field in ("owner", "parent"):
@@ -71,7 +91,6 @@ def _read_pool_owner(paths, locked, v):
     if (not isinstance(v.get("worker_pool_sha256"), str)
             or not re.fullmatch(r"[0-9a-f]{64}", v["worker_pool_sha256"])):
         raise core.StateError("Invalid resident pool hash")
-    pool = core.load_worker_pool(paths, _locked=locked)
     if pool.file_sha256 != v["worker_pool_sha256"]:
         raise core.StateError("Resident pool hash differs")
     if not isinstance(v.get("qualification"), dict):
@@ -251,8 +270,191 @@ def inspect_session_for_explicit_recovery(paths, owner, *, _locked):
     return "no_graceful_audit"
 
 
-def write(paths, locked, v):
-    core.atomic_write_json(paths.state_dir / "resident-owner.json", v, _locked=locked)
+def machine_boot_time():
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        class Timeval(ctypes.Structure):
+            _fields_ = [("sec", ctypes.c_long), ("usec", ctypes.c_int)]
+        value = Timeval()
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        read = ctypes.CDLL(None, use_errno=True).sysctlbyname
+        read.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                         ctypes.c_void_p, ctypes.c_size_t]
+        read.restype = ctypes.c_int
+        if read(b"kern.boottime", ctypes.byref(value), ctypes.byref(size), None, 0) == 0:
+            boot = value.sec + value.usec / 1000000
+            if size.value == ctypes.sizeof(value) and 0 <= value.usec < 1000000 and 0 < boot < time.time():
+                return boot
+    except (OSError, AttributeError):
+        pass
+    return None
+
+
+def observed_reboot(paths, locked, owner, target_workers):
+    """A consumed legacy session predating this OS boot cannot retain its VM."""
+    try:
+        return _observed_reboot(paths, locked, owner, target_workers)
+    except (core.DispatchError, OSError, ValueError, KeyError):
+        return None
+
+
+def _observed_reboot(paths, locked, owner, target_workers):
+    if not owner or owner.get("version") != 3:
+        return None
+    boot = machine_boot_time()
+    if boot is None:
+        return None
+    session, directory = _bound_session_location(owner)
+    if directory is None:
+        return None
+    _require_bound_descriptor(paths, owner, session, directory)
+    from .queue import read_private
+    expected = {key: owner[key] for key in
+                ("generation", "owner", "parent", "session", "worker_pool_sha256")}
+    try:
+        with core.Directory(paths.state_dir) as authority:
+            with os.fdopen(authority.open("resident-owner.json"), "rb") as source:
+                owner_info = os.fstat(source.fileno())
+                owner_raw = source.read(4 * 1024 * 1024 + 1)
+                if len(owner_raw) > 4 * 1024 * 1024 or json.loads(owner_raw) != owner:
+                    return None
+                after = os.fstat(source.fileno())
+                if (owner_info.st_mtime_ns, owner_info.st_ctime_ns, owner_info.st_size) != (
+                        after.st_mtime_ns, after.st_ctime_ns, after.st_size):
+                    return None
+        consumed = json.loads(read_private(directory / "resident-serve-existing.json", limit=16384))
+        if consumed != expected:
+            return None
+        pending = [(directory, 0)]
+        count = 0
+        latest = max(owner_info.st_mtime, owner_info.st_ctime)
+        while pending:
+            path, depth = pending.pop()
+            info = path.lstat()
+            count += 1
+            if (count > 256 or depth > 2 or info.st_uid != os.getuid()
+                    or stat.S_ISLNK(info.st_mode)):
+                return None
+            latest = max(latest, info.st_mtime, info.st_ctime)
+            if latest + 300 >= boot:
+                return None
+            if stat.S_ISDIR(info.st_mode):
+                for child in path.iterdir():
+                    if count + len(pending) >= 256:
+                        return None
+                    pending.append((child, depth + 1))
+        if _unix_listener_is_live(directory / "wake.sock"):
+            return None
+    except (OSError, ValueError):
+        return None
+    locked.validate(paths)
+    prior_workers = sorted(slot["worker_conversation_id"] for slot in owner["slots"])
+    if target_workers is None or set(target_workers) & set(prior_workers):
+        return None
+    return {"kind": "machine_observed_reboot", "boot_time_us": int(boot * 1000000),
+            "authorization": "machine_observed:kern.boottime",
+            "latest_evidence_change_us": int(latest * 1000000), "unexcluded_workers": prior_workers,
+            "owner_sha256": hashlib.sha256(owner_raw).hexdigest()}
+
+
+def exclusion_proof(paths, locked, owner, physical=None, target_workers=None):
+    """One bounded lineage barrier. Terminal receipts are never execution joins."""
+    locked.validate(paths)
+    if physical is not None:
+        expected = hashlib.sha256(core._authority_file_bytes(
+            paths.state_dir / "resident-owner.json")).hexdigest() if owner else None
+        if (physical.get("expected_owner_sha256") != expected
+                or physical.get("physical_quiescence") is not True
+                or physical.get("kind") not in {"fresh_deployment", "legacy_quiescence"}
+                or physical.get("config_dir") != str(paths.config_dir)
+                or physical.get("state_dir") != str(paths.state_dir)
+                or any(not isinstance(physical.get(k), str) or not physical[k].strip()
+                       for k in ("implementation", "observations", "authorization"))):
+            raise core.StateError("Physical exclusion evidence differs from expected owner")
+        if owner:
+            inspect_session_for_explicit_recovery(paths, owner, _locked=locked)
+        return {"kind": "physical_quiescence", "evidence": physical, "unexcluded_workers": []}
+    if (owner is None or owner.get("version") != 4
+            or owner["send_fence"]["profile"] != 2):
+        reboot = observed_reboot(paths, locked, owner, target_workers)
+        if reboot is not None:
+            return reboot
+        raise core.StateError("legacy_exclusion_unknown: restart the Mac, do not resume old listeners, then confirm the restart")
+    prior_workers = {slot["worker_conversation_id"] for slot in owner["slots"]}
+    targets = set(target_workers) if target_workers is not None else prior_workers
+    exposed = set(owner["send_fence"]["unexcluded_workers"])
+    joined = None
+    if owner["send_fence"]["armed_since_barrier"]:
+        try:
+            joined = original_join(paths, locked, owner)
+        except core.DispatchError:
+            # A missing or invalid join excludes nothing. Keep every destination.
+            exposed.update(prior_workers)
+    overlap = sorted(targets & exposed)
+    if overlap:
+        raise core.StateError("original_execution_join_required: destination_exposed; use fresh chats or physical recovery",
+                              details={"exposed_workers": overlap})
+    return {"kind": "original_execution_join" if joined else "destination_exclusion",
+            "unexcluded_workers": sorted(exposed), **({"joined": joined} if joined else {})}
+
+
+def original_join(paths, locked, owner):
+    require_closed_session(paths, owner, _locked=locked)
+    if owner.get("session") is None:
+        raise core.StateError("original_execution_join_required")
+    from .queue import read_private
+    directory = Path(owner["session"]["directory"])
+    if any(directory.glob("waiting-*")):
+        raise core.StateError("original_execution_join_required")
+    try:
+        joined = json.loads(read_private(directory / "resident-joined.json", limit=16384))
+        audit = json.loads(read_private(directory / "transport-audit.json", limit=1048576))
+    except (OSError, ValueError) as exc:
+        raise core.StateError("original_execution_join_required") from exc
+    expected = {k: owner[k] for k in ("generation", "owner", "parent")}
+    expected["sessionId"] = owner["session"]["session_id"]
+    if (not isinstance(joined, dict) or set(joined) != set(expected) | {"invocation"}
+            or any(joined.get(k) != value for k, value in expected.items())
+            or audit.get("reason") != "resident_stopped"):
+        raise core.StateError("original_execution_join_required")
+    core.validate_identifier(joined["invocation"], field="invocation")
+    return joined
+
+
+def write(paths, locked, v, *, physical=None):
+    path = paths.state_dir / "resident-owner.json"
+    prior = read(paths, locked) if os.path.lexists(path) else None
+    rotation = prior is None or any(v.get(k) != prior.get(k)
+                                   for k in ("generation", "owner", "parent", "worker_pool_sha256"))
+    if prior and prior.get("version") == 4 and v.get("version") != 4:
+        raise core.StateError("Resident schema downgrade forbidden")
+    if v.get("version") == 4:
+        if rotation or not prior or prior.get("version") != 4:
+            if prior and v.get("generation") != prior["generation"] + 1:
+                raise core.StateError("Listener rotation must advance exactly one generation")
+            barrier = exclusion_proof(paths, locked, prior, physical,
+                                      [s["worker_conversation_id"] for s in v["slots"]])
+            v["send_fence"] = {"profile": 2, "armed_since_barrier": False,
+                               "unexcluded_workers": barrier["unexcluded_workers"]}
+            v["qualification"] = dict(v["qualification"], last_exclusion=barrier)
+        elif prior["send_fence"]["armed_since_barrier"] and not v["send_fence"]["armed_since_barrier"]:
+            raise core.StateError("Listener send fence cannot be cleared without rotation")
+        if prior and not rotation:
+            if v["send_fence"].get("profile") != prior["send_fence"]["profile"]:
+                raise core.StateError("Send profile changes require physical migration")
+            if v["send_fence"].get("unexcluded_workers") != prior["send_fence"].get("unexcluded_workers"):
+                raise core.StateError("Exposed destinations cannot change without rotation")
+            if (prior["send_fence"]["armed_since_barrier"]
+                    and v.get("session") != prior.get("session")):
+                raise core.StateError("Armed session cannot be cleared or replaced within a generation")
+        pool = core._pool_from_value(json.loads(v["worker_pool_json"]),
+                                     file_sha256=core.sha256_text(v["worker_pool_json"]))
+        validate_pool_owner(v, pool)
+        if len((json.dumps(v, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")) > 4 * 1024 * 1024:
+            raise core.StateError("Resident authority size limit reached; preserve exposed destinations and use physical recovery")
+    core.atomic_write_json(path, v, _locked=locked)
 
 
 def supervision_state(paths, owner):
@@ -290,7 +492,7 @@ def _handoff_from_native(paths, credentials):
 
 def _commit_handoff(paths, locked, v, credentials):
     """Commit a native-authorized rotation under the canonical owner lock."""
-    if v is None or v.get("version") != 3:
+    if v is None or v.get("version") not in (3, 4):
         raise core.StateError("Handoff requires a schema-3 resident owner")
     if type(credentials.get("generation")) is not int or not matches(v, credentials):
         raise core.StateError("Resident owner replaced")
@@ -558,7 +760,7 @@ def _takeover_from_native(paths, packet):
     with core.state_lock(paths, create=False) as locked:
         core.reservation_guard(paths, locked)
         v = read(paths, locked)
-        if v is None or v.get("version") != 3:
+        if v is None or v.get("version") not in (3, 4):
             return _takeover_result("schema_incompatible")
         if v["parent"] == replacement:
             return _takeover_result("already_owner", generation=v["generation"], parent=v["parent"],
@@ -645,7 +847,7 @@ def _takeover_from_native(paths, packet):
 def matches(v, credentials):
     if not isinstance(credentials, dict) or v is None:
         return False
-    if v.get("version") == 3:
+    if v.get("version") in (3, 4):
         return all(credentials.get(k) == v[k]
                    for k in ("generation", "owner", "parent", "worker_pool_sha256"))
     return all(credentials.get(k) == v[k]
@@ -721,17 +923,17 @@ def _settlement_binding(paths, locked, v, c, request, operation):
 
 
 def operational(v):
-    return {k: val for k, val in v.items() if k != "qualification"} if v else None
+    return {k: val for k, val in v.items() if k not in {"qualification", "worker_pool_json", "send_fence"}} if v else None
 
 
 def _pool_slot(v, slot):
-    if v is None or v.get("version") != 3:
+    if v is None or v.get("version") not in (3, 4):
         raise core.StateError("Resident pool ownership is not active")
     return next((item for item in v["slots"] if item["slot"] == slot), None)
 
 
 def is_collector_only(v, credentials=None):
-    if v is None or v.get("version") != 3:
+    if v is None or v.get("version") not in (3, 4):
         return False
     if isinstance(credentials, dict) and credentials.get("collector_only") is True:
         return True
@@ -742,7 +944,7 @@ def reserve_slot(paths, locked, slot, request, worker, generation):
     """Reserve a pool slot before publishing a claim, without releasing it."""
     v = read(paths, locked)
     c = invocation.get()
-    if v is None or v.get("version") != 3 or not matches(v, c):
+    if v is None or v.get("version") not in (3, 4) or not matches(v, c):
         raise core.StateError("Resident pool owner changed before slot reservation")
     if c.get("collector_only") is True or c.get("takeover_settlement") is True:
         raise core.StateError("Collector-only recovery cannot reserve a slot")
@@ -775,7 +977,7 @@ def mark_running(paths, locked, slot, request, generation, invocation_id):
     """Record that the reserved slot crossed the final arm fence."""
     v = read(paths, locked)
     c = invocation.get()
-    if (v is None or v.get("version") != 3 or not matches(v, c)
+    if (v is None or v.get("version") not in (3, 4) or not matches(v, c)
             or c.get("collector_only") is True or c.get("takeover_settlement") is True
             or c.get("generation") != generation
             or c.get("invocation") != invocation_id
@@ -789,6 +991,8 @@ def mark_running(paths, locked, slot, request, generation, invocation_id):
     if selected["phase"] != "reserved":
         raise core.StateError("Resident pool slot is not in the reserved phase")
     selected["phase"] = "running"
+    if v["version"] == 4:
+        v["send_fence"]["armed_since_barrier"] = True
     write(paths, locked, v)
 
 
@@ -812,7 +1016,7 @@ def _collector_mutex(paths, locked, credentials, request):
         raise core.StateError("Collector recovery owner differs")
     bound = False
     if current is not None and matches(current, credentials):
-        if current.get("version") == 3:
+        if current.get("version") in (3, 4):
             slot = next((item for item in current["slots"]
                          if item["request"] == request and item["phase"] == "collect_only"), None)
             bound = slot is not None
@@ -840,7 +1044,7 @@ def _collector_mutex(paths, locked, credentials, request):
     if (not isinstance(credentials, dict)
             or credentials.get("collector_only") is not True
             or credentials.get("takeover_settlement") is True
-            or (current.get("version") == 3 and credentials.get("request") != request) or not bound):
+            or (current.get("version") in (3, 4) and credentials.get("request") != request) or not bound):
         raise core.StateError("Collector-only recovery request is not bound")
 
 
@@ -881,7 +1085,7 @@ def collector_open(paths, locked, credentials):
 def recovery_start(paths, locked, credentials):
     """Fence an old local owner after explicit physical-quiescence evidence."""
     v = read(paths, locked)
-    if v is None or v.get("version") != 3:
+    if v is None or v.get("version") not in (3, 4):
         raise core.StateError("Pool recovery requires a schema-3 resident owner")
     if not matches(v, credentials):
         raise core.StateError("Resident owner replaced")
@@ -911,6 +1115,8 @@ def recovery_start(paths, locked, credentials):
         raise core.StateError("Recovery evidence is not bound to this authority")
     # Physical quiescence fences local continuation. Graceful audits stay
     # required when present; a missing audit is crash/reboot recovery, not unsent.
+    if v["version"] == 4:
+        exclusion_proof(paths, locked, v, proof)
     marker = _recovery_marker(paths, v)
     if marker is not None and marker[0] == "current":
         raise core.BusyError("A collector-only recovery owner already exists")
@@ -964,12 +1170,8 @@ def recovery_start(paths, locked, credentials):
             "reserved" if prepared or queued_unsent or claimed_before_receipt
             else "collect_only"
         )
-    replacement = dict(
-        version=3, generation=generation, owner=new_owner, parent=v["parent"],
-        worker_pool_sha256=v["worker_pool_sha256"], slots=slots, session=None,
-        qualification=v["qualification"],
-    )
-    write(paths, locked, replacement)
+    replacement = dict(v, generation=generation, owner=new_owner, slots=slots, session=None)
+    write(paths, locked, replacement, physical=proof if v["version"] == 4 else None)
     collect_ids, prepared_ids = _recovered_request_groups(slots)
     result = _pool_result(
         replacement,
@@ -1318,7 +1520,7 @@ def _recovery_marker(paths, v):
             or value["generation"] < 1
             or any(not isinstance(value.get(key), str) or not value[key]
                    for key in ("owner", "parent", "opened_at"))
-            or (v.get("version") == 3 and not isinstance(value.get("pool_sha256"), str))):
+            or (v.get("version") in (3, 4) and not isinstance(value.get("pool_sha256"), str))):
         raise core.StateError("request_evidence_invalid")
     if value["generation"] > v["generation"]:
         raise core.StateError("request_evidence_invalid")
@@ -1428,7 +1630,7 @@ def _pool_control(action, c, paths, locked, v):
         return _pool_result(value, "ready", "owner_enrolled")
     if v is None:
         return _pool_result(None, "blocked", "enrollment_required")
-    if v.get("version") != 3:
+    if v.get("version") not in (3, 4):
         return _pool_result(v, "blocked", "legacy_owner_requires_explicit_migration")
     if action == "settle":
         if not matches(v, c):
@@ -1668,7 +1870,7 @@ def guard(paths, locked, request=None, *, configuration=False, operation=None):
     c = invocation.get()
     if configuration:
         raise core.BusyError("Worker reconfiguration is unsupported while resident ownership is enrolled")
-    if v.get("version") == 3:
+    if v.get("version") in (3, 4):
         if not matches(v, c):
             # A recovery collector is a separate, explicitly opened mode. It
             # can publish existing post-arm work only and can never claim,
@@ -1734,7 +1936,7 @@ def claim_serve_existing(paths, locked, v, c, *, replace_unused=False):
     from .queue import Queue
     locked.validate(paths)
     fields = {"generation", "owner", "parent", "session",
-              "worker_pool_sha256" if v and v.get("version") == 3 else "worker"}
+              "worker_pool_sha256" if v and v.get("version") in (3, 4) else "worker"}
     if (set(c) != fields or type(c.get("generation")) is not int
             or not matches(v, c) or c.get("session") != v.get("session")):
         raise core.StateError("Serve-existing owner or session differs")
@@ -1839,7 +2041,7 @@ def control(action, credentials, paths=None):
             return claim_serve_existing(paths, locked, v, c, replace_unused=True)
         if action in {"handoff", "takeover"}:
             raise core.StateError("Handoff requires the native handoff packet; CLI credentials are not authorization")
-        if core.worker_pool_active(paths, _locked=locked) or (v and v.get("version") == 3):
+        if core.worker_pool_active(paths, _locked=locked) or (v and v.get("version") in (3, 4)):
             return _pool_control(action, c, paths, locked, v)
         for k in ("owner", "parent", "worker"):
             core.validate_identifier(c.get(k), field=k)
