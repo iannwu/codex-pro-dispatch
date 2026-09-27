@@ -42,6 +42,13 @@ def idle_blockers(paths, locked, owner):
     return blockers
 
 
+def startup_blockers(paths):
+    """Read canonical idle blockers together; never acquire a resident owner."""
+    with core.state_lock(paths) as locked:
+        owner, _, _ = snapshot(paths, locked)
+        return idle_blockers(paths, locked, owner)
+
+
 def idle(paths, locked, owner):
     blockers = idle_blockers(paths, locked, owner)
     if blockers:

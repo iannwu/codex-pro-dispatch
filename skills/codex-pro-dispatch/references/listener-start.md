@@ -9,16 +9,12 @@ Never infer readiness from a successful ownership change.
 
 1. Resolve the physical installed `pro-dispatch` and sibling
    `parked-activation.mjs`. Confirm that `pro-dispatch listener start --help`
-   exists. Run `pro-dispatch listener check` from the Listener task working
-   directory and with its normal `CODEX_HOME` first. It asks Codex for the current
-   hook trust status without writing approvals or acquiring an owner. On macOS it
-   prefers the ChatGPT app bundled binary; use `--codex /absolute/path/to/codex`
-   for another Listener host. `listener start` repeats this check automatically.
-   `listener_hook_not_ready` requires the user to review the exact Stop hook in
-   `/hooks`; do not launch qualification or ask for a reboot. A passing check is
-   only configuration preflight, never live qualification or admission.
-   An older installation needs this capability installed, not a manual
-   edit to its state.
+   exists. An older installation needs this capability installed, not a manual
+   edit to its state. Run from the Listener task's working directory and normal
+   `CODEX_HOME`. Startup runs its configuration diagnostic once; use
+   `pro-dispatch listener check` only for troubleshooting. The default host is
+   the bundled ChatGPT app binary. `--codex /absolute/path/to/codex` must name an
+   explicitly verified Listener host, never a guessed PATH alternative.
 2. Discover the requested ChatGPT conversations with native task tools. Resolve
    titles to exact IDs. If titles are ambiguous, ask which ID. The user's chosen
    conversation is confirmation of that destination, not verification of a model.
@@ -60,6 +56,35 @@ is idempotent in the same turn; a new turn can safely rotate an unused owner.
 If a session is already bound, use the
 existing native context and exact serve-existing eligibility; never invent a
 replacement for a lost acknowledgment.
+
+## Configuration diagnostic
+
+`hook_preflight` describes a fresh process reading configuration, not the
+running desktop host. Its `ready` state means configured only, never listener
+readiness. Real native Stop qualification and live admission remain mandatory.
+
+- `missing`: install the resident hook from the installed release.
+- `duplicate` or `wrong_definition`: repair the displayed definitions first.
+  Do not ask for trust approval to repair a structural error.
+- `disabled`: enable the exact resident hook in `/hooks`.
+- `untrusted` or `modified`: the user must review and trust its current definition
+  in `/hooks`. If also disabled, report both actions together. Never write the
+  trust hash or forge an observed Stop event.
+- `unverified`: preserve the diagnostic and continue the normal generated native
+  qualification. Discovery errors cannot authorize admission, but are not proof
+  of a denied hook. Do not guess a different binary or request trust without
+  evidence. There is no bypass flag for a known blocked configuration.
+
+Startup reports known hook and idle-pool blockers together before generating a
+packet. The native transaction still rechecks canonical authority under lock.
+After the user repairs configuration, regenerate the normal startup packet.
+If real qualification fails despite trusted configuration, retain its error and
+check host reload and Node resolution. Do not ask for the same trust again.
+A fresh turn is not proof the running host reloaded configuration. If reload is
+needed, the user must restart the app and open a new Listener task; never restart
+it automatically while other work may be active. Reinstallation preserves an
+unchanged hook definition. Script-content updates alone do not explain a changed
+hook definition hash; report the cause only when supported by evidence.
 
 ## Exclusion blockers
 

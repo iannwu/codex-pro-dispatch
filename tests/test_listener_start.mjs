@@ -104,11 +104,12 @@ test('native task and turn, worker identity, and exact plan bind commit',async t
  await assert.rejects(fs.stat(f.root+'/state/resident-owner.json'),{code:'ENOENT'});
 });
 
-test('CLI packet selects and executes startup across sorted serialization',async t=>{
+test('CLI unverified diagnostic still selects startup and requires qualification',async t=>{
  const f=await fixture(t);
  const raw=execFileSync('python3',[root+'bin/pro-dispatch','listener','start','--codex',root+'tests/fake_hook_codex.py','--worker-1','new-01',
-  '--confirm-quiescent','Isolated fixture has no old executors'],{encoding:'utf8'});
+  '--confirm-quiescent','Isolated fixture has no old executors'],{encoding:'utf8',env:{...process.env,CPD_TEST_MODE:'rpc_error'}});
  const p=JSON.parse(raw);assert.equal(p.kind,'native_listener_start_packet');
+ assert.equal(p.hook_preflight.state,'unverified');
  assert.match(p.calls.start,/Activation pin changed/);
  const packetFile=f.root+'/cli-start.json';
  await fs.writeFile(packetFile,raw,{mode:0o600});
@@ -127,6 +128,9 @@ test('CLI packet selects and executes startup across sorted serialization',async
  await new AF('tools','text',selected.arguments.code)(native,value=>out.push(value));
  assert.equal(out[0].state,'next_action');
  assert.equal(out[0].reason,'owner_acquired');
+ assert.match(out[0].next_action,/qualify/);
+ const activation=JSON.parse(await fs.readFile(out[0].next_packet,'utf8'));
+ assert(activation.calls.qualify);
  assert.equal(loaderCalls,1);
  const reversed=JSON.stringify({...p,execution:Object.fromEntries(Object.entries(p.execution).reverse())});
  await fs.writeFile(packetFile,reversed,{mode:0o600});

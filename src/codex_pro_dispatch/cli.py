@@ -327,13 +327,21 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         hook_status = hook_preflight.check(args.codex)
         if args.operation == "check":
             return hook_status
+        blockers = listener.startup_blockers(paths)
+        if hook_status['state'] == 'blocked':
+            blockers.insert(0, {'reason': 'listener_hook_' + hook_status['reason'],
+                                'actions': hook_status['actions']})
+        if blockers:
+            raise StateError('listener_start_blocked', details={'blockers': blockers, 'hook_preflight': hook_status})
         packet = listener.plan(paths, [w for w in (args.worker_1, args.worker_2) if w], args.confirm_quiescent)
         script = Path(__file__).resolve().parents[2] / "skills/codex-pro-dispatch/scripts/parked-activation.mjs"
         result = subprocess.run(["node", str(script), "listener-start-packet", json.dumps(packet),
                                  args.client_root], capture_output=True, text=True, timeout=30)
         if result.returncode:
             raise StateError("Listener packet generation failed", details={"error": result.stderr[:2000]})
-        return json.loads(result.stdout)
+        value = json.loads(result.stdout)
+        value['hook_preflight'] = hook_status
+        return value
 
     if args.command == "queue":
         from .queue import Queue, read_private
@@ -715,7 +723,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload = (control(args.operation, args.credentials) if args.command == "resident"
                    else run(args))
         emit(payload)
-        if args.command == "doctor" and not payload.get("ok", False):
+        if (args.command == "doctor" or (args.command == "listener" and args.operation == "check")) and not payload.get("ok", False):
             return 1
         return 0
     except DispatchError as exc:
