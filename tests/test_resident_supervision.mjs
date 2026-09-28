@@ -793,3 +793,93 @@ test('terminal receipt in a task that no longer owns authority does not trap it'
   f.authority.owner.parent = 'replacement-parent'; await f.update();
   assert.deepEqual(await f.hook(), {});
 });
+
+// App restart (2026-09-28): the owner was acquired and served in an earlier
+// turn of this task; these Stop events come from a later turn of the same task.
+function servedEarlier(f, servingTurn = 'serving-turn') {
+  const o = f.authority.owner;
+  o.qualification = {startup: {acquired: {generation: o.generation, owner: o.owner, parent: o.parent},
+    native_task: o.parent, native_turn: servingTurn, operation_id: 'c'.repeat(64)}};
+}
+const laterTurnMarkers = async f => (await fs.readdir(join(f.root, 'state/resident-supervision')).catch(() => []))
+  .filter(name => name.startsWith('other-turn-'));
+
+test('a later owner-task turn is asked once to recover, then released; the serving turn still blocks', async t => {
+  const f = await fixture(t, false);
+  servedEarlier(f); await f.update();
+  const before = await f.snapshot();
+  const prompt = await f.hook({...event, stop_hook_active: true});
+  assert.equal(prompt.decision, 'block');
+  assert.match(prompt.reason, /served by an earlier turn of this task/);
+  assert.match(prompt.reason, /\/references\/listener-start\.md /);
+  assert.doesNotMatch(prompt.reason, /ORIGINAL/);
+  assert.equal((await f.hook(event)).decision, 'block', 'only a hook continuation is released');
+  for (let i = 0; i < 2; i++) assert.deepEqual(await f.hook({...event, stop_hook_active: true}), {});
+  const after = await f.snapshot(), added = Object.keys(after).filter(path => !(path in before));
+  assert.deepEqual(added.map(path => path.replace(/-[a-f0-9]{64}\.json$/, '')),
+    ['/state/resident-supervision/other-turn-22-owner-22']);
+  for (const path of Object.keys(before)) assert.equal(after[path], before[path]);
+  // The turn that serves this owner keeps waiting on its original cell.
+  for (let i = 0; i < 2; i++)
+    assert.match((await f.hook({...event, turn_id: 'serving-turn', stop_hook_active: true})).reason, /ORIGINAL/);
+});
+
+test('after recovery in the same turn, the new owner keeps the original-cell rule', async t => {
+  const f = await fixture(t, false);
+  servedEarlier(f); await f.update();
+  assert.equal((await f.hook({...event, stop_hook_active: true})).decision, 'block');
+  Object.assign(f.authority.owner, {generation: 23, owner: 'owner-23'});
+  servedEarlier(f, turn); await f.update();
+  for (let i = 0; i < 2; i++)
+    assert.match((await f.hook({...event, stop_hook_active: true})).reason, /ORIGINAL/);
+  assert.equal((await laterTurnMarkers(f)).length, 1);
+});
+
+test('without a serving turn for the current owner, every turn keeps the original-cell rule', async t => {
+  for (const change of [o => { o.qualification = {}; },
+    o => { o.qualification.startup.acquired.generation = 21; },
+    o => { o.qualification.startup.native_task = 'other-task'; }]) {
+    const f = await fixture(t, false);
+    servedEarlier(f); change(f.authority.owner); await f.update();
+    for (let i = 0; i < 2; i++)
+      assert.match((await f.hook({...event, stop_hook_active: true})).reason, /ORIGINAL/);
+    assert.deepEqual(await laterTurnMarkers(f), []);
+  }
+});
+
+test('a later turn never asks to recover a joined listener or a busy owner', async t => {
+  const joined = await fixture(t, false);
+  servedEarlier(joined); await joined.update(); await joined.joined();
+  assert.deepEqual(await joined.hook(), {});
+  // Unresolved work keeps the existing one-reentry release and its requests.
+  const busy = await fixture(t);
+  servedEarlier(busy);
+  busy.authority.status.active_assignments = [{assignment_id: rid, status: 'submitted', no_resend: true, submission_count: 1}];
+  await busy.update();
+  assert.match((await busy.hook()).reason, /ORIGINAL/);
+  assert.deepEqual(await busy.hook({...event, stop_hook_active: true}), {});
+  assert.equal(busy.authority.owner.slots[0].phase, 'running');
+  for (const f of [joined, busy]) assert.deepEqual(await laterTurnMarkers(f), []);
+});
+
+test('a later turn is not released when the owner changes during the check', async t => {
+  const f = await fixture(t, false);
+  servedEarlier(f); await f.update();
+  await changeAfterFirstSnapshot(f, v => { v.owner.generation = 23; }, 3);
+  const decision = await f.hook({...event, stop_hook_active: true});
+  assert.equal(decision.decision, 'block');
+  assert.match(decision.reason, /could not be verified/);
+  assert.deepEqual(await laterTurnMarkers(f), []);
+});
+
+
+test('legacy serve-existing claims retain the original-cell rule in later turns', async t => {
+  for (const name of ['resident-serve-existing.json', 'resident-unused-replacement.json']) {
+    const f = await fixture(t, false);
+    servedEarlier(f); await f.update();
+    await save(join(f.root, 'session', name), {});
+    for (let i = 0; i < 2; i++)
+      assert.match((await f.hook({...event, stop_hook_active: true})).reason, /ORIGINAL/);
+    assert.deepEqual(await laterTurnMarkers(f), []);
+  }
+});

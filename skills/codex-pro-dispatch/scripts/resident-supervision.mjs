@@ -393,6 +393,38 @@ async function unboundStopProof(owner, status) {
 const block = reason => ({decision: 'block', reason});
 const waitReason = 'The resident owner has not joined. Use functions.wait on the ORIGINAL returned serve cell, not a new serve call. Never resend, reopen, reset receipts, clear locks, or renew admission from this hook. If the original execution is unavailable, preserve evidence and report the host limitation through commentary; owner-loss closure remains mandatory.';
 const terminalReason = 'Listener qualification ended without a Stop observation, and canonical authority or work no longer matches its terminal receipt. Preserve evidence. Do not reopen, resend, or retry qualification in this turn.';
+const recoveryReason = 'This listener was served by an earlier turn of this task, so functions.wait cannot continue that execution from this turn. Recover now: call functions.exec once with the unchanged Start code in ' +
+  join(dir, '../references/listener-start.md') + ' and follow only each output\'s action. The runtime fences the old owner generation before any new send, keeps unresolved requests and their no-resend state, and reports a blocker instead when replacement is unsafe. Do not edit state, pass flags, or wait on the old cell. After a stop action, report its result; this turn may then end.';
+
+// The supported startup opens and serves only in the turn that acquired the
+// owner (openResident and serve refuse any other turn). Owners acquired any
+// other way have no known serving turn and keep the original-cell rule.
+function servingTurn(owner) {
+  const startup = owner.qualification?.startup, acquired = startup?.acquired;
+  return acquired?.generation === owner.generation && acquired?.owner === owner.owner &&
+    acquired?.parent === owner.parent && startup.native_task === owner.parent &&
+    id(startup.native_turn) ? startup.native_turn : null;
+}
+// A task runs one turn at a time, so a Stop from another turn cannot keep the
+// serving turn's execution alive; blocking it forever only traps the task.
+// Block once per owner and turn to route recovery through the normal start,
+// whose locked generation rotation fences the old execution whether or not it
+// still exists, then release the reentry. The marker proves no termination
+// and grants no authority.
+async function otherTurnStop(owner, paths, event) {
+  const directory = join(paths.state_dir, 'resident-supervision');
+  const record = {version: 1, generation: owner.generation, owner: owner.owner, parent: owner.parent,
+    session: owner.session, turn: event.turn_id};
+  const marker = join(directory, 'other-turn-' + owner.generation + '-' + owner.owner + '-' + hash(JSON.stringify(record)) + '.json');
+  await fs.mkdir(directory, {mode: 0o700}).catch(error => { if (error.code !== 'EEXIST') throw error; });
+  await privateDirectory(directory);
+  let seen = true;
+  try { if (!same(await json(marker), record)) fail(); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; seen = false; }
+  if (!same((await cli(['resident', 'inspect'])).owner, owner)) fail();
+  if (!seen) { await exclusive(marker, record); return block(recoveryReason); }
+  return event.stop_hook_active === true ? {} : block(recoveryReason);
+}
 
 // A timed-out startup leaves its acquired, unbound owner recoverable. Release
 // the turn only while that exact acquisition is still current and fully idle;
@@ -411,6 +443,25 @@ async function terminalQualificationStop(owner, status, terminal) {
     cli(['resident', 'inspect']), cli(['status', '--current']), cli(['queue', 'status'])]);
   if (!same(current.owner, owner) || !same(currentStatus, status) || !same(currentQueue, queue)) fail();
   return {}; // Finalization only; the owner stays acquired and unqualified.
+}
+async function joinedProof(owner, status, session) {
+  await privateDirectory(session.directory);
+  const raw = await bytes(join(session.directory, 'session.json'));
+  const descriptor = JSON.parse(raw.toString('utf8'));
+  if (hash(raw) !== session.descriptor_sha256 || descriptor.sessionId !== session.session_id ||
+      descriptor.parent !== owner.parent || descriptor.configDir !== status.paths.config_dir ||
+      descriptor.stateDir !== status.paths.state_dir || descriptor.resident !== true) fail();
+  const joined = await json(join(session.directory, 'resident-joined.json'));
+  if (Object.keys(joined).sort().join(',') !== 'generation,invocation,owner,parent,sessionId' ||
+      joined.generation !== owner.generation || joined.owner !== owner.owner || joined.parent !== owner.parent ||
+      joined.sessionId !== session.session_id || !id(joined.invocation)) fail();
+  const audit = await json(join(session.directory, 'transport-audit.json'), 1048576);
+  if (audit.sessionId !== session.session_id || audit.reason !== 'resident_stopped' ||
+      !Array.isArray(audit.events)) fail();
+  await absent(join(session.directory, 'wake.sock'));
+  if ((await fs.readdir(session.directory)).some(name => name.startsWith('waiting-'))) fail();
+  // A joined proof from a superseded generation cannot release another owner.
+  if (!same((await cli(['resident', 'inspect'])).owner, owner)) fail();
 }
 export async function stopDecision(event) {
   try {
@@ -476,23 +527,17 @@ export async function stopDecision(event) {
     }
     const session = owner.session;
     if (!session) return block(waitReason);
-    await privateDirectory(session.directory);
-    const raw = await bytes(join(session.directory, 'session.json'));
-    const descriptor = JSON.parse(raw.toString('utf8'));
-    if (hash(raw) !== session.descriptor_sha256 || descriptor.sessionId !== session.session_id ||
-        descriptor.parent !== owner.parent || descriptor.configDir !== status.paths.config_dir ||
-        descriptor.stateDir !== status.paths.state_dir || descriptor.resident !== true) fail();
-    const joined = await json(join(session.directory, 'resident-joined.json'));
-    if (Object.keys(joined).sort().join(',') !== 'generation,invocation,owner,parent,sessionId' ||
-        joined.generation !== owner.generation || joined.owner !== owner.owner || joined.parent !== owner.parent ||
-        joined.sessionId !== session.session_id || !id(joined.invocation)) fail();
-    const audit = await json(join(session.directory, 'transport-audit.json'), 1048576);
-    if (audit.sessionId !== session.session_id || audit.reason !== 'resident_stopped' ||
-        !Array.isArray(audit.events)) fail();
-    await absent(join(session.directory, 'wake.sock'));
-    if ((await fs.readdir(session.directory)).some(name => name.startsWith('waiting-'))) fail();
-    // A joined proof from a superseded generation cannot release another owner.
-    if (!same((await cli(['resident', 'inspect'])).owner, owner)) fail();
+    try { await joinedProof(owner, status, session); }
+    catch (error) {
+      const serving = servingTurn(owner);
+      if (serving === null || serving === event.turn_id) throw error;
+      // Legacy pristine-session recovery can legitimately bind a later serving
+      // turn. Its retained claim means startup.native_turn is not sufficient
+      // to identify that execution; keep the original-cell rule for it.
+      await absent(join(session.directory, 'resident-serve-existing.json'));
+      await absent(join(session.directory, 'resident-unused-replacement.json'));
+      return await otherTurnStop(owner, status.paths, event);
+    }
     return {};
   } catch (error) {
     return block(waitReason + ' Supervision evidence could not be verified.' +

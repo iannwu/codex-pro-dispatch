@@ -69,6 +69,57 @@ class ListenerStartTests(unittest.TestCase):
         self.assertTrue((directory / "wake.sock").exists())
         with self.assertRaises(core.StateError): resident.control("check", old, self.paths)
 
+    def test_restart_recovery_in_same_task_keeps_chats_and_fences_lost_generation(self):
+        # App restart: the serving turn is gone, leaving a bound session with a
+        # socket file, a stale waiter and no audit or join. Nothing here proves
+        # the old execution ended; the locked rotation fences it regardless.
+        old = self.fresh()
+        directory, _ = self._bind_session(old)
+        (directory / "waiting-1.fixture").mkdir(mode=0o700)
+        (directory / "wake.sock").touch(mode=0o600)
+        q = Queue(self.paths)
+        q.submit("request", b"queued before restart", "client")
+        p = listener.plan(self.paths, ["worker-a", "worker-b"])
+        self.assertTrue(p["same_workers"])
+        before = self.snapshot()
+        result = listener.commit(self.paths, p, "parent", "later-turn")
+        owner = self.owner()
+        self.assertEqual(result["reason"], "owner_acquired")
+        self.assertEqual([owner["generation"], owner["parent"], owner["session"]],
+                         [old["generation"] + 1, "parent", None])
+        self.assertEqual(owner["qualification"]["startup"]["native_turn"], "later-turn")
+        self.assertEqual(owner["qualification"]["last_exclusion"]["kind"], "destination_exclusion")
+        self.assertEqual(owner["send_fence"]["unexcluded_workers"], [])
+        after = self.snapshot()
+        key = str(self.paths.state_dir / "resident-owner.json")
+        before.pop(key); after.pop(key)
+        self.assertEqual(before, after)
+        self.assertTrue((directory / "wake.sock").exists())
+        token = resident.invocation.set(dict(old, request="request", invocation="late-call"))
+        try:
+            with core.state_lock(self.paths) as locked, self.assertRaisesRegex(core.StateError, "owner changed"):
+                resident.reserve_slot(self.paths, locked, "slot-a", "request", "worker-a", old["generation"])
+        finally:
+            resident.invocation.reset(token)
+        with self.assertRaises(core.StateError):
+            resident.control("check", old, self.paths)
+        # A competing recovery from the same predecessor loses without rotating.
+        self.assertEqual(listener.commit(self.paths, p, "other-task", "turn-q")["state"], "stale")
+        self.assertEqual(listener.commit(self.paths, p, "parent", "later-turn")["reason"], "already_committed")
+        self.assertEqual(self.owner()["generation"], old["generation"] + 1)
+
+    def test_restart_recovery_refuses_same_chats_after_an_armed_send(self):
+        old = self.fresh()
+        self._bind_session(old)
+        with core.state_lock(self.paths) as locked:
+            v = resident.read(self.paths, locked)
+            v["send_fence"]["armed_since_barrier"] = True
+            resident.write(self.paths, locked, v)
+        before = self.snapshot()
+        with self.assertRaisesRegex(core.StateError, "original_execution_join_required"):
+            listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+        self.assertEqual(before, self.snapshot())
+
     def test_concurrent_starts_single_cas_winner_and_retry(self):
         self.fresh()
         p = listener.plan(self.paths, ["new-01"])

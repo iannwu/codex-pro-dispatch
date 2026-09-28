@@ -87,7 +87,7 @@ Advertise only the qualified finite availability window. Admission expiry does n
 slices or create replacement request IDs.
 
 Resident service does not navigate or forward routine progress to development tasks. Keep the resident owner turn active: share setup in commentary once, then automatically `functions.wait` on the original serve cell after every yield until completion. Do not finalize a running resident turn, ask for periodic confirmation, or treat a yielded cell as a daemon.
-The lifecycle receipt is not readiness; client admission checks still apply. Report a host limitation if active-turn continuation is unavailable. Standalone policy: Restore the exact parent Codex task using official
+The lifecycle receipt is not readiness; client admission checks still apply. If the Stop hook says the listener was served by an earlier turn, follow "Recover after the serving turn ended" in [listener-start.md](references/listener-start.md). Report a host limitation if active-turn continuation is otherwise unavailable. Standalone policy: Restore the exact parent Codex task using official
 navigation; report it separately from answer validity and foreground verification. Do not use voice-only capture in a text task.
 
 On an error, preserve the request ID and collect-only state. Inspect native diagnostics; confirmed unusual-activity HTTP 403 requires the existing shared 30-minute cooldown. Do not reduce it to a generic transport retry.

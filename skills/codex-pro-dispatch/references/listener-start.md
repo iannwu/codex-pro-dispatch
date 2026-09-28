@@ -78,6 +78,20 @@ Outcomes:
 - Other `failed` or `stopped`: preserve the reported evidence. Never replay a
   consumed serve call or invent a replacement for a lost acknowledgment.
 
+## Recover after the serving turn ended
+
+A listener is served only by the turn that started it. If that turn ended (for
+example the app restarted) and a later turn of the Listener task tries to
+finish, the Stop hook says the listener was served by an earlier turn. Then run
+the Start code above once in the current turn and follow its actions; that is
+the whole recovery. Do not wait on the old cell. The runtime replaces the owner
+when its send fence permits reuse of those chats, or when different chats satisfy
+the existing exclusion checks. For this idle, never-armed case, the replacement
+fences the old execution whether or not it still runs.
+Otherwise it reports the blocker (for example `original_execution_join_required`
+or exact request IDs) and acquires nothing. The hook asks once per turn; after a
+`stop` action, report it and end the turn.
+
 ## Destination setup
 
 Use this only when the user asks for different worker chats or no pool is

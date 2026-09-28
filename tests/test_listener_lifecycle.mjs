@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import {dirname, join} from 'node:path';
-import {execFile, execFileSync} from 'node:child_process';
-import {fileURLToPath} from 'node:url';
+import {execFile, execFileSync, spawn} from 'node:child_process';
+import {once} from 'node:events';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
 
 // Issue 29: the composed startup. Real canonical state, helper, hook script,
@@ -27,8 +28,8 @@ function run(file, args, input, env = {}) {
     child.stdin.end(input);
   });
 }
-const hook = async (parent, turn) => JSON.parse((await run('node', [supervisor, 'stop'],
-  J({hook_event_name: 'Stop', session_id: parent, turn_id: turn, stop_hook_active: false}))).output);
+const hook = async (parent, turn, active = false) => JSON.parse((await run('node', [supervisor, 'stop'],
+  J({hook_event_name: 'Stop', session_id: parent, turn_id: turn, stop_hook_active: active}))).output);
 const python = code => JSON.parse(execFileSync('python3', ['-c',
   'import sys,json\nsys.path.insert(0,"src")\nfrom codex_pro_dispatch import core,listener\npaths=core.default_paths()\n' + code],
 {cwd: root, encoding: 'utf8', env: process.env}));
@@ -169,6 +170,51 @@ exec ${quote(real)} "$@"
   process.env.PATH = dir + ':' + path;
   t.after(() => { process.env.PATH = path; });
   return async () => Number(await fs.readFile(counter, 'utf8').catch(() => '0'));
+}
+// App restart as observed on 2026-09-28: task P acquired and served the owner
+// in turn-0, then that native execution disappeared. A child process opens the
+// real session and is killed, so no cleanup runs: the descriptor, a socket file
+// nobody accepts on and a stale waiter remain, with no audit or join. Recovery
+// must not depend on whether a real old execution survives.
+async function lostExecution(f, {armed = false} = {}) {
+  commitAs(P, 'turn-0');
+  const owner = JSON.parse(await fs.readFile(f.owner, 'utf8'));
+  const status = JSON.parse((await run('python3', [root + 'bin/pro-dispatch', 'status', '--current'])).output);
+  await fs.mkdir(f.clients, {recursive: true, mode: 0o700});
+  const directory = await fs.realpath(await fs.mkdtemp(f.clients + '/pro-session-'));
+  await fs.chmod(directory, 0o700);
+  const trusted = {helper: scripts + 'pro-dispatch', configDir: status.paths.config_dir, stateDir: status.paths.state_dir,
+    parent: P, workers: status.worker_pool.workers.map(w => ({slot: w.slot, conversation_id: w.conversation_id})),
+    worker_pool_sha256: owner.worker_pool_sha256, workerPoolSha256: owner.worker_pool_sha256, resident: true,
+    maxConcurrentRequests: 2, leaseMs: null, idleMs: 45000, replyMs: 3900000, maxSnapshots: 6,
+    observationMs: 50000, activeJobMs: 3600000};
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+const s=await (await import(${J(pathToFileURL(scripts + 'parked-socket.mjs').href)})).openSession(${J(directory)},${J(trusted)});
+await (await import("node:fs/promises")).mkdir(${J(directory)}+"/waiting-1."+s.config.sessionId,{mode:448});
+console.log(s.config.sessionId);setInterval(()=>{},1000);`], {stdio: ['ignore', 'pipe', 'inherit']});
+  const exited = once(child, 'exit');
+  let line = '';
+  for await (const chunk of child.stdout) { line += chunk; if (line.includes('\n')) break; }
+  const sessionId = line.trim();
+  const bound = await run('python3', [root + 'bin/pro-dispatch', 'resident', 'bind-session', J({
+    generation: owner.generation, owner: owner.owner, parent: P, worker_pool_sha256: owner.worker_pool_sha256,
+    session: {directory, session_id: sessionId, descriptor_sha256: sha(await fs.readFile(directory + '/session.json'))}})]);
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(bound.exit_code, 0, bound.output);
+  const stale = new Date(Date.now() - 3600000);
+  await fs.utimes(directory + '/waiting-1.' + sessionId, stale, stale);
+  assert((await fs.lstat(directory + '/wake.sock')).isSocket());
+  if (armed) python('from codex_pro_dispatch import resident\nwith core.state_lock(paths) as locked:\n' +
+    ' v=resident.read(paths,locked);v["send_fence"]["armed_since_barrier"]=True;resident.write(paths,locked,v)\nprint("{}")');
+  return {directory, owner: JSON.parse(await fs.readFile(f.owner, 'utf8'))};
+}
+async function files(directory) {
+  const names = (await fs.readdir(directory)).sort();
+  return await Promise.all(names.map(async name => {
+    const st = await fs.lstat(join(directory, name));
+    return [name, st.isFile() ? sha(await fs.readFile(join(directory, name))) : st.isSocket() ? 'socket' : 'directory'];
+  }));
 }
 async function receipts(directory) {
   const names = (await fs.readdir(directory)).filter(n => n.startsWith('receipt-')).sort();
@@ -390,8 +436,10 @@ test('constant bootstrap runs a plugin copy whose hook check names that copy', a
   await assert.rejects(fs.stat(home + '/.cpd-client'), {code: 'ENOENT'});
 });
 
-test('two concurrent starts leave exactly one serving execution', async t => {
+for (const lost of [false, true])
+test('two concurrent starts leave exactly one serving execution' + (lost ? ' after a lost execution' : ''), async t => {
   const f = await fixture(t);
+  if (lost) await lostExecution(f);
   const hosts = [host(f, P, 'turn-p'), host(f, Q, 'turn-q')];
   const calls = [await a.listenerLifecycleCall(planNow(), f.clients), await a.listenerLifecycleCall(planNow(), f.clients)];
   const runs = hosts.map((h, i) => h.launch(calls[i].arguments.code));
@@ -535,3 +583,71 @@ for (const [mode, reason] of [['unknown', 'commit_unknown'], ['stale', 'expected
     assert.equal(h.inflight(), 0);
   });
 }
+
+// Synthetic app-restart recovery. The Stops are simulated hook runs, not host
+// evidence; they prove the runtime path, not real desktop behavior.
+test('app restart: a later turn of the owner task recovers the same chats and fences the lost generation', async t => {
+  const f = await fixture(t), home = await installedHome(f), lost = await lostExecution(f);
+  const evidence = await files(lost.directory);
+  const prompt = await hook(P, 'turn-1', true);
+  assert.equal(prompt.decision, 'block');
+  assert.match(prompt.reason, /served by an earlier turn[\s\S]*\/references\/listener-start\.md /);
+  const h = host(f, P, 'turn-1', {env: {HOME: home, CPD_TEST_MODE: 'normal', CPD_TEST_HOOK: '{}'}});
+  const running = h.launch(await bootstrap());
+  const ready = await h.until(v => v?.state === 'ready' && v.action === 'wait');
+  assert.equal(ready.admission_observed, true);
+  const owner = JSON.parse(await fs.readFile(f.owner, 'utf8'));
+  assert.deepEqual([owner.generation, owner.parent, owner.worker_pool_sha256, owner.qualification.startup.native_turn],
+    [lost.owner.generation + 1, P, lost.owner.worker_pool_sha256, 'turn-1']);
+  assert.equal(owner.qualification.last_exclusion.kind, 'destination_exclusion');
+  assert.equal(owner.session.directory, ready.session_directory);
+  assert.notEqual(ready.session_directory, lost.directory);
+  assert.deepEqual(await files(lost.directory), evidence);
+  const check = await run('python3', [root + 'bin/pro-dispatch', 'resident', 'check', J(lost.owner)]);
+  assert.notEqual(check.exit_code, 0, 'the lost generation is fenced');
+  assert.deepEqual((await Promise.all(h.hooks)).map(d => d.reason.split(':')[0]), ['Supervision preflight only']);
+  // The recovered owner is served by this turn and keeps the original-cell rule.
+  for (const active of [false, true]) assert.match((await hook(P, 'turn-1', active)).reason, /ORIGINAL/);
+  assert.equal((await run(process.execPath, [activation, 'resident-stop', ready.session_directory])).exit_code, 0);
+  await running;
+  assert.deepEqual([h.events.at(-1).state, h.events.at(-1).reason], ['stopped', 'resident_stopped']);
+  assert.equal(h.calls.sends, 0);
+  assert.deepEqual(await hook(P, 'turn-1'), {});
+});
+
+test('app restart with the old execution still serving: the later turn observes it and changes nothing', async t => {
+  const f = await fixture(t), h0 = host(f, P, 'turn-0');
+  const serving = h0.launch((await a.listenerLifecycleCall(planNow(), f.clients)).arguments.code);
+  const ready = await h0.until(v => v?.state === 'ready' && v.action === 'wait');
+  const before = await fs.readFile(f.owner);
+  assert.equal((await hook(P, 'turn-1', true)).decision, 'block');
+  const h1 = host(f, P, 'turn-1');
+  await h1.launch((await a.listenerLifecycleCall(planNow(), f.clients)).arguments.code);
+  const observed = h1.events.at(-1);
+  assert.deepEqual([observed.state, observed.action, observed.reason], ['ready', 'stop', 'existing_service_observed']);
+  assert.deepEqual(await fs.readFile(f.owner), before);
+  assert.deepEqual(await hook(P, 'turn-1', true), {});
+  assert.match((await hook(P, 'turn-0', true)).reason, /ORIGINAL/);
+  assert.equal((await run(process.execPath, [activation, 'resident-stop', ready.session_directory])).exit_code, 0);
+  await serving;
+  assert.equal(h0.calls.sends + h1.calls.sends, 0);
+});
+
+test('a lost generation that armed a send keeps its chats: one report, nothing acquired, the turn is released', async t => {
+  const f = await fixture(t), home = await installedHome(f);
+  await lostExecution(f, {armed: true});
+  assert.equal((await hook(P, 'turn-1', true)).decision, 'block');
+  const before = await fs.readFile(f.owner);
+  const h = host(f, P, 'turn-1', {env: {HOME: home, CPD_TEST_MODE: 'normal', CPD_TEST_HOOK: '{}'}});
+  await h.launch(await bootstrap());
+  const last = h.events.at(-1);
+  assert.deepEqual([last.state, last.action], ['blocked', 'stop']);
+  assert.match(last.reason, /original_execution_join_required/);
+  assert.deepEqual(await fs.readFile(f.owner), before);
+  assert.equal(h.hooks.length, 0);
+  assert.deepEqual(await hook(P, 'turn-1', true), {});
+  // Each later turn gets one prompt; no turn loops.
+  assert.equal((await hook(P, 'turn-2', true)).decision, 'block');
+  assert.deepEqual(await hook(P, 'turn-2', true), {});
+  assert.equal(h.calls.sends, 0);
+});
