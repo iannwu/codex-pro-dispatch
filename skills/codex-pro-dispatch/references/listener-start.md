@@ -104,10 +104,11 @@ readiness. Real native Stop qualification and live admission remain mandatory.
   the selected installation. Hooks from both a plugin and a source checkout
   mean two installations: keep one. Do not ask for trust approval to repair a
   structural error.
-- `disabled`: enable the exact resident hook in `/hooks`.
+- `disabled`: the user enables the exact resident hook in the Codex CLI's `/hooks`.
 - `untrusted` or `modified`: the user must review and trust its current definition
-  in `/hooks`. If also disabled, report both actions together. Never write the
-  trust hash or forge an observed Stop event.
+  in the Codex CLI's `/hooks` (README, "Approve the hook once in the Codex CLI").
+  Do not promise a desktop `/hooks` menu. If also disabled, report both actions
+  together. Never write the trust hash or forge an observed Stop event.
 - `unverified`: preserve the diagnostic and continue the normal generated native
   qualification. Discovery errors cannot authorize admission, but are not proof
   of a denied hook. Do not guess a different binary or request trust without
