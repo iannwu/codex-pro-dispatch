@@ -21,19 +21,26 @@ copy; it never activates a listener, grants permissions, or authorizes a send.
 
 ### Native Codex owner
 
+For "start listener", "restart listener", a replacement Listener task, or new worker conversations,
+use [listener-start.md](references/listener-start.md) first. Its one constant
+`functions.exec` code runs the whole guarded startup; follow only each output's
+`action`. Let the runtime choose the transition; do not improvise stages, owner
+recovery, or pool edits. This procedure takes precedence over the older same-pool
+setup, takeover, and multi-stage activation recipes below.
+
 For standalone dispatch, recovery, or an explicitly authorized continuation, read [standalone-dispatch.md](references/standalone-dispatch.md) and [native-protocol.md](references/native-protocol.md)
 before acting. Repository work also requires [github-verification.md](references/github-verification.md).
 
 For an explicitly authorized finite parked session, read [native-request-broker.md](references/native-request-broker.md). Use only its reviewed native activation recipe when present and qualified for the current host.
 If it is absent, report that gate; do not improvise a launcher or use the standalone instructions as a parked activation fallback.
 
-For explicit resident setup or clean restart, also read the resident section in [native-activation.md](references/native-activation.md). Resolve the physical installed paths and complete the actual client's access preflight before opening.
+Only for diagnostics or compatibility with an older resident packet, read the resident section in [native-activation.md](references/native-activation.md); never use its multi-stage recipe to start, restart, or replace a listener. Resolve the physical installed paths and complete the actual client's access preflight before opening.
 Resident mode is opt-in; reopen recovery is collector-only; automatic startup is unsupported.
 Fresh resident activation and unused serve-existing require the installed synchronous Stop hook. Review and trust `.codex/hooks.json` for project use or `hooks/hooks.json` for plugin use in the actual host. Execute calls.qualify first. Wait until resident_supervision_probe_required is visible; only then attempt one final response while that qualification cell is pending. The hook must block it and return control to functions.wait on that exact cell. Only successful completion in the same native task and turn permits calls.open or calls.serve. A missing hook, failed probe, or changed native turn is a host limitation, not permission to serve. This one-time, no-dispatch probe is not a periodic heartbeat. Never run it over an active or armed serving invocation. Post-arm continuation additionally requires the retained qualification from this native runtime and keeps every existing exact eligibility check. Never manufacture qualification or recovery evidence.
 Before qualification, verify that the Listener task itself exposes the packet's declared `functions.exec` executor and `functions.wait` continuation. A coordinator having those tools does not qualify a delegated Listener turn. Missing tools mean `unsupported_listener_surface`: do not qualify, acquire a generation, open, or translate an outer packet body into direct `mcp__node_repl__js` calls. Save one packet privately and use `packet-call` with its raw SHA-256 when exact extraction is needed; pass its short opaque `arguments` unchanged to the declared executor. The bootstrap loads the exact pinned stage inside that executor, so the model does not transcribe its native body during activation.
 Explicit recover-start after physical-quiescence can fence a crash or reboot that left no graceful transport-audit, without treating absence as unsent. An explicit pool may use one or two conversations on one listener after live overlap qualification. Never replay consumed open/serve calls. Check `resident-status`, never race listeners.
 
-When the user asks a new task to replace the current resident listener owner, read [new-owner-handoff.md](references/new-owner-handoff.md). Use the installed `resident-takeover-packet` first: native identity plus one host-idle check fences
+For older same-pool recovery explicitly selected by the startup result, read [new-owner-handoff.md](references/new-owner-handoff.md). The installed `resident-takeover-packet` uses native identity plus one host-idle check to fence
 the old generation, cancels unarmed work, and preserves collect-only recovery. Relay is an optional fallback only for an active old task. Takeover is not readiness.
 
 ## Repository access through ChatGPT
@@ -80,7 +87,7 @@ Advertise only the qualified finite availability window. Admission expiry does n
 slices or create replacement request IDs.
 
 Resident service does not navigate or forward routine progress to development tasks. Keep the resident owner turn active: share setup in commentary once, then automatically `functions.wait` on the original serve cell after every yield until completion. Do not finalize a running resident turn, ask for periodic confirmation, or treat a yielded cell as a daemon.
-The lifecycle receipt is not readiness; client admission checks still apply. Report a host limitation if active-turn continuation is unavailable. Standalone policy: Restore the exact parent Codex task using official
+The lifecycle receipt is not readiness; client admission checks still apply. If the Stop hook says the listener was served by an earlier turn, follow "Recover after the serving turn ended" in [listener-start.md](references/listener-start.md). Report a host limitation if active-turn continuation is otherwise unavailable. Standalone policy: Restore the exact parent Codex task using official
 navigation; report it separately from answer validity and foreground verification. Do not use voice-only capture in a text task.
 
 On an error, preserve the request ID and collect-only state. Inspect native diagnostics; confirmed unusual-activity HTTP 403 requires the existing shared 30-minute cooldown. Do not reduce it to a generic transport retry.

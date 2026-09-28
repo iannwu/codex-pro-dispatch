@@ -19,9 +19,16 @@ const fail = () => { throw Error('Resident supervision proof missing or changed;
 
 async function cli(args) {
   return await new Promise((resolve, reject) => {
-    execFile('python3', [helper, ...args], {timeout: 3000, maxBuffer: 1048576}, (error, out) => {
+    execFile('python3', [helper, ...args], {timeout: 3000, maxBuffer: 1048576}, (error, out, stderr) => {
       try {
-        if (error) throw Error('Canonical supervision read failed');
+        if (error) {
+          const diagnostic = {operation: args.join(' '), code: error.code ?? null,
+            signal: error.signal ?? null, killed: error.killed === true,
+            stderr: (stderr ?? '').slice(0, 2048)};
+          const failure = new Error('Canonical supervision read failed: ' + JSON.stringify(diagnostic), {cause: error});
+          failure.name = 'SupervisionReadError';
+          throw failure;
+        }
         const value = JSON.parse(out);
         if (value?.ok !== true) throw Error('Canonical supervision read rejected');
         resolve(value);
@@ -81,6 +88,11 @@ function location(paths, parent, turn) {
   const directory = join(paths.state_dir, 'resident-supervision');
   const key = hash(parent + '\0' + turn);
   return {directory, challenge: join(directory, key + '.json'), observed: join(directory, key + '.observed.json')};
+}
+// One genuine Stop probe per task turn; a later start needs a new turn.
+export async function probeAttempted(stateDir, parent, turn) {
+  try { await fs.lstat(location({state_dir: stateDir}, parent, turn).challenge); return true; }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 function terminalFiles(paths, owner, turn) {
   const directory = join(paths.state_dir, 'resident-supervision');
@@ -176,11 +188,51 @@ export async function requireRetainedSupervision(g, meta, trusted) {
   await checkChallenge(record, paths, files);
   if (!same(await json(files.observed), record)) fail();
 }
-// Event-driven, bounded preflight with no socket, readiness marker, or native send.
-export async function waitSupervision(g, meta, trusted) {
-  const {paths, files} = await context(meta, trusted);
-  await checkChallenge(g.parkedSupervision, paths, files);
-  await new Promise((resolve, reject) => {
+// Exactly one record ever occupies the observed slot: the hook's copy of the
+// challenge (a genuine Stop) or the waiter's terminal receipt (deadline first).
+// The link in exclusive() is the single arbitration, so a late Stop can never
+// turn a timeout into qualification, and a timeout never erases a real Stop.
+const OBSERVATION_MS = 120000;
+const TERMINAL_KEYS = 'armedAt,deadlineAt,generation,kind,nonce,operation,owner,parent,qualified,reason,send_authorized,turn,version,waiter';
+function qualificationTerminal(challenge, armedAt, deadlineAt, binding) {
+  return {version: 1, kind: 'resident_supervision_terminal', parent: challenge.parent, turn: challenge.turn,
+    nonce: challenge.nonce, reason: 'qualification_timeout', armedAt, deadlineAt,
+    operation: binding?.operation ?? null, generation: binding?.generation ?? null, owner: binding?.owner ?? null,
+    waiter: 'closed', qualified: false, send_authorized: false};
+}
+function terminalFor(value, challenge) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join(',') === TERMINAL_KEYS && value.version === 1 &&
+    value.kind === 'resident_supervision_terminal' && value.reason === 'qualification_timeout' &&
+    value.parent === challenge.parent && value.turn === challenge.turn && value.nonce === challenge.nonce &&
+    value.waiter === 'closed' && value.qualified === false && value.send_authorized === false &&
+    Number.isSafeInteger(value.armedAt) && Number.isSafeInteger(value.deadlineAt) && value.deadlineAt > value.armedAt &&
+    (value.operation === null || /^[a-f0-9]{64}$/.test(value.operation)) &&
+    (value.generation === null || (Number.isSafeInteger(value.generation) && value.generation > 0)) &&
+    (value.owner === null || id(value.owner));
+}
+function qualificationTimeout(path) {
+  return Object.assign(Error('Stop hook did not qualify; no availability'), {code: 'qualification_timeout', terminal: path});
+}
+// Register the watcher and deadline before the caller asks for a final
+// response. The promise stays in this REPL; settle awaits the same one.
+export async function armSupervision(g, meta, trusted, binding = null) {
+  const {identity, paths, files} = await context(meta, trusted);
+  const record = g.parkedSupervision;
+  if (record?.parent !== identity.parent || record?.turn !== identity.turn) fail();
+  await checkChallenge(record, paths, files);
+  const current = g.parkedSupervisionWait;
+  if (current?.parent === identity.parent && current?.turn === identity.turn) return current.armed;
+  if (binding !== null && (typeof binding !== 'object' || Array.isArray(binding) ||
+      Object.keys(binding).sort().join(',') !== 'generation,operation,owner' ||
+      !/^[a-f0-9]{64}$/.test(binding.operation) || !Number.isSafeInteger(binding.generation) ||
+      binding.generation < 1 || !id(binding.owner))) fail();
+  // One genuine probe per task turn: a closed waiter is never re-armed.
+  try { if (terminalFor(await json(files.observed), record)) throw Error('Qualification already ended for this turn; start again in a new turn'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const armedAt = Date.now(), deadlineAt = armedAt + OBSERVATION_MS;
+  const terminal = qualificationTerminal(record, armedAt, deadlineAt, binding);
+  const promise = new Promise((resolve, reject) => {
     let done = false, busy = false, again = false;
     const finish = error => {
       if (done) return;
@@ -188,27 +240,50 @@ export async function waitSupervision(g, meta, trusted) {
       error ? reject(error) : resolve();
     };
     const watcher = watch(files.directory, () => { again = true; void check(); });
-    const timer = setTimeout(() => finish(Error('Stop hook did not qualify; no availability')), 45000);
+    const timer = setTimeout(() => void expire(), OBSERVATION_MS);
     watcher.on('error', finish);
+    async function decide() {
+      const observed = await json(files.observed);
+      if (same(observed, record)) return finish();
+      if (terminalFor(observed, record)) return finish(qualificationTimeout(files.observed));
+      fail();
+    }
     async function check() {
       if (done || busy) return;
       busy = true; again = false;
-      try {
-        if (!same(await json(files.observed), g.parkedSupervision)) fail();
-        finish();
-      } catch (error) { if (error.code !== 'ENOENT') finish(error); }
+      try { await decide(); } catch (error) { if (error.code !== 'ENOENT') finish(error); }
       finally { busy = false; if (again && !done) void check(); }
+    }
+    async function expire() {
+      try { await exclusive(files.observed, terminal); }
+      catch (error) { if (error.code !== 'EEXIST') return finish(error); }
+      try { await decide(); } catch (error) { finish(error); }
     }
     void check();
   });
+  promise.catch(() => {});
+  const armed = {kind: 'resident_supervision_armed', parent: identity.parent, turn: identity.turn,
+    nonce: record.nonce, challengeSha256: hash(JSON.stringify(record)), armedAt, deadlineAt, admissionObserved: false};
+  g.parkedSupervisionWait = Object.freeze({parent: identity.parent, turn: identity.turn, armed, promise});
+  return armed;
+}
+export async function settleSupervision(g, meta, trusted) {
+  const identity = nativeIdentity(meta, trusted), current = g.parkedSupervisionWait;
+  if (current?.parent !== identity.parent || current?.turn !== identity.turn) fail();
+  await current.promise;
   return {kind: 'resident_supervision_stop_observed', admissionObserved: false};
+}
+// Event-driven, bounded preflight with no socket, readiness marker, or native send.
+export async function waitSupervision(g, meta, trusted) {
+  await armSupervision(g, meta, trusted);
+  return await settleSupervision(g, meta, trusted);
 }
 
 // Inspect the complete current-status projection, not just its scalar alias:
 // active_assignment is also null when multiple assignments remain unresolved.
 function unboundOwner(owner, status) {
   const slots = owner.slots, pool = status.worker_pool, active = status.active_assignments;
-  return owner.version === 3 && owner.session === null && owner.inflight == null &&
+  return [3, 4].includes(owner.version) && owner.session === null && owner.inflight == null &&
     Number.isSafeInteger(owner.generation) && owner.generation > 0 &&
     id(owner.owner) && id(owner.parent) &&
     /^[a-f0-9]{64}$/.test(owner.worker_pool_sha256) &&
@@ -317,6 +392,77 @@ async function unboundStopProof(owner, status) {
 
 const block = reason => ({decision: 'block', reason});
 const waitReason = 'The resident owner has not joined. Use functions.wait on the ORIGINAL returned serve cell, not a new serve call. Never resend, reopen, reset receipts, clear locks, or renew admission from this hook. If the original execution is unavailable, preserve evidence and report the host limitation through commentary; owner-loss closure remains mandatory.';
+const terminalReason = 'Listener qualification ended without a Stop observation, and canonical authority or work no longer matches its terminal receipt. Preserve evidence. Do not reopen, resend, or retry qualification in this turn.';
+const recoveryReason = 'This listener was served by an earlier turn of this task, so functions.wait cannot continue that execution from this turn. Recover now: call functions.exec once with the unchanged Start code in ' +
+  join(dir, '../references/listener-start.md') + ' and follow only each output\'s action. The runtime fences the old owner generation before any new send, keeps unresolved requests and their no-resend state, and reports a blocker instead when replacement is unsafe. Do not edit state, pass flags, or wait on the old cell. After a stop action, report its result; this turn may then end.';
+
+// The supported startup opens and serves only in the turn that acquired the
+// owner (openResident and serve refuse any other turn). Owners acquired any
+// other way have no known serving turn and keep the original-cell rule.
+function servingTurn(owner) {
+  const startup = owner.qualification?.startup, acquired = startup?.acquired;
+  return acquired?.generation === owner.generation && acquired?.owner === owner.owner &&
+    acquired?.parent === owner.parent && startup.native_task === owner.parent &&
+    id(startup.native_turn) ? startup.native_turn : null;
+}
+// A task runs one turn at a time, so a Stop from another turn cannot keep the
+// serving turn's execution alive; blocking it forever only traps the task.
+// Block once per owner and turn to route recovery through the normal start,
+// whose locked generation rotation fences the old execution whether or not it
+// still exists, then release the reentry. The marker proves no termination
+// and grants no authority.
+async function otherTurnStop(owner, paths, event) {
+  const directory = join(paths.state_dir, 'resident-supervision');
+  const record = {version: 1, generation: owner.generation, owner: owner.owner, parent: owner.parent,
+    session: owner.session, turn: event.turn_id};
+  const marker = join(directory, 'other-turn-' + owner.generation + '-' + owner.owner + '-' + hash(JSON.stringify(record)) + '.json');
+  await fs.mkdir(directory, {mode: 0o700}).catch(error => { if (error.code !== 'EEXIST') throw error; });
+  await privateDirectory(directory);
+  let seen = true;
+  try { if (!same(await json(marker), record)) fail(); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; seen = false; }
+  if (!same((await cli(['resident', 'inspect'])).owner, owner)) fail();
+  if (!seen) { await exclusive(marker, record); return block(recoveryReason); }
+  return event.stop_hook_active === true ? {} : block(recoveryReason);
+}
+
+// A timed-out startup leaves its acquired, unbound owner recoverable. Release
+// the turn only while that exact acquisition is still current and fully idle;
+// the receipt itself qualifies nothing and never authorizes a send.
+async function terminalQualificationStop(owner, status, terminal) {
+  const startup = owner.qualification?.startup;
+  if (terminal.operation === null || owner.version !== 4 || owner.generation !== terminal.generation ||
+      owner.owner !== terminal.owner || owner.parent !== terminal.parent ||
+      startup?.operation_id !== terminal.operation || startup?.native_task !== terminal.parent ||
+      startup?.native_turn !== terminal.turn || !unboundOwner(owner, status) ||
+      owner.slots.some(slot => slot.phase !== 'idle' || slot.request !== null) ||
+      status.active_assignment !== null || status.active_assignments.length !== 0) return block(terminalReason);
+  const queue = await cli(['queue', 'status']);
+  if (!Array.isArray(queue.requests) || queue.requests.some(r => r?.state === 'claimed')) return block(terminalReason);
+  const [current, currentStatus, currentQueue] = await Promise.all([
+    cli(['resident', 'inspect']), cli(['status', '--current']), cli(['queue', 'status'])]);
+  if (!same(current.owner, owner) || !same(currentStatus, status) || !same(currentQueue, queue)) fail();
+  return {}; // Finalization only; the owner stays acquired and unqualified.
+}
+async function joinedProof(owner, status, session) {
+  await privateDirectory(session.directory);
+  const raw = await bytes(join(session.directory, 'session.json'));
+  const descriptor = JSON.parse(raw.toString('utf8'));
+  if (hash(raw) !== session.descriptor_sha256 || descriptor.sessionId !== session.session_id ||
+      descriptor.parent !== owner.parent || descriptor.configDir !== status.paths.config_dir ||
+      descriptor.stateDir !== status.paths.state_dir || descriptor.resident !== true) fail();
+  const joined = await json(join(session.directory, 'resident-joined.json'));
+  if (Object.keys(joined).sort().join(',') !== 'generation,invocation,owner,parent,sessionId' ||
+      joined.generation !== owner.generation || joined.owner !== owner.owner || joined.parent !== owner.parent ||
+      joined.sessionId !== session.session_id || !id(joined.invocation)) fail();
+  const audit = await json(join(session.directory, 'transport-audit.json'), 1048576);
+  if (audit.sessionId !== session.session_id || audit.reason !== 'resident_stopped' ||
+      !Array.isArray(audit.events)) fail();
+  await absent(join(session.directory, 'wake.sock'));
+  if ((await fs.readdir(session.directory)).some(name => name.startsWith('waiting-'))) fail();
+  // A joined proof from a superseded generation cannot release another owner.
+  if (!same((await cli(['resident', 'inspect'])).owner, owner)) fail();
+}
 export async function stopDecision(event) {
   try {
     if (event?.hook_event_name !== 'Stop' || !id(event.session_id))
@@ -336,7 +482,7 @@ export async function stopDecision(event) {
       throw error;
     }
     const files = location(status.paths, event.session_id, event.turn_id);
-    let challenge;
+    let challenge, terminal = null;
     try { challenge = await json(files.challenge); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (challenge !== undefined) {
@@ -350,10 +496,14 @@ export async function stopDecision(event) {
         return block('Supervision preflight only: call functions.wait on the ORIGINAL yielded qualification cell, then continue the activation recipe only after its successful completion. Do not replay qualification. No listener availability or send is authorized yet.');
       } catch (error) {
         // An existing proof must match byte-for-byte; no timestamp refresh.
-        if (!same(await json(files.observed), challenge)) throw error;
+        // A terminal receipt means the waiter's deadline won the single slot.
+        const observed = await json(files.observed);
+        if (terminalFor(observed, challenge)) terminal = observed;
+        else if (!same(observed, challenge)) throw error;
       }
     }
     if (!owner || owner.parent !== event.session_id) return {};
+    if (terminal) return await terminalQualificationStop(owner, status, terminal);
     // This exemption runs only AFTER pending qualification challenges.
     const proof = await unboundStopProof(owner, status);
     if (proof !== null) {
@@ -377,26 +527,21 @@ export async function stopDecision(event) {
     }
     const session = owner.session;
     if (!session) return block(waitReason);
-    await privateDirectory(session.directory);
-    const raw = await bytes(join(session.directory, 'session.json'));
-    const descriptor = JSON.parse(raw.toString('utf8'));
-    if (hash(raw) !== session.descriptor_sha256 || descriptor.sessionId !== session.session_id ||
-        descriptor.parent !== owner.parent || descriptor.configDir !== status.paths.config_dir ||
-        descriptor.stateDir !== status.paths.state_dir || descriptor.resident !== true) fail();
-    const joined = await json(join(session.directory, 'resident-joined.json'));
-    if (Object.keys(joined).sort().join(',') !== 'generation,invocation,owner,parent,sessionId' ||
-        joined.generation !== owner.generation || joined.owner !== owner.owner || joined.parent !== owner.parent ||
-        joined.sessionId !== session.session_id || !id(joined.invocation)) fail();
-    const audit = await json(join(session.directory, 'transport-audit.json'), 1048576);
-    if (audit.sessionId !== session.session_id || audit.reason !== 'resident_stopped' ||
-        !Array.isArray(audit.events)) fail();
-    await absent(join(session.directory, 'wake.sock'));
-    if ((await fs.readdir(session.directory)).some(name => name.startsWith('waiting-'))) fail();
-    // A joined proof from a superseded generation cannot release another owner.
-    if (!same((await cli(['resident', 'inspect'])).owner, owner)) fail();
+    try { await joinedProof(owner, status, session); }
+    catch (error) {
+      const serving = servingTurn(owner);
+      if (serving === null || serving === event.turn_id) throw error;
+      // Legacy pristine-session recovery can legitimately bind a later serving
+      // turn. Its retained claim means startup.native_turn is not sufficient
+      // to identify that execution; keep the original-cell rule for it.
+      await absent(join(session.directory, 'resident-serve-existing.json'));
+      await absent(join(session.directory, 'resident-unused-replacement.json'));
+      return await otherTurnStop(owner, status.paths, event);
+    }
     return {};
-  } catch {
-    return block(waitReason + ' Supervision evidence could not be verified.');
+  } catch (error) {
+    return block(waitReason + ' Supervision evidence could not be verified.' +
+      (error.name === 'SupervisionReadError' ? ' ' + error.message : ''));
   }
 }
 

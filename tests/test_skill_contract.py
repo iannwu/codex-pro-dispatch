@@ -187,6 +187,26 @@ class SkillContractTests(unittest.TestCase):
         ]:
             self.assertIn(phrase, text)
 
+    def test_first_hook_approval_names_the_cli_route(self) -> None:
+        # Verified 2026-09-27: bundled codex-cli 0.158.0-alpha.2 ships the /hooks
+        # browser and the startup "Hooks need review" prompt; the official hooks
+        # page names /hooks in the CLI. A desktop /hooks menu is not verified.
+        readme = README.read_text(encoding="utf-8")
+        for phrase in [
+            "### Approve the hook once in the Codex CLI",
+            "https://learn.chatgpt.com/docs/hooks",
+            "`/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`",
+            "**Hooks need review**, choose **Review hooks**",
+            "Trust only the resident Stop hook",
+            "run `pro-dispatch listener check`",
+            "Nothing in this\nproject writes that approval for you.",
+        ]:
+            self.assertIn(phrase, readme)
+        self.assertNotIn("review and trust the hook with `/hooks`", readme)
+        start = (SKILL.parent / "references" / "listener-start.md").read_text(encoding="utf-8")
+        self.assertIn("in the Codex CLI's `/hooks`", start)
+        self.assertIn("Do not promise a desktop `/hooks` menu", start)
+
     def test_openai_yaml_mentions_explicit_skill_name(self) -> None:
         text = OPENAI_YAML.read_text(encoding="utf-8")
         self.assertIn("$codex-pro-dispatch", text)

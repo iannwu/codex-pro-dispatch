@@ -433,7 +433,7 @@ class Queue:
             if caller is not None and (caller.get("collector_only") is True or caller.get("takeover_settlement") is True):
                 raise core.StateError("Collector-only recovery cannot claim or send")
             owner = resident.read(self.paths, locked)
-            if owner is not None and owner.get("version") == 3:
+            if owner is not None and owner.get("version") in (3, 4):
                 if caller is None or not resident.matches(owner, caller):
                     raise core.StateError("Pool claim requires the current serving resident invocation")
             elif owner is not None:
@@ -474,7 +474,7 @@ class Queue:
                 return self.receipt(record, _locked=locked)
 
             target = self.load(request_id, _locked=locked) if request_id is not None else None
-            if owner is not None and owner.get("version") == 3:
+            if owner is not None and owner.get("version") in (3, 4):
                 selected_id = target["request_id"] if target is not None else None
                 for item in owner["slots"]:
                     if not item.get("request") or item["request"] == selected_id:
@@ -540,7 +540,7 @@ class Queue:
             if selected["state"] != "queued":
                 raise core.StateError("Requested item is not claimable")
             reserved = None
-            if owner is not None and owner.get("version") == 3 and caller is not None:
+            if owner is not None and owner.get("version") in (3, 4) and caller is not None:
                 reserved = next(
                     (item for item in owner["slots"]
                      if item.get("request") == selected["request_id"]

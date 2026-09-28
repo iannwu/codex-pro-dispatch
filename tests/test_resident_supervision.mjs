@@ -280,7 +280,7 @@ test('missing Stop hook reaches a bounded preflight failure without opening admi
   await f.guard.prepareSupervision(g, meta, f.trusted);
   const nativeTimeout = globalThis.setTimeout;
   t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
-    if (delay === 45000) {
+    if (delay === 120000) {
       const token = nativeTimeout(() => {}, 1000000);
       queueMicrotask(callback);
       return token;
@@ -333,6 +333,37 @@ test('Stop guard never renews the original 60-second admission detector', async 
   assert.match(failures[0].error.message, /stopped renewing admission/);
   assert.deepEqual(await f.snapshot(), before);
   await assert.rejects(native(g, meta, 'serve-root', 2, undefined, true), /ended or occupied/);
+});
+
+test('helper failure retains exit diagnostics and keeps Stop blocked without state writes', async t => {
+  const f = await fixture(t, false);
+  const before = await f.snapshot();
+  await fs.writeFile(join(f.root, 'skills/codex-pro-dispatch/scripts/pro-dispatch'),
+    'import sys\nsys.stderr.write("fixture read failure")\nsys.exit(23)\n');
+  await assert.rejects(f.guard.prepareSupervision({}, meta, f.trusted), error => {
+    assert.equal(error.name, 'SupervisionReadError');
+    assert.match(error.message, /"code":23/);
+    assert.match(error.message, /fixture read failure/);
+    assert.equal(error.cause.code, 23);
+    return true;
+  });
+  const decision = await f.hook();
+  assert.equal(decision.decision, 'block');
+  assert.match(decision.reason, /resident inspect/);
+  assert.match(decision.reason, /"code":23/);
+  assert.deepEqual(await f.snapshot(), before);
+});
+
+test('helper deadline retains termination diagnostics without granting availability', async t => {
+  const f = await fixture(t, false);
+  await fs.writeFile(join(f.root, 'skills/codex-pro-dispatch/scripts/pro-dispatch'),
+    'import time\ntime.sleep(10)\n');
+  await assert.rejects(f.guard.prepareSupervision({}, meta, f.trusted), error => {
+    assert.equal(error.name, 'SupervisionReadError');
+    assert.match(error.message, /"killed":true/);
+    assert.match(error.message, /"signal":"SIGTERM"/);
+    return true;
+  });
 });
 
 test('unconfigured ordinary tasks are not trapped when canonical owner is conclusively absent', async t => {
@@ -631,5 +662,224 @@ test('retained receipt rereads owner, complete status, and queue', async t => {
     const f = await retainedReceipt(t);
     await changeAfterFirstSnapshot(f, change, 4);
     assert.equal((await f.hook()).decision, 'block');
+  }
+});
+
+// Issue 29: one arbitration between a genuine Stop and the qualification
+// deadline. Every Stop here is a simulated hook event, never native evidence.
+const operation = 'c'.repeat(64);
+function captureDeadline(t) {
+  const realTimeout = globalThis.setTimeout, clock = {expire: null};
+  const mock = t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+    if (delay !== 120000) return realTimeout(callback, delay, ...args);
+    clock.expire = callback;
+    return realTimeout(() => {}, 0);
+  });
+  clock.restore = () => mock.mock.restore();
+  return clock;
+}
+async function startupTurn(t, f, turnId) {
+  const owner = f.authority.owner;
+  Object.assign(owner, {version: 4, session: null, generation: 23, owner: 'owner-23',
+    qualification: {startup: {operation_id: operation, native_task: parent, native_turn: turnId}}});
+  for (const slot of owner.slots) Object.assign(slot, {request: null, invocation: null, phase: 'idle'});
+  await f.update();
+  const g = {}, turnMeta = {threadId: parent, 'x-codex-turn-metadata': {turn_id: turnId}};
+  const binding = {operation, generation: 23, owner: 'owner-23'};
+  const key = sha(parent + '\0' + turnId), directory = join(f.root, 'state/resident-supervision');
+  return {g, meta: turnMeta, binding, challenge: join(directory, key + '.json'), observed: join(directory, key + '.observed.json'),
+    event: {...event, turn_id: turnId}};
+}
+async function timedOut(t, f, turnId = turn) {
+  const clock = captureDeadline(t), s = await startupTurn(t, f, turnId);
+  await f.guard.prepareSupervision(s.g, s.meta, f.trusted);
+  await f.guard.armSupervision(s.g, s.meta, f.trusted, s.binding);
+  clock.expire();
+  await assert.rejects(f.guard.settleSupervision(s.g, s.meta, f.trusted), e => e.code === 'qualification_timeout');
+  clock.restore();
+  return s;
+}
+
+test('deadline before Stop: terminal receipt, late Stop releases only the matching idle acquisition', async t => {
+  const f = await fixture(t, false);
+  const s = await timedOut(t, f);
+  const terminal = JSON.parse(await fs.readFile(s.observed, 'utf8'));
+  assert.deepEqual({operation: terminal.operation, generation: terminal.generation, owner: terminal.owner,
+    parent: terminal.parent, turn: terminal.turn, waiter: terminal.waiter, qualified: terminal.qualified,
+    send_authorized: terminal.send_authorized, reason: terminal.reason},
+  {operation, generation: 23, owner: 'owner-23', parent, turn, waiter: 'closed', qualified: false,
+    send_authorized: false, reason: 'qualification_timeout'});
+  assert.equal(terminal.nonce, JSON.parse(await fs.readFile(s.challenge, 'utf8')).nonce);
+  const before = await f.snapshot();
+  assert.deepEqual(await f.hook(), {});
+  assert.deepEqual(await f.hook({...event, stop_hook_active: true}), {});
+  assert.deepEqual(await f.snapshot(), before);
+  await assert.rejects(f.guard.requireSupervision(s.g, meta, f.trusted));
+  await assert.rejects(f.guard.requireRetainedSupervision(s.g, meta, f.trusted));
+  // One genuine probe per task turn: the closed waiter is never re-armed.
+  delete s.g.parkedSupervisionWait;
+  await assert.rejects(f.guard.armSupervision(s.g, meta, f.trusted, s.binding), /already ended/);
+});
+
+test('Stop before deadline: the observation keeps the slot and the deadline cannot erase it', async t => {
+  const f = await fixture(t, false), clock = captureDeadline(t), s = await startupTurn(t, f, turn);
+  await f.guard.prepareSupervision(s.g, s.meta, f.trusted);
+  const armed = await f.guard.armSupervision(s.g, s.meta, f.trusted, s.binding);
+  assert.equal(armed.deadlineAt - armed.armedAt, 120000);
+  assert.equal(armed.challengeSha256, sha(await fs.readFile(s.challenge)));
+  assert.match((await f.hook()).reason, /^Supervision preflight only/);
+  clock.expire();
+  await f.guard.settleSupervision(s.g, s.meta, f.trusted);
+  clock.restore();
+  assert.equal(await fs.readFile(s.observed, 'utf8'), await fs.readFile(s.challenge, 'utf8'));
+  assert.equal((await f.guard.requireSupervision(s.g, meta, f.trusted)).kind, 'resident_supervision_verified');
+});
+
+test('concurrent Stop and deadline arbitrate exactly once on the observed slot', async t => {
+  const f = await fixture(t, false), outcomes = [];
+  for (let i = 0; i < 6; i++) {
+    const clock = captureDeadline(t), s = await startupTurn(t, f, 'race-turn-' + i);
+    await f.guard.prepareSupervision(s.g, s.meta, f.trusted);
+    await f.guard.armSupervision(s.g, s.meta, f.trusted, s.binding);
+    const [decision] = await Promise.all([f.hook(s.event),
+      new Promise(resolve => setTimeout(() => { clock.expire(); resolve(); }, i * 40))]);
+    const settled = await f.guard.settleSupervision(s.g, s.meta, f.trusted).then(() => true, e => {
+      assert.equal(e.code, 'qualification_timeout'); return false; });
+    clock.restore();
+    const observed = await fs.readFile(s.observed, 'utf8'), challenge = await fs.readFile(s.challenge, 'utf8');
+    if (settled) {
+      assert.equal(observed, challenge);
+      assert.match(decision.reason, /^Supervision preflight only/);
+      await f.guard.requireSupervision(s.g, s.meta, f.trusted);
+    } else {
+      assert.equal(JSON.parse(observed).kind, 'resident_supervision_terminal');
+      assert.deepEqual(decision, {});
+      await assert.rejects(f.guard.requireSupervision(s.g, s.meta, f.trusted));
+    }
+    outcomes.push(settled);
+  }
+  assert.equal(outcomes.length, 6);
+  t.diagnostic('Stop won (true) or deadline won (false): ' + JSON.stringify(outcomes));
+});
+
+test('terminal receipt never releases moved authority or live work', async t => {
+  for (const change of [
+    v => { v.owner.generation = 24; v.owner.owner = 'owner-24'; },
+    v => { v.owner.qualification.startup.operation_id = 'd'.repeat(64); },
+    v => { v.owner.qualification.startup.native_turn = 'later-turn'; },
+    v => { v.owner.slots[0].phase = 'collect_only'; v.owner.slots[0].request = rid; },
+    v => { v.status.active_assignment = {assignment_id: rid}; v.status.active_assignments = [{assignment_id: rid}]; },
+    v => { v.queue.requests = [{request_id: rid, state: 'claimed'}]; }
+  ]) {
+    const f = await fixture(t, false);
+    await timedOut(t, f);
+    change(f.authority); await f.update();
+    const before = await f.snapshot();
+    assert.equal((await f.hook()).decision, 'block');
+    assert.deepEqual(await f.snapshot(), before);
+  }
+});
+
+test('terminal receipt rereads canonical state before release', async t => {
+  const f = await fixture(t, false);
+  await timedOut(t, f);
+  await changeAfterFirstSnapshot(f, v => { v.owner.generation = 24; }, 4);
+  assert.equal((await f.hook()).decision, 'block');
+});
+
+test('terminal receipt in a task that no longer owns authority does not trap it', async t => {
+  const f = await fixture(t, false);
+  await timedOut(t, f);
+  f.authority.owner.parent = 'replacement-parent'; await f.update();
+  assert.deepEqual(await f.hook(), {});
+});
+
+// App restart (2026-09-28): the owner was acquired and served in an earlier
+// turn of this task; these Stop events come from a later turn of the same task.
+function servedEarlier(f, servingTurn = 'serving-turn') {
+  const o = f.authority.owner;
+  o.qualification = {startup: {acquired: {generation: o.generation, owner: o.owner, parent: o.parent},
+    native_task: o.parent, native_turn: servingTurn, operation_id: 'c'.repeat(64)}};
+}
+const laterTurnMarkers = async f => (await fs.readdir(join(f.root, 'state/resident-supervision')).catch(() => []))
+  .filter(name => name.startsWith('other-turn-'));
+
+test('a later owner-task turn is asked once to recover, then released; the serving turn still blocks', async t => {
+  const f = await fixture(t, false);
+  servedEarlier(f); await f.update();
+  const before = await f.snapshot();
+  const prompt = await f.hook({...event, stop_hook_active: true});
+  assert.equal(prompt.decision, 'block');
+  assert.match(prompt.reason, /served by an earlier turn of this task/);
+  assert.match(prompt.reason, /\/references\/listener-start\.md /);
+  assert.doesNotMatch(prompt.reason, /ORIGINAL/);
+  assert.equal((await f.hook(event)).decision, 'block', 'only a hook continuation is released');
+  for (let i = 0; i < 2; i++) assert.deepEqual(await f.hook({...event, stop_hook_active: true}), {});
+  const after = await f.snapshot(), added = Object.keys(after).filter(path => !(path in before));
+  assert.deepEqual(added.map(path => path.replace(/-[a-f0-9]{64}\.json$/, '')),
+    ['/state/resident-supervision/other-turn-22-owner-22']);
+  for (const path of Object.keys(before)) assert.equal(after[path], before[path]);
+  // The turn that serves this owner keeps waiting on its original cell.
+  for (let i = 0; i < 2; i++)
+    assert.match((await f.hook({...event, turn_id: 'serving-turn', stop_hook_active: true})).reason, /ORIGINAL/);
+});
+
+test('after recovery in the same turn, the new owner keeps the original-cell rule', async t => {
+  const f = await fixture(t, false);
+  servedEarlier(f); await f.update();
+  assert.equal((await f.hook({...event, stop_hook_active: true})).decision, 'block');
+  Object.assign(f.authority.owner, {generation: 23, owner: 'owner-23'});
+  servedEarlier(f, turn); await f.update();
+  for (let i = 0; i < 2; i++)
+    assert.match((await f.hook({...event, stop_hook_active: true})).reason, /ORIGINAL/);
+  assert.equal((await laterTurnMarkers(f)).length, 1);
+});
+
+test('without a serving turn for the current owner, every turn keeps the original-cell rule', async t => {
+  for (const change of [o => { o.qualification = {}; },
+    o => { o.qualification.startup.acquired.generation = 21; },
+    o => { o.qualification.startup.native_task = 'other-task'; }]) {
+    const f = await fixture(t, false);
+    servedEarlier(f); change(f.authority.owner); await f.update();
+    for (let i = 0; i < 2; i++)
+      assert.match((await f.hook({...event, stop_hook_active: true})).reason, /ORIGINAL/);
+    assert.deepEqual(await laterTurnMarkers(f), []);
+  }
+});
+
+test('a later turn never asks to recover a joined listener or a busy owner', async t => {
+  const joined = await fixture(t, false);
+  servedEarlier(joined); await joined.update(); await joined.joined();
+  assert.deepEqual(await joined.hook(), {});
+  // Unresolved work keeps the existing one-reentry release and its requests.
+  const busy = await fixture(t);
+  servedEarlier(busy);
+  busy.authority.status.active_assignments = [{assignment_id: rid, status: 'submitted', no_resend: true, submission_count: 1}];
+  await busy.update();
+  assert.match((await busy.hook()).reason, /ORIGINAL/);
+  assert.deepEqual(await busy.hook({...event, stop_hook_active: true}), {});
+  assert.equal(busy.authority.owner.slots[0].phase, 'running');
+  for (const f of [joined, busy]) assert.deepEqual(await laterTurnMarkers(f), []);
+});
+
+test('a later turn is not released when the owner changes during the check', async t => {
+  const f = await fixture(t, false);
+  servedEarlier(f); await f.update();
+  await changeAfterFirstSnapshot(f, v => { v.owner.generation = 23; }, 3);
+  const decision = await f.hook({...event, stop_hook_active: true});
+  assert.equal(decision.decision, 'block');
+  assert.match(decision.reason, /could not be verified/);
+  assert.deepEqual(await laterTurnMarkers(f), []);
+});
+
+
+test('legacy serve-existing claims retain the original-cell rule in later turns', async t => {
+  for (const name of ['resident-serve-existing.json', 'resident-unused-replacement.json']) {
+    const f = await fixture(t, false);
+    servedEarlier(f); await f.update();
+    await save(join(f.root, 'session', name), {});
+    for (let i = 0; i < 2; i++)
+      assert.match((await f.hook({...event, stop_hook_active: true})).reason, /ORIGINAL/);
+    assert.deepEqual(await laterTurnMarkers(f), []);
   }
 });
