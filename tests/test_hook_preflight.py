@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import unittest
@@ -44,6 +45,21 @@ class HookPreflightTests(unittest.TestCase):
                 self.assertEqual(result['reason'], reason)
                 self.assertEqual(result['state'], 'blocked')
                 self.assertNotIn('trust', ' '.join(result['actions']).lower())
+
+    def test_plugin_hook_binds_only_to_this_installation(self):
+        # The host reports a plugin hook with ${PLUGIN_ROOT} expanded to its
+        # versioned cache copy (observed 2026-09-27, codex-cli 0.158.0-alpha.2).
+        expected = shlex.join(['node', str(ROOT/'skills/codex-pro-dispatch/scripts/resident-supervision.mjs'), 'stop'])
+        plugin = {'source': 'plugin', 'pluginId': 'codex-pro-dispatch@codex-pro-dispatch',
+                  'sourcePath': str(ROOT/'hooks/hooks.json'), 'trustStatus': 'untrusted'}
+        result = self.check(**plugin)
+        self.assertEqual((result['state'], result['reason'], result['expected_command']), ('blocked', 'untrusted', expected))
+        self.assertEqual({k: result['hooks'][0][k] for k in ('source', 'pluginId', 'sourcePath')},
+                         {k: plugin[k] for k in ('source', 'pluginId', 'sourcePath')})
+        other = '/x/.codex/plugins/cache/codex-pro-dispatch/codex-pro-dispatch/1.3.1/skills/codex-pro-dispatch/scripts/resident-supervision.mjs'
+        result = self.check(**dict(plugin, trustStatus='trusted', command=shlex.join(['node', other, 'stop'])))
+        self.assertEqual((result['reason'], result['expected_command']), ('wrong_definition', expected))
+        self.assertIn('keep one installation', result['actions'][0])
 
     def test_disabled_and_modified_collect_both_actions(self):
         result = self.check(enabled=False, trustStatus='modified')
@@ -115,15 +131,47 @@ class HookPreflightTests(unittest.TestCase):
             self.assertEqual([b['reason'] for b in caught.exception.details['blockers']], ['listener_hook_modified','cooldown'])
             plan.assert_not_called()
 
+    def client_root(self):
+        return str(Path(self.temp.name).resolve()/'clients')
+
     def test_unverified_does_not_skip_generated_native_qualification(self):
-        args = cli.build_parser().parse_args(['listener','start','--worker-1','one','--codex',FAKE])
+        args = cli.build_parser().parse_args(['listener','start','--worker-1','one','--codex',FAKE,
+                                              '--client-root',self.client_root()])
         with patch.dict(os.environ, CPD_TEST_MODE='rpc_error'):
             result = cli.run(args)
-        self.assertEqual(result['kind'], 'native_listener_start_packet')
+        self.assertEqual(result['kind'], 'resident_packet_call')
+        self.assertEqual(result['tool'], 'functions.exec')
         self.assertEqual(result['hook_preflight']['state'], 'unverified')
         self.assertFalse(result['send_authorized'])
         self.assertFalse((self.paths.state_dir/'resident-owner.json').exists())
-        self.assertIn('commitListenerStart', result['calls']['start'])
+        packet = json.loads(Path(result['packet_file']).read_text())
+        self.assertEqual(packet['kind'], 'native_listener_lifecycle_packet')
+        self.assertEqual(list(packet['calls']), ['lifecycle'])
+        self.assertIn('commitListenerStart', packet['calls']['lifecycle'])
+
+    def test_empty_start_without_enrolled_pool_blocks_before_acquisition(self):
+        args = cli.build_parser().parse_args(['listener','start','--codex',FAKE,'--client-root',self.client_root()])
+        with self.assertRaises(StateError) as caught:
+            cli.run(args)
+        self.assertEqual([b['reason'] for b in caught.exception.details['blockers']], ['pool_not_configured'])
+        self.assertFalse((self.paths.state_dir/'resident-owner.json').exists())
+        self.assertFalse(Path(self.client_root()).exists())
+
+    def test_empty_start_uses_enrolled_exact_pool_without_acquiring(self):
+        fixtures.ThreeFeatureTests.activate(self)
+        args = cli.build_parser().parse_args(['listener','start','--codex',FAKE,'--client-root',self.client_root()])
+        result = cli.run(args)
+        self.assertEqual(result['desired_ids'], ['worker-a', 'worker-b'])
+        self.assertEqual(result['hook_preflight']['state'], 'ready')
+        self.assertFalse((self.paths.state_dir/'resident-owner.json').exists())
+        packet = json.loads(Path(result['packet_file']).read_text())
+        self.assertEqual(packet['desired_ids'], ['worker-a', 'worker-b'])
+        self.assertIsNone(packet['current_owner'])
+
+    def test_second_worker_requires_first(self):
+        args = cli.build_parser().parse_args(['listener','start','--worker-2','two','--codex',FAKE])
+        with self.assertRaises(cli.ConfigurationError):
+            cli.run(args)
 
     def test_check_command_exit_and_no_owner(self):
         for trust, code in [('trusted',0), ('modified',1)]:

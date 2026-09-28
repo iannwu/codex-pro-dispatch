@@ -49,6 +49,13 @@ def startup_blockers(paths):
         return idle_blockers(paths, locked, owner)
 
 
+def configured_workers(paths):
+    """Enrolled exact destinations for an empty start request, never caller input."""
+    with core.state_lock(paths) as locked:
+        _, pool, _ = snapshot(paths, locked)
+    return [w.conversation_id for w in pool.workers] if pool else []
+
+
 def idle(paths, locked, owner):
     blockers = idle_blockers(paths, locked, owner)
     if blockers:

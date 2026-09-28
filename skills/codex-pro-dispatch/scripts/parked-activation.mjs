@@ -49,7 +49,7 @@ body.slice(0,newline+1)+residentSurfaceGuard+"\n"+body.slice(newline+1):resident
 // writes; neither verifies a model. The literals stay inline because several
 // gate functions are serialized into packets and cannot see module scope.
 const pins={
-"resident-supervision.mjs":"6bffa061732fbd07bd04488100d2af4a1bf4653cb3854e6884f25966d30a206f",
+"resident-supervision.mjs":"2dc0916b8c5c7846a4bb3cba3977ddbba330dd1d6452f77f903fe0372ff31319",
   "parked-runner.js":"071cee7b64b403484b053fc57e61731c359bd30e760941af99df5ed0f5382b07",
 "parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
 "parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
@@ -70,29 +70,45 @@ const ownerSupervision=await import(pathToFileURL(join(dir,"resident-supervision
 
 // This probe runs before opening a listener. A host that skips Stop, changes
 // native turn identity, or loses the original qualification cell stays closed.
-export async function prepareResidentSupervision(g,meta,trusted){
-return await ownerSupervision.prepareSupervision(g,meta,trusted);
+// Prepare writes the challenge and arms the watcher and deadline before the
+// caller may ask for a final response; a startup binding also persists the
+// armed receipt and names the owner a timeout receipt belongs to.
+export async function prepareResidentSupervision(g,meta,trusted,binding=null){
+if(binding!==null)await operationDirectory(binding.evidence);
+await ownerSupervision.prepareSupervision(g,meta,trusted);
+const armed=await ownerSupervision.armSupervision(g,meta,trusted,binding&&
+{operation:binding.operation,generation:binding.generation,owner:binding.owner});
+if(binding!==null)await lifecycleReceipt(binding.evidence,meta,{schema_version:1,kind:"listener_lifecycle",
+operation_id:binding.operation,generation:binding.generation,state:"qualifying",action:"finalize",...armed},"armed");
+return {...armed,kind:"resident_supervision_probe"};
 }
 export async function waitResidentSupervision(g,meta,trusted){
-return await ownerSupervision.waitSupervision(g,meta,trusted);
+try{return {...await ownerSupervision.settleSupervision(g,meta,trusted),qualified:true};}
+catch(e){
+if(e?.code!=="qualification_timeout")throw e;
+return {kind:"resident_supervision_terminal",qualified:false,reason:"qualification_timeout",
+terminal_receipt:e.terminal,admissionObserved:false,sendAuthorized:false};
+}
 }
 export async function requireResidentSupervision(g,meta,trusted){
 return await ownerSupervision.requireSupervision(g,meta,trusted);
 }
-function buildSupervisionCall(trusted,sourceHash){
+function buildSupervisionCall(trusted,sourceHash,binding=null){
 const path=fileURLToPath(import.meta.url),url=pathToFileURL(path).href+"?sha256="+sourceHash;
-const code=name=>`{
+const code=(name,extra)=>`{
 const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
 if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(sourceHash)})throw Error("Activation pin changed");
 const a=await import(${J(url)});
-console.log(JSON.stringify(await a.${name}(globalThis,nodeRepl.requestMeta,${J(trusted)})));
+console.log(JSON.stringify(await a.${name}(globalThis,nodeRepl.requestMeta,${J(trusted)}${extra})));
 }`;
-const call=name=>`value(await tools.mcp__node_repl__js(${J({code:code(name),timeout_ms:60000,title:"Resident Stop qualification"})}))`;
+const call=(name,extra="")=>`value(await tools.mcp__node_repl__js(${J({code:code(name,extra),timeout_ms:60000,title:"Resident Stop qualification"})}))`;
 return `// @exec: {"yield_time_ms":1000}
 function value(r){if(r?.isError===true||r?.status==="failed"||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Supervision qualification failed; no availability");return JSON.parse(r.content[0].text);}
-text(${call("prepareResidentSupervision")});
-text({kind:"resident_supervision_probe_required",admissionObserved:false,instruction:"Only after this message appears and this qualification cell yields, attempt one final response to exercise the Stop hook. Its block must return you to functions.wait on this original cell. Do not open or serve until this cell completes successfully. A missing hook or changed native turn means no availability."});
-text(${call("waitResidentSupervision")});
+const armed=${call("prepareResidentSupervision",binding===null?"":","+J(binding))};
+text({...armed,kind:"resident_supervision_probe_required",state:"qualifying",action:"finalize",instruction:"Attempt exactly one final response now. The Stop hook must block it and return you to functions.wait on this SAME cell. Do not call functions.exec again, open, or serve until this cell completes successfully. A missing hook or changed native turn means no availability."});
+const settled=${call("waitResidentSupervision")};
+if(settled.qualified!==true){text({...settled,state:"failed",action:"stop"});throw Error("Resident Stop qualification failed: "+settled.reason);}
+text(settled);
 text(${call("requireResidentSupervision")});`;
 }
 
@@ -894,25 +910,79 @@ v.truncated===true||v.thread.truncated===true)throw Error("Worker identity diffe
 }
 }
 
-export async function commitListenerStart(g,meta,plan,reads){
+function listenerPython(call,input,unknown){
+const code=`import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${J(join(dir,"../../../src"))})\nfrom codex_pro_dispatch import core,listener\np=json.load(sys.stdin)\npaths=core.RuntimePaths(Path(p['plan']['expected']['config_dir']),Path(p['plan']['expected']['state_dir']))\ntry:\n r=${call}\nexcept core.DispatchError as e:\n r={'ok':True,'state':'blocked','reason':str(e),'details':e.details,'send_authorized':False}\nprint(json.dumps(r))`;
+return new Promise(resolve=>{
+const child=execFile("python3",["-c",code],{timeout:30000,maxBuffer:1048576},(error,out)=>{
+if(error){resolve(unknown);return;}
+try{resolve(JSON.parse(out));}catch{resolve(unknown);}
+});
+child.stdin.on("error",()=>resolve(unknown));
+child.stdin.end(J(input));
+});
+}
+const commitUnknown={ok:false,state:"commit_unknown",reason:"commit_unknown",send_authorized:false};
+
+// Private evidence directory of one startup operation, under the client root.
+async function operationDirectory(path){
+if(typeof path!=="string"||!/\/listener-start-[A-Za-z0-9]{6}$/.test(path))
+throw Error("Invalid listener operation directory");
+await privateDirectory(path);
+return path;
+}
+// Diagnostic receipts only: they never authorize a send, renew admission, or
+// override canonical state. Each is exclusive, synced, and survives executor loss.
+async function lifecycleReceipt(directory,meta,event,label){
+await operationDirectory(directory);
+const count=(await fs.readdir(directory)).filter(n=>/^receipt-\d{3}-/.test(n)).length;
+const path=join(directory,"receipt-"+String(count+1).padStart(3,"0")+"-"+label+".json");
+const receipt={...event,task:meta?.threadId??null,turn:meta?.["x-codex-turn-metadata"]?.turn_id??null,recorded_at:Date.now()};
+const h=await fs.open(path,"wx",384);
+try{await h.writeFile(J(receipt));await h.sync();}finally{await h.close();}
+const d=await fs.open(directory,"r");try{await d.sync();}finally{await d.close();}
+return {receipt:path};
+}
+export async function recordListenerLifecycle(g,meta,directory,event){
+if(!event||typeof event!=="object"||Array.isArray(event)||typeof event.state!=="string"||
+!/^[a-z_]{1,32}$/.test(event.state))throw Error("Invalid lifecycle receipt");
+return await lifecycleReceipt(directory,meta,event,event.state);
+}
+
+// lifecycle={directory} is the composed startup: the same guarded commit, one
+// bounded canonical retry, and stage loaders returned for internal execution.
+export async function commitListenerStart(g,meta,plan,reads,lifecycle=null){
 const saved=g.listenerStartup,turn=meta?.["x-codex-turn-metadata"]?.turn_id;
 if(!saved||saved.parent!==meta?.threadId||saved.turn!==turn||saved.plan!==J(plan))throw Error("identity_invalid");
 validateListenerWorkers(plan,reads);
 await fs.mkdir(saved.root,{recursive:true,mode:448});
 await privateDirectory(saved.root);
+const directory=lifecycle===null?null:await operationDirectory(lifecycle?.directory);
+if(directory!==null&&dirname(directory)!==saved.root.replace(/\/$/,""))throw Error("Listener operation directory is outside the client root");
+// A turn whose Stop probe already ran cannot qualify again; refuse before any
+// acquisition so a repeated launch never rotates the owner it cannot serve.
+if(directory!==null&&await ownerSupervision.probeAttempted(plan.expected.state_dir,saved.parent,saved.turn))
+return {ok:true,state:"blocked",reason:"probe_already_attempted_this_turn",send_authorized:false,
+next_action:"Start again in a new turn; never repeat functions.exec for the same start"};
+// commit_unknown first inspects the same operation (listener.commit is
+// idempotent); stale regenerates once from canonical state for the same
+// destinations. A repeated result stops. Physical evidence is never rebound.
+let result,retries=directory===null?0:1;
+for(;;){
 if(plan.same_workers&&plan.current_owner?.session){
 const ready=await residentStatus(plan.current_owner.session.directory);
 if(ready.admissionObserved===true)return {...ready,ok:true,state:"ready",send_authorized:false};
 }
-const code=`import json,sys\nfrom pathlib import Path\nsys.path.insert(0,${J(join(dir,"../../../src"))})\nfrom codex_pro_dispatch import core,listener\np=json.load(sys.stdin)\npaths=core.RuntimePaths(Path(p['plan']['expected']['config_dir']),Path(p['plan']['expected']['state_dir']))\ntry:\n r=listener.commit(paths,p['plan'],p['parent'],p['turn'])\nexcept core.DispatchError as e:\n r={'ok':True,'state':'blocked','reason':str(e),'details':e.details,'send_authorized':False}\nprint(json.dumps(r))`;
-const result=await new Promise(resolve=>{
-const child=execFile("python3",["-c",code],{timeout:30000,maxBuffer:1048576},(error,out)=>{
-if(error){resolve({ok:false,state:"commit_unknown",reason:"commit_unknown",send_authorized:false});return;}
-try{resolve(JSON.parse(out));}catch{resolve({ok:false,state:"commit_unknown",reason:"commit_unknown",send_authorized:false});}
-});
-child.stdin.on("error",()=>resolve({ok:false,state:"commit_unknown",reason:"commit_unknown",send_authorized:false}));
-child.stdin.end(J({plan,parent:saved.parent,turn:saved.turn}));
-});
+result=await listenerPython("listener.commit(paths,p['plan'],p['parent'],p['turn'])",{plan,parent:saved.parent,turn:saved.turn},commitUnknown);
+if(retries&&result.state==="commit_unknown"){retries--;continue;}
+if(retries&&result.state==="stale"&&plan.physical===null){
+retries--;
+const fresh=await listenerPython("listener.plan(paths,[w['conversation_id'] for w in p['plan']['workers']])",{plan},null);
+if(fresh?.version===1&&J(fresh.workers?.map(w=>w.conversation_id))===J(plan.workers.map(w=>w.conversation_id))){
+plan=fresh;g.listenerStartup=Object.freeze({...saved,plan:J(plan)});continue;
+}
+}
+break;
+}
 if(result.state!=="next_action")return {...result,next_action:
 result.state==="stale"||result.state==="commit_unknown"?"Regenerate listener start once from canonical state; stop on a repeated stale or uncertain result. Existing authorization covers this retry":
 result.reason?.includes("legacy_exclusion_unknown")?"Restart the Mac, do not resume old listeners, then retry with the user's factual quiescence confirmation":
@@ -921,20 +991,32 @@ result.reason?.includes("cooldown")?"Retry after the stored cooldown":
 result.reason?.includes("recovery")||result.reason?.includes("pool_not_idle")?"Use existing recovery for the named or occupied request, preserving its destination":
 "Preserve evidence and inspect the exact failed predicate; commit_unknown requires canonical operation inspection before retry"};
 if(result.owner.session!==null)return {...result,state:"blocked",reason:"bound_startup_requires_existing_context",next_action:"Inspect the original native open/serve context; never replay a consumed serve call"};
-const packet=await poolResidentPacket(saved.parent,saved.parent,plan.workers,saved.root,result);
-const directory=await fs.mkdtemp(saved.root.replace(/\/$/,"")+"/listener-start-");
-await fs.chmod(directory,448);
-const path=join(directory,"activation.json"),raw=Buffer.from(J(packet));
+const evidence=directory??await fs.realpath(await fs.mkdtemp(saved.root.replace(/\/$/,"")+"/listener-start-"));
+await fs.chmod(evidence,448);
+const packet=await poolResidentPacket(saved.parent,saved.parent,plan.workers,saved.root,result,evidence);
+const path=join(evidence,"activation.json"),raw=Buffer.from(J(packet));
 const h=await fs.open(path,"wx",384);try{await h.writeFile(raw);await h.sync();}finally{await h.close();}
-return {...result,next_packet:path,next_packet_sha256:createHash("sha256").update(raw).digest("hex"),
+const next={...result,next_packet:path,next_packet_sha256:createHash("sha256").update(raw).digest("hex"),
 next_action:"Use packet-call qualify, complete the actual Stop roundtrip, then open and supervise the original serve cell. Ownership is not readiness."};
+if(directory===null)return next;
+// Pinned stage loaders for the composed closure; the same byte and realpath
+// checks as packet-call, never a model-selected stage or digest.
+const stages={};
+for(const stage of ["qualify","open","serve"])
+stages[stage]=(await readResidentPacketCall(path,stage,next.next_packet_sha256)).arguments.code;
+return {...next,next_action:null,stages};
 }
 
-export async function listenerStartPacket(plan,root){
-const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
-const header=`const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
+function activationHeader(path,hash){
+return `const fs=await import("node:fs/promises"),crypto=await import("node:crypto");
 if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").update(await fs.readFile(${J(path)})).digest("hex")!==${J(hash)})throw Error("Activation pin changed");
 const a=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});`;
+}
+
+// Older multi-stage start packet, kept for explicit diagnostics and compatibility.
+export async function listenerStartPacket(plan,root){
+const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
+const header=activationHeader(path,hash);
 const capture=`{${header}console.log(JSON.stringify(await a.captureListenerStart(globalThis,nodeRepl.requestMeta,${J(plan)},${J(root)})));}`;
 const body=`function value(r){if(r?.isError||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Native startup failed");return JSON.parse(r.content[0].text);}
 const identity=value(await tools.mcp__node_repl__js(${J({code:capture,timeout_ms:60000,title:"Capture listener startup identity"})}));
@@ -947,7 +1029,119 @@ execution:residentExecution,calls:{start:guardResidentBody(body)},
 next_action:"Save this packet privately, extract start with packet-call and its raw SHA-256, and execute its arguments unchanged in the Listener task."};
 }
 
-async function poolResidentPacket(broker,parent,workers,root,acquired){
+// The composed closure evaluates this installation's code. Refuse files that
+// another account could rewrite; runtime hashes only detect later changes.
+async function installedRuntime(){
+for(const path of [dir,...["parked-activation.mjs","parked-serving.mjs","pro-dispatch",...Object.keys(pins)].map(n=>join(dir,n))]){
+const st=await fs.lstat(path);
+if(st.uid!==ownerUid||(st.mode&0o022)!==0||!(path===dir?st.isDirectory():st.isFile()))
+throw Error("Installed runtime must be owner-controlled and not group or world writable: "+path);
+}
+}
+async function installedRevision(activationSha256){
+const root=join(dir,"../../..");
+const version=await fs.readFile(join(root,"VERSION"),"utf8").then(v=>v.trim(),()=>null);
+const head=await new Promise(resolve=>execFile("git",["-C",root,"rev-parse","HEAD"],{timeout:3000},
+(error,out)=>resolve(error?null:out.trim()||null)));
+return {version,git_head:head,activation_sha256:activationSha256,
+supervision_sha256:pins["resident-supervision.mjs"],serving_sha256:servingHash};
+}
+const shellQuote=v=>"'"+String(v).replace(/'/g,"'\\''")+"'";
+const hostBuildCommand='/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" -c "Print :CFBundleVersion" /Applications/ChatGPT.app/Contents/Info.plist; /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex --version; /usr/bin/sw_vers -productVersion; /usr/bin/uname -m';
+// Observed evidence, not a proven cause: on 2026-09-27 this unchanged, trusted
+// hook did not run in older Listener tasks and did run in a newly created one.
+const qualificationTimeoutDiagnostic="No Stop hook run was observed for this Listener task turn before the 45-second deadline, so nothing was opened or sent and the listener is not ready. The acquired owner stays recoverable. An accepted final response does not prove the hook never ran: after the deadline the hook can allow that final for this unserved owner, and a run with a different task or turn identity is not counted. On 2026-09-27 the same trusted hook did not run in older Listener tasks but did run in a newly created task; the exact cause is not proven. Open a new Listener task and say start listener there. Re-approve the hook only if pro-dispatch listener check reports untrusted or modified.";
+
+// One generated functions.exec closure owns every startup stage. The model
+// launches it, attempts one final when told, and waits on this same cell.
+export async function listenerLifecyclePacket(plan,root){
+if(plan?.version!==1||!Array.isArray(plan.workers)||plan.workers.length<1||plan.workers.length>2)
+throw Error("Invalid listener plan");
+await installedRuntime();
+await fs.mkdir(root,{recursive:true,mode:448});
+await privateDirectory(root);
+const evidence=await fs.realpath(await fs.mkdtemp(root.replace(/\/$/,"")+"/listener-start-"));
+await fs.chmod(evidence,448);
+const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
+const revision=await installedRevision(hash);
+const call=(name,args)=>J("console.log(JSON.stringify(await a."+name+"(globalThis,nodeRepl.requestMeta,"+args);
+const body=`// @exec: {"yield_time_ms":1000}
+const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor,header=${J(activationHeader(path,hash))},evidence=${J(evidence)};
+const quote=${shellQuote.toString()};
+function value(r){if(r?.isError===true||r?.status==="failed"||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Native lifecycle call failed: "+JSON.stringify(r).slice(0,2000));return JSON.parse(r.content[0].text);}
+async function repl(code,title){return value(await tools.mcp__node_repl__js({code:"{"+header+code+"}",timeout_ms:60000,title}));}
+let operation=null,generation=null,capacity=${plan.workers.length},session=null,admission=false,state="starting",finished=false,serving=null;
+function emit(next,action,extra){state=next;const event={schema_version:1,kind:"listener_lifecycle",operation_id:operation,state,action,reason:null,session_directory:session,generation,capacity,admission_observed:admission,observed_at:Date.now(),evidence_path:evidence,...extra};text(event);return event;}
+async function record(event){try{return await repl(${call("recordListenerLifecycle",J(evidence)+",")}+JSON.stringify(event)+")));","Record listener lifecycle receipt");}catch(e){return {receipt_error:String(e?.message||e)};}}
+async function end(next,extra){finished=true;admission=false;await record(emit(next,"stop",extra));}
+// Keeps only recent outputs; a long-lived serve relays its outputs instead.
+async function stage(code,relay){const outputs=[];let error=null;try{await new AsyncFunction("tools","text",code)(tools,v=>{outputs.push(v);if(outputs.length>8)outputs.shift();relay?.(v);});}catch(e){error=String(e?.message||e);}return {outputs,error};}
+// One read-only resident-ready process, drained until it exits. Its failure is
+// only "not observed"; it never ends or replaces the serve continuation.
+async function observe(){
+let r=await tools.exec_command({cmd:${J(shellQuote(process.execPath)+" "+shellQuote(path)+" resident-ready ")}+quote(session)+" 25000",login:false,tty:false,yield_time_ms:30000,max_output_tokens:4000}),out=r?.output??"";
+for(let i=0;i<3&&r?.exit_code===undefined&&Number.isInteger(r?.session_id);i++){r=await tools.write_stdin({session_id:r.session_id,chars:"",yield_time_ms:30000,max_output_tokens:4000});out+=r?.output??"";}
+if(r?.exit_code!==0)throw Error("resident-ready ended with "+(r?.exit_code===undefined?"a running helper":"exit "+r.exit_code)+": "+out.slice(-500));
+return JSON.parse(out);
+}
+try{
+const first=emit("starting","wait",{reason:"lifecycle_started",revision:${J(revision)}});
+const host=await tools.exec_command({cmd:${J(hostBuildCommand)},login:false,tty:false,yield_time_ms:10000,max_output_tokens:2000});
+await record({...first,host_build:{exit_code:host?.exit_code??null,output:host?.output??null}});
+const identity=await repl(${call("captureListenerStart",J(plan)+","+J(root)+")));")},"Capture listener startup identity");
+const reads=[];for(const id of identity.workers)reads.push(await tools.mcp__codex_app__read_thread({threadId:id,turnLimit:1,includeOutputs:false}));
+const started=await repl(${call("commitListenerStart",J(plan)+",")}+JSON.stringify(reads)+${J(","+J({directory:evidence})+")));")},"Guarded listener startup");
+if(started.state==="ready"){
+session=started.directory??null;generation=started.generation??null;capacity=started.maxConcurrentRequests??capacity;admission=started.admissionObserved===true;finished=true;
+await record(emit("ready","stop",{reason:"existing_service_observed",ordinal:started.ordinal??null}));
+}else if(started.state!=="next_action"||!started.stages){
+await end(["stale","commit_unknown"].includes(started.state)?"failed":"blocked",{reason:started.reason??started.state??"startup_rejected",details:started.details??null,next_action:started.next_action??null});
+}else{
+operation=started.operation_id;generation=started.owner.generation;
+await record(emit("qualifying","wait",{reason:"owner_acquired"}));
+const qualified=await stage(started.stages.qualify,v=>{if(v?.action==="finalize")emit("qualifying","finalize",{reason:"stop_probe_armed",nonce:v.nonce,armed_at:v.armedAt,deadline_at:v.deadlineAt,challenge_sha256:v.challengeSha256,instruction:"Attempt exactly one final response now. When the Stop hook blocks it, call functions.wait on this SAME cell. Never call functions.exec again for this start."});});
+if(qualified.error){
+const failed=qualified.outputs.findLast(v=>v?.state==="failed");
+await end("failed",{reason:failed?.reason??"qualification_failed",error:qualified.error,terminal_receipt:failed?.terminal_receipt??null,diagnostic:failed?.reason==="qualification_timeout"?${J(qualificationTimeoutDiagnostic)}:null});
+}else{
+await record(emit("starting","wait",{reason:"stop_observed"}));
+const opened=await stage(started.stages.open);
+let result=null;try{result=JSON.parse(opened.outputs.at(-1)?.content?.[0]?.text);}catch{}
+if(opened.error||!["ready","collect_only"].includes(result?.state)){
+await end("failed",{reason:result?.state?"open_"+result.state:"open_failed",error:opened.error,details:result?.reason??null});
+}else{
+session=result.directory;
+await record(emit("starting","wait",{reason:"listener_open_not_yet_waiting",session_id:result.sessionId}));
+let served=null,observerError=null;
+// A relayed serve output is not an admission observation.
+serving=stage(started.stages.serve,v=>{emit(state,"wait",{reason:"serve_event",admission_observed:false,detail:v});}).then(v=>served=v);
+// Readiness needs a live waiter seen by the separate observer; nothing else.
+for(let i=0;i<3&&!served&&!admission&&observerError===null;i++){
+let status=null;try{status=await observe();}catch(e){observerError=String(e?.message||e);}
+if(!served&&status?.admissionObserved===true){admission=true;capacity=status.maxConcurrentRequests??capacity;await record(emit("ready","wait",{reason:"current_owner_waiting",ordinal:status.ordinal,resident_status:status}));}
+}
+if(!admission&&!served)await record(emit("starting","wait",{reason:"admission_not_observed",observer_error:observerError}));
+await serving;
+await end(served.error?"failed":"stopped",{reason:served.error?"serve_failed":"resident_stopped",error:served.error});
+}}}
+}catch(e){if(serving!==null)await serving;if(!finished)await end("failed",{reason:"lifecycle_error",error:String(e?.message||e)});}`;
+return {ok:true,kind:"native_listener_lifecycle_packet",schema_version:1,state:"next_action",send_authorized:false,
+desired_ids:plan.workers.map(w=>w.conversation_id),current_owner:plan.current_owner??null,revision,evidence_path:evidence,
+execution:residentExecution,calls:{lifecycle:guardResidentBody(body)}};
+}
+
+// Written privately by the runtime and loaded with packet-call's byte checks.
+export async function listenerLifecycleCall(plan,root){
+const packet=await listenerLifecyclePacket(plan,root);
+const path=join(packet.evidence_path,"lifecycle.json"),raw=Buffer.from(J(packet));
+const h=await fs.open(path,"wx",384);try{await h.writeFile(raw);await h.sync();}finally{await h.close();}
+const call=await readResidentPacketCall(path,"lifecycle",createHash("sha256").update(raw).digest("hex"));
+return {...call,ok:true,schema_version:1,state:"next_action",send_authorized:false,
+evidence_path:packet.evidence_path,desired_ids:packet.desired_ids,revision:packet.revision,packet_file:path,
+next_action:"Pass arguments.code unchanged to functions.exec in the Listener task, then follow each output's action."};
+}
+
+async function poolResidentPacket(broker,parent,workers,root,acquired,evidence=null){
 if(broker!==parent||!validId(broker)||!Array.isArray(workers)||
 workers.length<1||workers.length>2||
 workers.some(worker=>!validId(typeof worker==="string"?worker:worker?.conversation_id)))
@@ -976,9 +1170,12 @@ if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").updat
 const activation=await import(${J(pathToFileURL(path).href+"?sha256="+hash)});
 console.log(JSON.stringify(await activation.openResident(globalThis,nodeRepl.requestMeta,${J(trusted)},${J(expected)},${J(attempt)},${J(root)})));
 }`;
+// A startup acquisition binds any timeout receipt to its exact operation.
+const binding=acquired&&evidence?{operation:acquired.operation_id,generation:acquired.owner.generation,
+owner:acquired.owner.owner,evidence}:null;
 return {kind:"native_activation_packet",authorization:"required_separately",broker,parent,workers:configured,
 trusted,pins,openAttempt:attempt,execution:residentExecution,lifecycle:residentLifecycle,
-calls:{qualify:guardResidentBody(buildSupervisionCall(trusted,hash)),
+calls:{qualify:guardResidentBody(buildSupervisionCall(trusted,hash,binding)),
 open:guardResidentBody("text(await tools.mcp__node_repl__js("+J({code:open,timeout_ms:60000,title:"Resident pool open"})+"));"),
 serve:guardResidentBody(buildPoolServe(trusted,parent,attempt))}};
 }
@@ -1358,7 +1555,7 @@ return buffer.subarray(0,used);
 }
 
 async function readResidentPacketStage(packetFile,stage,expectedPacketSha256){
-if(!["start","qualify","open","serve"].includes(stage)||
+if(!["lifecycle","start","qualify","open","serve"].includes(stage)||
 typeof expectedPacketSha256!=="string"||!/^[a-f0-9]{64}$/.test(expectedPacketSha256))
 throw Error("Invalid resident packet selector");
 const raw=await privateBytes(packetFile,1048576);
@@ -1369,7 +1566,7 @@ try{decoded=new TextDecoder("utf-8",{fatal:true}).decode(raw);}catch{throw Error
 let packet;
 try{packet=JSON.parse(decoded);}catch{throw Error("Invalid resident packet JSON");}
 const execution=packet?.execution;
-if(!["native_listener_start_packet","native_activation_packet","native_serve_existing_packet","native_post_arm_continuation_packet"].includes(packet?.kind)||
+if(!["native_listener_lifecycle_packet","native_listener_start_packet","native_activation_packet","native_serve_existing_packet","native_post_arm_continuation_packet"].includes(packet?.kind)||
 !execution||Array.isArray(execution)||Object.keys(execution).length!==Object.keys(residentExecution).length||
 Object.entries(residentExecution).some(([key,value])=>!Object.hasOwn(execution,key)||execution[key]!==value)||
 typeof packet.calls?.[stage]!=="string"||!packet.calls[stage])
@@ -1740,6 +1937,20 @@ reason:e.code==="ENOENT"?"evidence_missing_or_changed":"evidence_unverifiable"};
 }
 }
 
+// Bounded, event-driven wait for the same snapshot resident-status reports.
+// Read-only; a returned admission is an observation, not a promise.
+async function residentReady(directory,ms){
+if(!Number.isInteger(ms)||ms<1||ms>50000)throw Error("Invalid readiness bound");
+let last=await residentStatus(directory);
+if(last.admissionObserved===true||["closed_audited","unavailable","malformed_preserve"].includes(last.state))return last;
+try{
+return await watchFile(directory,ms,"Readiness not observed",async()=>{
+last=await residentStatus(directory);
+return last.admissionObserved===true||["closed_audited","unavailable","malformed_preserve"].includes(last.state)?last:undefined;
+}).promise;
+}catch(e){if(e.message!=="Readiness not observed")throw e;return last;}
+}
+
 async function residentNext(directory,ordinal,signal,observationMs=25000){
 const c=await rendezvousSession(directory,ordinal,"resident-next");
 if(c.resident!==true||c.helper!==helper)throw Error("Resident mismatch");
@@ -1991,7 +2202,8 @@ return {commandReady:true,...value,meaning:"start one receive; not send permissi
 if(typeof process!=="undefined"&&process.argv[1]&&await fs.realpath(process.argv[1])===fileURLToPath(import.meta.url))try{
 const [action,...args]=process.argv.slice(2);
 let result;
-if(action==="listener-start-packet"&&args.length===2) result=await listenerStartPacket(JSON.parse(args[0]),args[1]);
+if(action==="listener-lifecycle"&&args.length===2) result=await listenerLifecycleCall(JSON.parse(args[0]),args[1]);
+else if(action==="listener-start-packet"&&args.length===2) result=await listenerStartPacket(JSON.parse(args[0]),args[1]);
 else if(action==="packet"&&args.length===3) result=await packet(...args);
 else if(action==="packet-call"&&args.length===3)
 result=await readResidentPacketCall(args[0],args[1],args[2]);
@@ -2032,6 +2244,8 @@ else if(action==="resident-takeover-packet"&&args.length===0)
 result=await takeoverPacket();
 else if(action==="resident-status"&&args.length===1)
 result=await residentStatus(args[0]);
+else if(action==="resident-ready"&&args.length===2)
+result=await residentReady(args[0],Number(args[1]));
 else if(action==="ready"&&args.length===2) result=await ready(args[0],Number(args[1]));
 else if(action==="rendezvous"&&args.length===5)
 result=await rendezvous(args[0],Number(args[1]),...args.slice(2));

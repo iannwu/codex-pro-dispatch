@@ -664,3 +664,132 @@ test('retained receipt rereads owner, complete status, and queue', async t => {
     assert.equal((await f.hook()).decision, 'block');
   }
 });
+
+// Issue 29: one arbitration between a genuine Stop and the qualification
+// deadline. Every Stop here is a simulated hook event, never native evidence.
+const operation = 'c'.repeat(64);
+function captureDeadline(t) {
+  const realTimeout = globalThis.setTimeout, clock = {expire: null};
+  const mock = t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+    if (delay !== 45000) return realTimeout(callback, delay, ...args);
+    clock.expire = callback;
+    return realTimeout(() => {}, 0);
+  });
+  clock.restore = () => mock.mock.restore();
+  return clock;
+}
+async function startupTurn(t, f, turnId) {
+  const owner = f.authority.owner;
+  Object.assign(owner, {version: 4, session: null, generation: 23, owner: 'owner-23',
+    qualification: {startup: {operation_id: operation, native_task: parent, native_turn: turnId}}});
+  for (const slot of owner.slots) Object.assign(slot, {request: null, invocation: null, phase: 'idle'});
+  await f.update();
+  const g = {}, turnMeta = {threadId: parent, 'x-codex-turn-metadata': {turn_id: turnId}};
+  const binding = {operation, generation: 23, owner: 'owner-23'};
+  const key = sha(parent + '\0' + turnId), directory = join(f.root, 'state/resident-supervision');
+  return {g, meta: turnMeta, binding, challenge: join(directory, key + '.json'), observed: join(directory, key + '.observed.json'),
+    event: {...event, turn_id: turnId}};
+}
+async function timedOut(t, f, turnId = turn) {
+  const clock = captureDeadline(t), s = await startupTurn(t, f, turnId);
+  await f.guard.prepareSupervision(s.g, s.meta, f.trusted);
+  await f.guard.armSupervision(s.g, s.meta, f.trusted, s.binding);
+  clock.expire();
+  await assert.rejects(f.guard.settleSupervision(s.g, s.meta, f.trusted), e => e.code === 'qualification_timeout');
+  clock.restore();
+  return s;
+}
+
+test('deadline before Stop: terminal receipt, late Stop releases only the matching idle acquisition', async t => {
+  const f = await fixture(t, false);
+  const s = await timedOut(t, f);
+  const terminal = JSON.parse(await fs.readFile(s.observed, 'utf8'));
+  assert.deepEqual({operation: terminal.operation, generation: terminal.generation, owner: terminal.owner,
+    parent: terminal.parent, turn: terminal.turn, waiter: terminal.waiter, qualified: terminal.qualified,
+    send_authorized: terminal.send_authorized, reason: terminal.reason},
+  {operation, generation: 23, owner: 'owner-23', parent, turn, waiter: 'closed', qualified: false,
+    send_authorized: false, reason: 'qualification_timeout'});
+  assert.equal(terminal.nonce, JSON.parse(await fs.readFile(s.challenge, 'utf8')).nonce);
+  const before = await f.snapshot();
+  assert.deepEqual(await f.hook(), {});
+  assert.deepEqual(await f.hook({...event, stop_hook_active: true}), {});
+  assert.deepEqual(await f.snapshot(), before);
+  await assert.rejects(f.guard.requireSupervision(s.g, meta, f.trusted));
+  await assert.rejects(f.guard.requireRetainedSupervision(s.g, meta, f.trusted));
+  // One genuine probe per task turn: the closed waiter is never re-armed.
+  delete s.g.parkedSupervisionWait;
+  await assert.rejects(f.guard.armSupervision(s.g, meta, f.trusted, s.binding), /already ended/);
+});
+
+test('Stop before deadline: the observation keeps the slot and the deadline cannot erase it', async t => {
+  const f = await fixture(t, false), clock = captureDeadline(t), s = await startupTurn(t, f, turn);
+  await f.guard.prepareSupervision(s.g, s.meta, f.trusted);
+  const armed = await f.guard.armSupervision(s.g, s.meta, f.trusted, s.binding);
+  assert.equal(armed.deadlineAt - armed.armedAt, 45000);
+  assert.equal(armed.challengeSha256, sha(await fs.readFile(s.challenge)));
+  assert.match((await f.hook()).reason, /^Supervision preflight only/);
+  clock.expire();
+  await f.guard.settleSupervision(s.g, s.meta, f.trusted);
+  clock.restore();
+  assert.equal(await fs.readFile(s.observed, 'utf8'), await fs.readFile(s.challenge, 'utf8'));
+  assert.equal((await f.guard.requireSupervision(s.g, meta, f.trusted)).kind, 'resident_supervision_verified');
+});
+
+test('concurrent Stop and deadline arbitrate exactly once on the observed slot', async t => {
+  const f = await fixture(t, false), outcomes = [];
+  for (let i = 0; i < 6; i++) {
+    const clock = captureDeadline(t), s = await startupTurn(t, f, 'race-turn-' + i);
+    await f.guard.prepareSupervision(s.g, s.meta, f.trusted);
+    await f.guard.armSupervision(s.g, s.meta, f.trusted, s.binding);
+    const [decision] = await Promise.all([f.hook(s.event),
+      new Promise(resolve => setTimeout(() => { clock.expire(); resolve(); }, i * 40))]);
+    const settled = await f.guard.settleSupervision(s.g, s.meta, f.trusted).then(() => true, e => {
+      assert.equal(e.code, 'qualification_timeout'); return false; });
+    clock.restore();
+    const observed = await fs.readFile(s.observed, 'utf8'), challenge = await fs.readFile(s.challenge, 'utf8');
+    if (settled) {
+      assert.equal(observed, challenge);
+      assert.match(decision.reason, /^Supervision preflight only/);
+      await f.guard.requireSupervision(s.g, s.meta, f.trusted);
+    } else {
+      assert.equal(JSON.parse(observed).kind, 'resident_supervision_terminal');
+      assert.deepEqual(decision, {});
+      await assert.rejects(f.guard.requireSupervision(s.g, s.meta, f.trusted));
+    }
+    outcomes.push(settled);
+  }
+  assert.equal(outcomes.length, 6);
+  t.diagnostic('Stop won (true) or deadline won (false): ' + JSON.stringify(outcomes));
+});
+
+test('terminal receipt never releases moved authority or live work', async t => {
+  for (const change of [
+    v => { v.owner.generation = 24; v.owner.owner = 'owner-24'; },
+    v => { v.owner.qualification.startup.operation_id = 'd'.repeat(64); },
+    v => { v.owner.qualification.startup.native_turn = 'later-turn'; },
+    v => { v.owner.slots[0].phase = 'collect_only'; v.owner.slots[0].request = rid; },
+    v => { v.status.active_assignment = {assignment_id: rid}; v.status.active_assignments = [{assignment_id: rid}]; },
+    v => { v.queue.requests = [{request_id: rid, state: 'claimed'}]; }
+  ]) {
+    const f = await fixture(t, false);
+    await timedOut(t, f);
+    change(f.authority); await f.update();
+    const before = await f.snapshot();
+    assert.equal((await f.hook()).decision, 'block');
+    assert.deepEqual(await f.snapshot(), before);
+  }
+});
+
+test('terminal receipt rereads canonical state before release', async t => {
+  const f = await fixture(t, false);
+  await timedOut(t, f);
+  await changeAfterFirstSnapshot(f, v => { v.owner.generation = 24; }, 4);
+  assert.equal((await f.hook()).decision, 'block');
+});
+
+test('terminal receipt in a task that no longer owns authority does not trap it', async t => {
+  const f = await fixture(t, false);
+  await timedOut(t, f);
+  f.authority.owner.parent = 'replacement-parent'; await f.update();
+  assert.deepEqual(await f.hook(), {});
+});

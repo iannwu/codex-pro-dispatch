@@ -89,6 +89,11 @@ function location(paths, parent, turn) {
   const key = hash(parent + '\0' + turn);
   return {directory, challenge: join(directory, key + '.json'), observed: join(directory, key + '.observed.json')};
 }
+// One genuine Stop probe per task turn; a later start needs a new turn.
+export async function probeAttempted(stateDir, parent, turn) {
+  try { await fs.lstat(location({state_dir: stateDir}, parent, turn).challenge); return true; }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+}
 function terminalFiles(paths, owner, turn) {
   const directory = join(paths.state_dir, 'resident-supervision');
   const stem = owner.generation + '-' + owner.owner;
@@ -183,11 +188,51 @@ export async function requireRetainedSupervision(g, meta, trusted) {
   await checkChallenge(record, paths, files);
   if (!same(await json(files.observed), record)) fail();
 }
-// Event-driven, bounded preflight with no socket, readiness marker, or native send.
-export async function waitSupervision(g, meta, trusted) {
-  const {paths, files} = await context(meta, trusted);
-  await checkChallenge(g.parkedSupervision, paths, files);
-  await new Promise((resolve, reject) => {
+// Exactly one record ever occupies the observed slot: the hook's copy of the
+// challenge (a genuine Stop) or the waiter's terminal receipt (deadline first).
+// The link in exclusive() is the single arbitration, so a late Stop can never
+// turn a timeout into qualification, and a timeout never erases a real Stop.
+const OBSERVATION_MS = 45000;
+const TERMINAL_KEYS = 'armedAt,deadlineAt,generation,kind,nonce,operation,owner,parent,qualified,reason,send_authorized,turn,version,waiter';
+function qualificationTerminal(challenge, armedAt, deadlineAt, binding) {
+  return {version: 1, kind: 'resident_supervision_terminal', parent: challenge.parent, turn: challenge.turn,
+    nonce: challenge.nonce, reason: 'qualification_timeout', armedAt, deadlineAt,
+    operation: binding?.operation ?? null, generation: binding?.generation ?? null, owner: binding?.owner ?? null,
+    waiter: 'closed', qualified: false, send_authorized: false};
+}
+function terminalFor(value, challenge) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join(',') === TERMINAL_KEYS && value.version === 1 &&
+    value.kind === 'resident_supervision_terminal' && value.reason === 'qualification_timeout' &&
+    value.parent === challenge.parent && value.turn === challenge.turn && value.nonce === challenge.nonce &&
+    value.waiter === 'closed' && value.qualified === false && value.send_authorized === false &&
+    Number.isSafeInteger(value.armedAt) && Number.isSafeInteger(value.deadlineAt) && value.deadlineAt > value.armedAt &&
+    (value.operation === null || /^[a-f0-9]{64}$/.test(value.operation)) &&
+    (value.generation === null || (Number.isSafeInteger(value.generation) && value.generation > 0)) &&
+    (value.owner === null || id(value.owner));
+}
+function qualificationTimeout(path) {
+  return Object.assign(Error('Stop hook did not qualify; no availability'), {code: 'qualification_timeout', terminal: path});
+}
+// Register the watcher and deadline before the caller asks for a final
+// response. The promise stays in this REPL; settle awaits the same one.
+export async function armSupervision(g, meta, trusted, binding = null) {
+  const {identity, paths, files} = await context(meta, trusted);
+  const record = g.parkedSupervision;
+  if (record?.parent !== identity.parent || record?.turn !== identity.turn) fail();
+  await checkChallenge(record, paths, files);
+  const current = g.parkedSupervisionWait;
+  if (current?.parent === identity.parent && current?.turn === identity.turn) return current.armed;
+  if (binding !== null && (typeof binding !== 'object' || Array.isArray(binding) ||
+      Object.keys(binding).sort().join(',') !== 'generation,operation,owner' ||
+      !/^[a-f0-9]{64}$/.test(binding.operation) || !Number.isSafeInteger(binding.generation) ||
+      binding.generation < 1 || !id(binding.owner))) fail();
+  // One genuine probe per task turn: a closed waiter is never re-armed.
+  try { if (terminalFor(await json(files.observed), record)) throw Error('Qualification already ended for this turn; start again in a new turn'); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const armedAt = Date.now(), deadlineAt = armedAt + OBSERVATION_MS;
+  const terminal = qualificationTerminal(record, armedAt, deadlineAt, binding);
+  const promise = new Promise((resolve, reject) => {
     let done = false, busy = false, again = false;
     const finish = error => {
       if (done) return;
@@ -195,20 +240,43 @@ export async function waitSupervision(g, meta, trusted) {
       error ? reject(error) : resolve();
     };
     const watcher = watch(files.directory, () => { again = true; void check(); });
-    const timer = setTimeout(() => finish(Error('Stop hook did not qualify; no availability')), 45000);
+    const timer = setTimeout(() => void expire(), OBSERVATION_MS);
     watcher.on('error', finish);
+    async function decide() {
+      const observed = await json(files.observed);
+      if (same(observed, record)) return finish();
+      if (terminalFor(observed, record)) return finish(qualificationTimeout(files.observed));
+      fail();
+    }
     async function check() {
       if (done || busy) return;
       busy = true; again = false;
-      try {
-        if (!same(await json(files.observed), g.parkedSupervision)) fail();
-        finish();
-      } catch (error) { if (error.code !== 'ENOENT') finish(error); }
+      try { await decide(); } catch (error) { if (error.code !== 'ENOENT') finish(error); }
       finally { busy = false; if (again && !done) void check(); }
+    }
+    async function expire() {
+      try { await exclusive(files.observed, terminal); }
+      catch (error) { if (error.code !== 'EEXIST') return finish(error); }
+      try { await decide(); } catch (error) { finish(error); }
     }
     void check();
   });
+  promise.catch(() => {});
+  const armed = {kind: 'resident_supervision_armed', parent: identity.parent, turn: identity.turn,
+    nonce: record.nonce, challengeSha256: hash(JSON.stringify(record)), armedAt, deadlineAt, admissionObserved: false};
+  g.parkedSupervisionWait = Object.freeze({parent: identity.parent, turn: identity.turn, armed, promise});
+  return armed;
+}
+export async function settleSupervision(g, meta, trusted) {
+  const identity = nativeIdentity(meta, trusted), current = g.parkedSupervisionWait;
+  if (current?.parent !== identity.parent || current?.turn !== identity.turn) fail();
+  await current.promise;
   return {kind: 'resident_supervision_stop_observed', admissionObserved: false};
+}
+// Event-driven, bounded preflight with no socket, readiness marker, or native send.
+export async function waitSupervision(g, meta, trusted) {
+  await armSupervision(g, meta, trusted);
+  return await settleSupervision(g, meta, trusted);
 }
 
 // Inspect the complete current-status projection, not just its scalar alias:
@@ -324,6 +392,26 @@ async function unboundStopProof(owner, status) {
 
 const block = reason => ({decision: 'block', reason});
 const waitReason = 'The resident owner has not joined. Use functions.wait on the ORIGINAL returned serve cell, not a new serve call. Never resend, reopen, reset receipts, clear locks, or renew admission from this hook. If the original execution is unavailable, preserve evidence and report the host limitation through commentary; owner-loss closure remains mandatory.';
+const terminalReason = 'Listener qualification ended without a Stop observation, and canonical authority or work no longer matches its terminal receipt. Preserve evidence. Do not reopen, resend, or retry qualification in this turn.';
+
+// A timed-out startup leaves its acquired, unbound owner recoverable. Release
+// the turn only while that exact acquisition is still current and fully idle;
+// the receipt itself qualifies nothing and never authorizes a send.
+async function terminalQualificationStop(owner, status, terminal) {
+  const startup = owner.qualification?.startup;
+  if (terminal.operation === null || owner.version !== 4 || owner.generation !== terminal.generation ||
+      owner.owner !== terminal.owner || owner.parent !== terminal.parent ||
+      startup?.operation_id !== terminal.operation || startup?.native_task !== terminal.parent ||
+      startup?.native_turn !== terminal.turn || !unboundOwner(owner, status) ||
+      owner.slots.some(slot => slot.phase !== 'idle' || slot.request !== null) ||
+      status.active_assignment !== null || status.active_assignments.length !== 0) return block(terminalReason);
+  const queue = await cli(['queue', 'status']);
+  if (!Array.isArray(queue.requests) || queue.requests.some(r => r?.state === 'claimed')) return block(terminalReason);
+  const [current, currentStatus, currentQueue] = await Promise.all([
+    cli(['resident', 'inspect']), cli(['status', '--current']), cli(['queue', 'status'])]);
+  if (!same(current.owner, owner) || !same(currentStatus, status) || !same(currentQueue, queue)) fail();
+  return {}; // Finalization only; the owner stays acquired and unqualified.
+}
 export async function stopDecision(event) {
   try {
     if (event?.hook_event_name !== 'Stop' || !id(event.session_id))
@@ -343,7 +431,7 @@ export async function stopDecision(event) {
       throw error;
     }
     const files = location(status.paths, event.session_id, event.turn_id);
-    let challenge;
+    let challenge, terminal = null;
     try { challenge = await json(files.challenge); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (challenge !== undefined) {
@@ -357,10 +445,14 @@ export async function stopDecision(event) {
         return block('Supervision preflight only: call functions.wait on the ORIGINAL yielded qualification cell, then continue the activation recipe only after its successful completion. Do not replay qualification. No listener availability or send is authorized yet.');
       } catch (error) {
         // An existing proof must match byte-for-byte; no timestamp refresh.
-        if (!same(await json(files.observed), challenge)) throw error;
+        // A terminal receipt means the waiter's deadline won the single slot.
+        const observed = await json(files.observed);
+        if (terminalFor(observed, challenge)) terminal = observed;
+        else if (!same(observed, challenge)) throw error;
       }
     }
     if (!owner || owner.parent !== event.session_id) return {};
+    if (terminal) return await terminalQualificationStop(owner, status, terminal);
     // This exemption runs only AFTER pending qualification challenges.
     const proof = await unboundStopProof(owner, status);
     if (proof !== null) {

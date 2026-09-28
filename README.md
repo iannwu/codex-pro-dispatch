@@ -95,6 +95,9 @@ The hook pins the physical source-checkout `resident-supervision.mjs`; keep that
 checkout in place. After installation, fully restart the Codex desktop app,
 review and trust the hook with `/hooks`, and start a new Listener task before
 resident qualification. The packaged plugin continues to use its bundled hook.
+Listener startup uses the source installation whenever `~/.local/bin/pro-dispatch`
+exists, and otherwise the installed plugin. Keep only one of them: two resident
+Stop hooks block startup.
 
 Resident service keeps a dedicated Codex task turn active until shutdown. Codex
 shares the session details once, then automatically waits on the original serve

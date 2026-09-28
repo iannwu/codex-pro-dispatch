@@ -1,61 +1,94 @@
 # Start or replace a listener
 
-Use this procedure when the user asks to start a listener, replace its task, or
-use new worker chats. It extends the existing skill; there is no separate daemon
-or scheduler. The user's start request authorizes the entire supported procedure
-and its bounded retries. Do not ask again whether to start or implement recovery.
-Ask only for genuinely ambiguous destinations or a missing physical fact.
-Never infer readiness from a successful ownership change.
+"Start listener" in the designated Listener task authorizes the whole supported
+startup and its bounded internal retries. Do not ask again, and do not choose,
+order, or repeat stages yourself. The runtime reads the enrolled worker IDs,
+qualifies the Stop hook, opens, and serves inside one execution. Startup never
+sends a worker prompt. Ownership is not readiness.
 
-1. Resolve the physical installed `pro-dispatch` and sibling
-   `parked-activation.mjs`. Confirm that `pro-dispatch listener start --help`
-   exists. An older installation needs this capability installed, not a manual
-   edit to its state. Run from the Listener task's working directory and normal
-   `CODEX_HOME`. Startup runs its configuration diagnostic once; use
-   `pro-dispatch listener check` only for troubleshooting. The default host is
-   the bundled ChatGPT app binary. `--codex /absolute/path/to/codex` must name an
-   explicitly verified Listener host, never a guessed PATH alternative.
-2. Discover the requested ChatGPT conversations with native task tools. Resolve
-   titles to exact IDs. If titles are ambiguous, ask which ID. The user's chosen
-   conversation is confirmation of that destination, not verification of a model.
-3. Check that this Listener task exposes the generated packet's `functions.exec`
-   executor, `functions.wait` continuation, and declared native tools. Missing
-   tools means `unsupported_listener_surface`. Do not translate the packet into
-   direct node REPL calls. Complete the actual client's existing filesystem
-   access preflight before advertising it can connect.
-4. Generate `pro-dispatch listener start --worker-1 <exact-id>` and optionally
-   `--worker-2 <exact-id>`. `--client-root` selects the existing private client
-   root, default `~/.cpd-client`. Save stdout to a new private packet file in a
-   private directory and compute its raw SHA-256. Do not overwrite an old packet.
-5. Run the installed activation script's `packet-call <packet-file> start
-   <raw-sha256>`. Pass the returned `arguments` unchanged to its declared
-   executor. This captures native task/turn identity, verifies exact ChatGPT IDs,
-   and applies the guarded transaction. Startup never sends a worker prompt.
-6. Follow the returned `next_action`. On `next_action`, use the returned
-   `next_packet` and `next_packet_sha256` with `packet-call` for `qualify`, then
-   `open`, then `serve`, in that order. Complete the real Stop-hook roundtrip:
-   wait for `resident_supervision_probe_required`, attempt one final response,
-   and resume the exact qualification cell after the hook blocks it. Never
-   synthesize the probe or treat qualification as complete early. Failed
-   qualification leaves a closed, non-ready owner. A changed native turn needs
-   a fresh startup packet.
-7. Supervise the original serve cell with `functions.wait` after every yield.
-   Never replay a consumed serve call. Check `resident-status` and report ready
-   only when the current bound session has live admission. Report its capacity,
-   session path, ordinal, and generated rendezvous command.
+## Start
 
-Report all returned `details.blockers` together. Resolve request recovery and
-cooldown before asking for a physical action; a reboot must not reveal a known
-second blocker that could have been reported first.
+Call `functions.exec` once with exactly this code, unchanged. It takes no input.
 
-`ready` means the same selected pool already has an observed live admission
-waiter; do not acquire again. `stale` means regenerate from canonical state.
-`commit_unknown` and `stale` both mean regenerate start once from canonical
-state. Stop on repeated uncertainty or contention. The same committed operation
-is idempotent in the same turn; a new turn can safely rotate an unused owner.
-If a session is already bound, use the
-existing native context and exact serve-existing eligibility; never invent a
-replacement for a lost acknowledgment.
+```js
+// @exec: {"yield_time_ms":1000}
+let sh='p=$HOME/.local/bin/pro-dispatch;if [ ! -e "$p" ]&&[ ! -L "$p" ];then set -- "${CODEX_HOME:-$HOME/.codex}"/plugins/cache/codex-pro-dispatch/codex-pro-dispatch/*/skills/codex-pro-dispatch/scripts/pro-dispatch;[ $# = 1 ]&&[ -e "$1" ]||{ echo "codex-pro-dispatch is not installed exactly once: $*";exit 127;};p=$1;fi;exec "$p" listener start';
+let r=await tools.exec_command({cmd:"/bin/sh -c '"+sh+"' 2>&1",login:false,tty:false,yield_time_ms:30000,max_output_tokens:20000}),out=r.output??"";
+for(let i=0;i<3&&r.exit_code===undefined&&Number.isInteger(r.session_id);i++){r=await tools.write_stdin({session_id:r.session_id,chars:"",yield_time_ms:30000,max_output_tokens:20000});out+=r.output??"";}
+let v=null;try{v=JSON.parse(out);}catch{}
+if(r.exit_code!==0||v?.kind!=="resident_packet_call"||typeof v.arguments?.code!=="string")text({schema_version:1,kind:"listener_lifecycle",state:"blocked",action:"stop",reason:v?.error??"listener_start_unavailable",details:v?.details??null,exit_code:r.exit_code??null,output:v?null:out.slice(-4000)});
+else await new (Object.getPrototypeOf(async()=>{}).constructor)("tools","text",v.arguments.code)(tools,text);
+```
+
+The code selects one installation by a fixed rule: the source-install link
+`$HOME/.local/bin/pro-dispatch` whenever it exists, even if broken; otherwise
+the single installed plugin copy
+(`codex-pro-dispatch@codex-pro-dispatch`, under `${CODEX_HOME:-~/.codex}/plugins/cache`).
+It never falls back from a broken selection to another copy. The selected
+copy's hook check then requires the host's single resident Stop hook to be
+that same copy's own hook.
+
+Then follow only the `action` of the newest output:
+
+- `wait`: call `functions.wait` on the cell ID that `functions.exec` returned.
+  Keep doing so after every yield. For the output with `state: "ready"` and
+  `admission_observed: true`, post one commentary line with `session_directory`
+  and `capacity`, then keep waiting. Later `serve_event` outputs relay serving
+  progress with `admission_observed: false`; they are not new readiness.
+  A final answer is never the readiness signal.
+- `finalize`: attempt exactly one final response right away. The Stop hook
+  blocks it; then call `functions.wait` on that same cell. Never call
+  `functions.exec` again for this start.
+- `stop`: the execution is finished. Report `state`, `reason`, `diagnostic`,
+  `details`, and `evidence_path`, then end the turn.
+
+Never replay, split, or rewrite the generated code, call `node_repl` or
+`packet-call` for startup, or pass worker IDs, hashes, or stages. Missing
+`functions.exec`, `functions.wait`, or a declared native tool means
+`unsupported_listener_surface`; nothing was acquired. `resident-status` stays
+the authoritative readiness check.
+
+Outcomes:
+
+- `ready` with `stop` and `existing_service_observed`: this pool already has a
+  live admission waiter elsewhere. Nothing was acquired.
+- `blocked`: nothing was acquired. Report every `details.blockers` entry
+  together, using the sections below. Resolve request recovery and cooldown
+  before asking for a physical action. `pool_not_configured` means use the
+  destination setup below first. `probe_already_attempted_this_turn` means this
+  turn already ran its one Stop probe; start again in a new turn, which also
+  observes a listener that is already serving.
+- `starting` with `admission_not_observed` and action `wait`: serving continues,
+  but no live admission waiter was seen (about 75 seconds), or the separate
+  observer failed (`observer_error`). This is not readiness. Keep waiting;
+  `resident-status` on `session_directory` is the readiness check.
+- `failed` with `qualification_timeout`: follow its `diagnostic`. The owner
+  stays acquired, unqualified and recoverable; nothing was opened or sent. An
+  accepted final attempt does not prove the hook never ran: after the deadline
+  the hook can allow it for this unserved owner. Do not ask for trust again
+  unless `pro-dispatch listener check` reports `untrusted` or `modified`.
+- `listener_start_unavailable` with `exit_code` 126 or 127: no usable
+  installation was selected; nothing was acquired. If `output` names
+  `.local/bin/pro-dispatch`, that source-install link is broken: rerun its
+  checkout's `install.sh`, or remove that source installation to use the plugin.
+  If `output` says `not installed exactly once`, there is no source link and not
+  exactly one plugin copy: install the plugin with
+  `codex plugin add codex-pro-dispatch@codex-pro-dispatch`. Report which one.
+  Do not run a different `pro-dispatch` copy or a second start.
+- Other `failed` or `stopped`: preserve the reported evidence. Never replay a
+  consumed serve call or invent a replacement for a lost acknowledgment.
+
+## Destination setup
+
+Use this only when the user asks for different worker chats or no pool is
+configured. Discover the requested ChatGPT conversations with native task tools
+and resolve titles to exact IDs; if titles are ambiguous, ask which ID. Then run
+`pro-dispatch listener start --worker-1 <exact-id> [--worker-2 <exact-id>]`
+from this task's working directory and pass its returned `arguments.code`
+unchanged to `functions.exec`. The same composed execution follows, with the
+same three actions. `--client-root` selects the private client root, default
+`~/.cpd-client`. `--codex /absolute/path` must name an explicitly verified
+Listener host, never a guessed PATH alternative.
 
 ## Configuration diagnostic
 
@@ -63,9 +96,14 @@ replacement for a lost acknowledgment.
 running desktop host. Its `ready` state means configured only, never listener
 readiness. Real native Stop qualification and live admission remain mandatory.
 
-- `missing`: install the resident hook from the installed release.
+- `missing`: the selected installation's hook is not configured. The plugin
+  bundles it (enable the plugin); a source checkout adds it with its `install.sh`.
+  Then open a new Listener task.
 - `duplicate` or `wrong_definition`: repair the displayed definitions first.
-  Do not ask for trust approval to repair a structural error.
+  Each hook shows its `source` and `sourcePath`, and `expected_command` shows
+  the selected installation. Hooks from both a plugin and a source checkout
+  mean two installations: keep one. Do not ask for trust approval to repair a
+  structural error.
 - `disabled`: enable the exact resident hook in `/hooks`.
 - `untrusted` or `modified`: the user must review and trust its current definition
   in `/hooks`. If also disabled, report both actions together. Never write the
@@ -75,16 +113,18 @@ readiness. Real native Stop qualification and live admission remain mandatory.
   of a denied hook. Do not guess a different binary or request trust without
   evidence. There is no bypass flag for a known blocked configuration.
 
-Startup reports known hook and idle-pool blockers together before generating a
-packet. The native transaction still rechecks canonical authority under lock.
-After the user repairs configuration, regenerate the normal startup packet.
+Startup reports known hook and idle-pool blockers together before acquiring
+anything. The native transaction still rechecks canonical authority under lock.
+After the user repairs configuration, start again with the same code.
 If real qualification fails despite trusted configuration, retain its error and
-check host reload and Node resolution. Do not ask for the same trust again.
-A fresh turn is not proof the running host reloaded configuration. If reload is
-needed, the user must restart the app and open a new Listener task; never restart
-it automatically while other work may be active. Reinstallation preserves an
-unchanged hook definition. Script-content updates alone do not explain a changed
-hook definition hash; report the cause only when supported by evidence.
+do not ask for the same trust again. A fresh turn is not proof the running host
+loaded the hook for this task. Observed on 2026-09-27: the unchanged, trusted
+hook did not run in older Listener tasks but did run in a newly created one, in
+the same running app. Open a new Listener task first; an app restart was not
+needed then. Never restart the app automatically while other work may be
+active. Reinstallation preserves an unchanged hook definition. Script-content
+updates alone do not explain a changed hook definition hash; report the cause
+only when supported by evidence.
 
 ## Exclusion blockers
 
@@ -104,8 +144,9 @@ administrative timestamp manipulation are outside this cooperative-storage proof
 
 If legacy execution still cannot be excluded, the fallback is: restart the Mac, do not
 resume old listeners, then explicitly confirm that physical termination occurred.
-Only after the user supplies that fact may the next command include
-`--confirm-quiescent '<their factual observation>'`. The runtime binds this
+Only after the user supplies that fact may you run `pro-dispatch listener start
+--confirm-quiescent '<their factual observation>'` (plus any destination flags)
+and pass its `arguments.code` unchanged to `functions.exec`. The runtime binds this
 evidence to the current snapshot and canonical paths. Never add this flag based
 on "you have permission", elapsed time, or a guessed reboot. Fresh deployment
 likewise needs a factual observation that no old native executor exists. There

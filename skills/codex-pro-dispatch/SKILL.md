@@ -21,11 +21,12 @@ copy; it never activates a listener, grants permissions, or authorizes a send.
 
 ### Native Codex owner
 
-For "start listener", a replacement Listener task, or new worker conversations,
-use [listener-start.md](references/listener-start.md) first. `pro-dispatch listener
-start` generates the exact guarded native procedure. Let the runtime choose the
-transition; do not improvise owner recovery or edit pool files. This procedure
-takes precedence over the older same-pool setup and takeover recipes below.
+For "start listener", "restart listener", a replacement Listener task, or new worker conversations,
+use [listener-start.md](references/listener-start.md) first. Its one constant
+`functions.exec` code runs the whole guarded startup; follow only each output's
+`action`. Let the runtime choose the transition; do not improvise stages, owner
+recovery, or pool edits. This procedure takes precedence over the older same-pool
+setup, takeover, and multi-stage activation recipes below.
 
 For standalone dispatch, recovery, or an explicitly authorized continuation, read [standalone-dispatch.md](references/standalone-dispatch.md) and [native-protocol.md](references/native-protocol.md)
 before acting. Repository work also requires [github-verification.md](references/github-verification.md).
@@ -33,7 +34,7 @@ before acting. Repository work also requires [github-verification.md](references
 For an explicitly authorized finite parked session, read [native-request-broker.md](references/native-request-broker.md). Use only its reviewed native activation recipe when present and qualified for the current host.
 If it is absent, report that gate; do not improvise a launcher or use the standalone instructions as a parked activation fallback.
 
-For explicit resident setup or clean restart, also read the resident section in [native-activation.md](references/native-activation.md). Resolve the physical installed paths and complete the actual client's access preflight before opening.
+Only for diagnostics or compatibility with an older resident packet, read the resident section in [native-activation.md](references/native-activation.md); never use its multi-stage recipe to start, restart, or replace a listener. Resolve the physical installed paths and complete the actual client's access preflight before opening.
 Resident mode is opt-in; reopen recovery is collector-only; automatic startup is unsupported.
 Fresh resident activation and unused serve-existing require the installed synchronous Stop hook. Review and trust `.codex/hooks.json` for project use or `hooks/hooks.json` for plugin use in the actual host. Execute calls.qualify first. Wait until resident_supervision_probe_required is visible; only then attempt one final response while that qualification cell is pending. The hook must block it and return control to functions.wait on that exact cell. Only successful completion in the same native task and turn permits calls.open or calls.serve. A missing hook, failed probe, or changed native turn is a host limitation, not permission to serve. This one-time, no-dispatch probe is not a periodic heartbeat. Never run it over an active or armed serving invocation. Post-arm continuation additionally requires the retained qualification from this native runtime and keeps every existing exact eligibility check. Never manufacture qualification or recovery evidence.
 Before qualification, verify that the Listener task itself exposes the packet's declared `functions.exec` executor and `functions.wait` continuation. A coordinator having those tools does not qualify a delegated Listener turn. Missing tools mean `unsupported_listener_surface`: do not qualify, acquire a generation, open, or translate an outer packet body into direct `mcp__node_repl__js` calls. Save one packet privately and use `packet-call` with its raw SHA-256 when exact extraction is needed; pass its short opaque `arguments` unchanged to the declared executor. The bootstrap loads the exact pinned stage inside that executor, so the model does not transcribe its native body during activation.
