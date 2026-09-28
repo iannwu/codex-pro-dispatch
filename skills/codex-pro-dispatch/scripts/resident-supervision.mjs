@@ -192,7 +192,7 @@ export async function requireRetainedSupervision(g, meta, trusted) {
 // challenge (a genuine Stop) or the waiter's terminal receipt (deadline first).
 // The link in exclusive() is the single arbitration, so a late Stop can never
 // turn a timeout into qualification, and a timeout never erases a real Stop.
-const OBSERVATION_MS = 45000;
+const OBSERVATION_MS = 120000;
 const TERMINAL_KEYS = 'armedAt,deadlineAt,generation,kind,nonce,operation,owner,parent,qualified,reason,send_authorized,turn,version,waiter';
 function qualificationTerminal(challenge, armedAt, deadlineAt, binding) {
   return {version: 1, kind: 'resident_supervision_terminal', parent: challenge.parent, turn: challenge.turn,

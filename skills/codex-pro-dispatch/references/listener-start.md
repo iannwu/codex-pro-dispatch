@@ -11,13 +11,14 @@ sends a worker prompt. Ownership is not readiness.
 Call `functions.exec` once with exactly this code, unchanged. It takes no input.
 
 ```js
-// @exec: {"yield_time_ms":1000}
+// @exec: {"yield_time_ms":60000}
+if(typeof yield_control!=="function")throw Error("unsupported_listener_surface: yield_control required");
 let sh='p=$HOME/.local/bin/pro-dispatch;if [ ! -e "$p" ]&&[ ! -L "$p" ];then set -- "${CODEX_HOME:-$HOME/.codex}"/plugins/cache/codex-pro-dispatch/codex-pro-dispatch/*/skills/codex-pro-dispatch/scripts/pro-dispatch;[ $# = 1 ]&&[ -e "$1" ]||{ echo "codex-pro-dispatch is not installed exactly once: $*";exit 127;};p=$1;fi;exec "$p" listener start';
 let r=await tools.exec_command({cmd:"/bin/sh -c '"+sh+"' 2>&1",login:false,tty:false,yield_time_ms:30000,max_output_tokens:20000}),out=r.output??"";
 for(let i=0;i<3&&r.exit_code===undefined&&Number.isInteger(r.session_id);i++){r=await tools.write_stdin({session_id:r.session_id,chars:"",yield_time_ms:30000,max_output_tokens:20000});out+=r.output??"";}
 let v=null;try{v=JSON.parse(out);}catch{}
 if(r.exit_code!==0||v?.kind!=="resident_packet_call"||typeof v.arguments?.code!=="string")text({schema_version:1,kind:"listener_lifecycle",state:"blocked",action:"stop",reason:v?.error??"listener_start_unavailable",details:v?.details??null,exit_code:r.exit_code??null,output:v?null:out.slice(-4000)});
-else await new (Object.getPrototypeOf(async()=>{}).constructor)("tools","text",v.arguments.code)(tools,text);
+else await new (Object.getPrototypeOf(async()=>{}).constructor)("tools","text","yield_control",v.arguments.code)(tools,text,yield_control);
 ```
 
 The code selects one installation by a fixed rule: the source-install link
@@ -44,7 +45,7 @@ Then follow only the `action` of the newest output:
 
 Never replay, split, or rewrite the generated code, call `node_repl` or
 `packet-call` for startup, or pass worker IDs, hashes, or stages. Missing
-`functions.exec`, `functions.wait`, or a declared native tool means
+`functions.exec`, `functions.wait`, `yield_control`, or a declared native tool means
 `unsupported_listener_surface`; nothing was acquired. `resident-status` stays
 the authoritative readiness check.
 
@@ -132,14 +133,13 @@ Startup reports known hook and idle-pool blockers together before acquiring
 anything. The native transaction still rechecks canonical authority under lock.
 After the user repairs configuration, start again with the same code.
 If real qualification fails despite trusted configuration, retain its error and
-do not ask for the same trust again. A fresh turn is not proof the running host
-loaded the hook for this task. Observed on 2026-09-27: the unchanged, trusted
-hook did not run in older Listener tasks but did run in a newly created one, in
-the same running app. Open a new Listener task first; an app restart was not
-needed then. Never restart the app automatically while other work may be
-active. Reinstallation preserves an unchanged hook definition. Script-content
-updates alone do not explain a changed hook definition hash; report the cause
-only when supported by evidence.
+do not ask for the same trust again. A timeout alone does not prove the running
+host omitted the hook.
+Inspect delivery of the `finalize` output and the final attempt before choosing
+host recovery. The runtime returns the pending start call with that output and allows 120 seconds
+from arming for a genuine Stop. Neither a delayed final nor a timeout establishes
+readiness. Never restart the app automatically while other work may be active.
+Reinstallation preserves an unchanged hook definition.
 
 ## Exclusion blockers
 

@@ -49,7 +49,7 @@ body.slice(0,newline+1)+residentSurfaceGuard+"\n"+body.slice(newline+1):resident
 // writes; neither verifies a model. The literals stay inline because several
 // gate functions are serialized into packets and cannot see module scope.
 const pins={
-"resident-supervision.mjs":"ab53cc36327f706be4ee97ca5c2dcfcc01bb09a43edf752dcfff315e79ae36be",
+"resident-supervision.mjs":"5bb422914cc132cfdabc39af3a97d21b016b36c1969ae4c8b09520be42c2c781",
   "parked-runner.js":"071cee7b64b403484b053fc57e61731c359bd30e760941af99df5ed0f5382b07",
 "parked-socket.mjs":"7f14e2610e6254471272f0ae6c11aa2a0982979247122d81c13ee2a23f6f54d7",
 "parked-client.mjs":"45b38c509bf9e12fb0cf6ddb323160c3e6edf9ea2aeff9025976b476b2c11072"
@@ -101,11 +101,11 @@ if(await fs.realpath(${J(path)})!==${J(path)}||crypto.createHash("sha256").updat
 const a=await import(${J(url)});
 console.log(JSON.stringify(await a.${name}(globalThis,nodeRepl.requestMeta,${J(trusted)}${extra})));
 }`;
-const call=(name,extra="")=>`value(await tools.mcp__node_repl__js(${J({code:code(name,extra),timeout_ms:60000,title:"Resident Stop qualification"})}))`;
+const call=(name,extra="")=>`value(await tools.mcp__node_repl__js(${J({code:code(name,extra),timeout_ms:150000,title:"Resident Stop qualification"})}))`;
 return `// @exec: {"yield_time_ms":1000}
 function value(r){if(r?.isError===true||r?.status==="failed"||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Supervision qualification failed; no availability");return JSON.parse(r.content[0].text);}
 const armed=${call("prepareResidentSupervision",binding===null?"":","+J(binding))};
-text({...armed,kind:"resident_supervision_probe_required",state:"qualifying",action:"finalize",instruction:"Attempt exactly one final response now. The Stop hook must block it and return you to functions.wait on this SAME cell. Do not call functions.exec again, open, or serve until this cell completes successfully. A missing hook or changed native turn means no availability."});
+await text({...armed,kind:"resident_supervision_probe_required",state:"qualifying",action:"finalize",instruction:"Attempt exactly one final response now. The Stop hook must block it and return you to functions.wait on this SAME cell. Do not call functions.exec again, open, or serve until this cell completes successfully. A missing hook or changed native turn means no availability."});
 const settled=${call("waitResidentSupervision")};
 if(settled.qualified!==true){text({...settled,state:"failed",action:"stop"});throw Error("Resident Stop qualification failed: "+settled.reason);}
 text(settled);
@@ -1048,9 +1048,9 @@ supervision_sha256:pins["resident-supervision.mjs"],serving_sha256:servingHash};
 }
 const shellQuote=v=>"'"+String(v).replace(/'/g,"'\\''")+"'";
 const hostBuildCommand='/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" -c "Print :CFBundleVersion" /Applications/ChatGPT.app/Contents/Info.plist; /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex --version; /usr/bin/sw_vers -productVersion; /usr/bin/uname -m';
-// Observed evidence, not a proven cause: on 2026-09-27 this unchanged, trusted
-// hook did not run in older Listener tasks and did run in a newly created one.
-const qualificationTimeoutDiagnostic="No Stop hook run was observed for this Listener task turn before the 45-second deadline, so nothing was opened or sent and the listener is not ready. The acquired owner stays recoverable. An accepted final response does not prove the hook never ran: after the deadline the hook can allow that final for this unserved owner, and a run with a different task or turn identity is not counted. On 2026-09-27 the same trusted hook did not run in older Listener tasks but did run in a newly created task; the exact cause is not proven. Open a new Listener task and say start listener there. Re-approve the hook only if pro-dispatch listener check reports untrusted or modified.";
+// A timeout alone cannot distinguish missing hook execution from late delivery
+// or model latency. Preserve the attempt without prescribing a new chat.
+const qualificationTimeoutDiagnostic="No matching Stop hook was observed within the 120-second qualification window. Nothing was opened or sent; the acquired owner stays recoverable. This does not establish that the hook is missing: inspect when the finalize instruction reached the model and when it attempted a final response. The probe for this turn is used; after checking that timing, start again in a new turn of this same Listener task. Re-approve the hook only if pro-dispatch listener check reports untrusted or modified.";
 
 // One generated functions.exec closure owns every startup stage. The model
 // launches it, attempts one final when told, and waits on this same cell.
@@ -1065,17 +1065,18 @@ await fs.chmod(evidence,448);
 const path=fileURLToPath(import.meta.url),hash=createHash("sha256").update(await fs.readFile(path)).digest("hex");
 const revision=await installedRevision(hash);
 const call=(name,args)=>J("console.log(JSON.stringify(await a."+name+"(globalThis,nodeRepl.requestMeta,"+args);
-const body=`// @exec: {"yield_time_ms":1000}
+const body=`// @exec: {"yield_time_ms":60000}
+if(typeof yield_control!=="function")throw Error("unsupported_listener_surface: yield_control required");
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor,header=${J(activationHeader(path,hash))},evidence=${J(evidence)};
 const quote=${shellQuote.toString()};
 function value(r){if(r?.isError===true||r?.status==="failed"||r?.content?.length!==1||r.content[0].type!=="text")throw Error("Native lifecycle call failed: "+JSON.stringify(r).slice(0,2000));return JSON.parse(r.content[0].text);}
 async function repl(code,title){return value(await tools.mcp__node_repl__js({code:"{"+header+code+"}",timeout_ms:60000,title}));}
-let operation=null,generation=null,capacity=${plan.workers.length},session=null,admission=false,state="starting",finished=false,serving=null;
+let operation=null,generation=null,capacity=${plan.workers.length},session=null,admission=false,state="starting",finished=false,serving=null,probe=null;
 function emit(next,action,extra){state=next;const event={schema_version:1,kind:"listener_lifecycle",operation_id:operation,state,action,reason:null,session_directory:session,generation,capacity,admission_observed:admission,observed_at:Date.now(),evidence_path:evidence,...extra};text(event);return event;}
 async function record(event){try{return await repl(${call("recordListenerLifecycle",J(evidence)+",")}+JSON.stringify(event)+")));","Record listener lifecycle receipt");}catch(e){return {receipt_error:String(e?.message||e)};}}
 async function end(next,extra){finished=true;admission=false;await record(emit(next,"stop",extra));}
 // Keeps only recent outputs; a long-lived serve relays its outputs instead.
-async function stage(code,relay){const outputs=[];let error=null;try{await new AsyncFunction("tools","text",code)(tools,v=>{outputs.push(v);if(outputs.length>8)outputs.shift();relay?.(v);});}catch(e){error=String(e?.message||e);}return {outputs,error};}
+async function stage(code,relay){const outputs=[];let error=null;try{await new AsyncFunction("tools","text",code)(tools,v=>{outputs.push(v);if(outputs.length>8)outputs.shift();return relay?.(v);});}catch(e){error=String(e?.message||e);}return {outputs,error};}
 // One read-only resident-ready process, drained until it exits. Its failure is
 // only "not observed"; it never ends or replaces the serve continuation.
 async function observe(){
@@ -1099,10 +1100,10 @@ await end(["stale","commit_unknown"].includes(started.state)?"failed":"blocked",
 }else{
 operation=started.operation_id;generation=started.owner.generation;
 await record(emit("qualifying","wait",{reason:"owner_acquired"}));
-const qualified=await stage(started.stages.qualify,v=>{if(v?.action==="finalize")emit("qualifying","finalize",{reason:"stop_probe_armed",nonce:v.nonce,armed_at:v.armedAt,deadline_at:v.deadlineAt,challenge_sha256:v.challengeSha256,instruction:"Attempt exactly one final response now. When the Stop hook blocks it, call functions.wait on this SAME cell. Never call functions.exec again for this start."});});
+const qualified=await stage(started.stages.qualify,async v=>{if(v?.action==="finalize"){probe={armed_at:v.armedAt,deadline_at:v.deadlineAt,finalize_yielded_at:Date.now()};emit("qualifying","finalize",{reason:"stop_probe_armed",nonce:v.nonce,armed_at:v.armedAt,deadline_at:v.deadlineAt,challenge_sha256:v.challengeSha256,instruction:"Attempt exactly one final response now. When the Stop hook blocks it, call functions.wait on this SAME cell. Never call functions.exec again for this start."});await yield_control();}});
 if(qualified.error){
 const failed=qualified.outputs.findLast(v=>v?.state==="failed");
-await end("failed",{reason:failed?.reason??"qualification_failed",error:qualified.error,terminal_receipt:failed?.terminal_receipt??null,diagnostic:failed?.reason==="qualification_timeout"?${J(qualificationTimeoutDiagnostic)}:null});
+await end("failed",{reason:failed?.reason??"qualification_failed",error:qualified.error,terminal_receipt:failed?.terminal_receipt??null,...probe,diagnostic:failed?.reason==="qualification_timeout"?${J(qualificationTimeoutDiagnostic)}:null});
 }else{
 await record(emit("starting","wait",{reason:"stop_observed"}));
 const opened=await stage(started.stages.open);
@@ -1592,7 +1593,7 @@ if(loaded.exit_code!==0||typeof loaded.output!=="string")throw Error("Pinned pac
 if(unescape(encodeURIComponent(loaded.output)).length!==${expectedBytes}||!loaded.output.startsWith(${J(directive)}))
 throw Error("Pinned packet body differs");
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-await new AsyncFunction("tools","text",`+J('"use strict";\n')+`+loaded.output)(tools,text);`;
+await new AsyncFunction("tools","text","yield_control",`+J('"use strict";\n')+`+loaded.output)(tools,text,typeof yield_control==="function"?yield_control:undefined);`;
 return {kind:"resident_packet_call",tool:"functions.exec",arguments:{code:bootstrap},
 codeBytes:Buffer.byteLength(bootstrap),codeSha256:createHash("sha256").update(bootstrap).digest("hex"),
 targetCodeBytes:bytes.length,targetCodeSha256:targetSha256,stageFile,

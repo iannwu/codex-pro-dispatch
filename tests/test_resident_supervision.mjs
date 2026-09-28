@@ -280,7 +280,7 @@ test('missing Stop hook reaches a bounded preflight failure without opening admi
   await f.guard.prepareSupervision(g, meta, f.trusted);
   const nativeTimeout = globalThis.setTimeout;
   t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
-    if (delay === 45000) {
+    if (delay === 120000) {
       const token = nativeTimeout(() => {}, 1000000);
       queueMicrotask(callback);
       return token;
@@ -671,7 +671,7 @@ const operation = 'c'.repeat(64);
 function captureDeadline(t) {
   const realTimeout = globalThis.setTimeout, clock = {expire: null};
   const mock = t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
-    if (delay !== 45000) return realTimeout(callback, delay, ...args);
+    if (delay !== 120000) return realTimeout(callback, delay, ...args);
     clock.expire = callback;
     return realTimeout(() => {}, 0);
   });
@@ -725,7 +725,7 @@ test('Stop before deadline: the observation keeps the slot and the deadline cann
   const f = await fixture(t, false), clock = captureDeadline(t), s = await startupTurn(t, f, turn);
   await f.guard.prepareSupervision(s.g, s.meta, f.trusted);
   const armed = await f.guard.armSupervision(s.g, s.meta, f.trusted, s.binding);
-  assert.equal(armed.deadlineAt - armed.armedAt, 45000);
+  assert.equal(armed.deadlineAt - armed.armedAt, 120000);
   assert.equal(armed.challengeSha256, sha(await fs.readFile(s.challenge)));
   assert.match((await f.hook()).reason, /^Supervision preflight only/);
   clock.expire();
