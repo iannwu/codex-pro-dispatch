@@ -117,7 +117,7 @@ def route(receipt, paths, locked, *, registry=...):
     if registry is ...:
         registry = read(paths, locked)
     name = receipt.get("execution_route")
-    if "execution_route" in receipt and name not in {"direct", "bridge"}:
+    if "execution_route" in receipt and name not in ("direct", "bridge"):
         raise core.StateError("Invalid receipt execution_route")
     bridge = any(key in receipt for key in BRIDGE_FIELDS)
     historical = (name is None and "execution_route" not in receipt

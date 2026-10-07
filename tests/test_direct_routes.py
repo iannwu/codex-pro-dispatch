@@ -74,7 +74,8 @@ class DirectRoutesTests(unittest.TestCase):
     def test_terminal_fallback_never_hides_explicit_or_partial_provenance(self):
         from codex_pro_dispatch import routes
         self.direct()
-        for fields in ({"execution_route": None}, {"execution_route": "unknown"},
+        for fields in ({"execution_route": None}, {"execution_route": []},
+                       {"execution_route": {}}, {"execution_route": "unknown"},
                        {"direct_binding_id": "unknown"}, {"queue_claim_token": "unknown"},
                        {"owner_generation": 0}, {"worker_slot": "a"},
                        {"safety_observer": "malformed"}):
