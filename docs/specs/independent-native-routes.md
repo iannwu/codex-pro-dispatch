@@ -44,12 +44,14 @@ The version-1 shape is:
     "model_confirmation": "user-confirmed-worker",
     "configured_at": "UTC timestamp"
   },
+  "direct_bindings": [],
+  "legacy_standalone_workers": [],
   "bridge_workers": ["exact-native-chat-id"],
   "listener_tasks": ["exact-native-task-id"]
 }
 ```
 
-direct_worker may be null. Lists contain unique valid IDs. Retain previously exposed bridge destinations and registered listener tasks conservatively; removing them is outside this change. No model identity is inferred from confirmation. binding_id changes only for explicit direct reconfiguration, never when the bridge rotates.
+direct_worker may be null. direct_bindings is append-only history of full direct-worker records, including the current binding. legacy_standalone_workers is an append-only list of exact scalar worker IDs witnessed while no resident authority/pool owned them. Other lists contain unique valid IDs. Retain previously exposed bridge destinations, historical direct bindings and registered listener tasks conservatively; removing them is outside this change. No model identity is inferred from confirmation. binding_id changes only for explicit direct reconfiguration, never when the bridge rotates. Terminal direct receipts validate against retained history, not a new default worker.
 
 On first creation, derive bridge destinations from valid existing canonical owner/pool/legacy witnesses and retained unresolved receipts. Reject ambiguous or malformed evidence rather than configuring a potentially overlapping worker. After establishment, direct operations read the registry and canonical safety receipts, not owner/pool/session files. Bridge enrollment, pool activation/replacement and listener task registration must update/check the registry under the same lock. Disjointness must hold in both directions, including earlier exposed destinations and surviving send authority. Never modify worker.json or worker-pool.json migration witnesses to add the direct worker.
 
@@ -71,15 +73,15 @@ Apply the boundary across prepare, arm, submitted/outbound validation, pending, 
 
 Keep active_cooldown global across both routes, including malformed timestamp rejection and the original fixed 30-minute expiry. A bridge HTTP 403 observed after lifecycle failure must still be durably recorded.
 
-At bridge preparation, retain the exact original safety-observer identity from trusted resident invocation plus the existing queue claim binding in the receipt. Reuse generation, owner, parent, invocation, request, slot, worker and claim identity. Store only what is necessary to authenticate that original observer, not a new bearer authority or plaintext secret in diagnostics.
+At bridge preparation, retain the exact original safety-observer identity from trusted resident invocation plus the existing queue claim binding in the receipt. Reuse generation, owner, parent, invocation, request, slot, worker and claim identity. Retain the canonical original identity or its canonical-JSON hash plus the existing claim association. This proves original binding within the existing cooperative same-UID trust model. CLI resident-invocation JSON is not cryptographic host authentication. Do not add a secret store or claim resistance to a malicious same-UID process that can already read and rewrite private state.
 
-When the current resident guard fails solely due to lifecycle loss/corruption, permit mark_unusual_activity_403 only if the original authenticated invocation and receipt/claim identities match exactly and the receipt is in an existing eligible post-arm state. This narrow observer can only add the existing 403/no-resend/cooldown evidence and optional OpenAI request ID. It cannot prepare, send, acknowledge, release, rewrite ownership or complete. Repeating the same observation never renews cooldown. Wrong caller/worker/request/claim or malformed canonical receipt rejects it. Do not expose a general skip-guard option.
+When the current resident guard fails solely due to lifecycle loss/corruption, permit mark_unusual_activity_403 only if the original trusted-runner invocation and receipt/claim identities match exactly and the receipt is in an existing eligible post-arm state. Queue.load supplies strict claim validation without reading bridge lifecycle files. A readable valid current owner that differs must deny fallback. A dedicated private safety-save function writes only the established 403 fields and optional OpenAI request ID, bypassing only resident lifecycle validation. It cannot prepare, send, acknowledge, release, rewrite ownership or complete. Repeating the same observation never renews cooldown. Wrong caller/worker/request/claim, removed/malformed claim or malformed canonical receipt rejects it. External request content never supplies invocation or claim authority. Do not expose a general skip-guard option.
 
 ### 4. Stop hook belongs to registered listener tasks
 
-Register the intended native listener task in the route registry before qualification begins. Trusted host Stop event session_id/turn_id plus independently resolved canonical paths select listener supervision before resident inspect/status reads. An unrelated direct task returns an ordinary non-blocking Stop decision without decoding owner, pool or session files.
+Register the intended native listener task in the route registry before qualification begins, during listener.commit or legacy prepareSupervision before challenge publication. Add a read-only registry-only CLI selector, routes stop-check --parent-task-id <host-event-session-id>. It derives RuntimePaths through the normal validated default_paths mechanism, uses create=False and private file/path integrity checks, and never reads resident owner, pool, session, queue or assignment files. It returns canonical paths and state=registered|unrelated|legacy. stopDecision calls this selector before resident inspect/status. Trusted host Stop event session_id/turn_id selects listener supervision. state=unrelated returns an ordinary non-blocking Stop decision without decoding bridge lifecycle files.
 
-For registered listener tasks, retain all existing qualification and running-resident supervision behavior. Missing or corrupt shared registry is an integrity problem, not permission to exempt a known listener. Preserve backward compatibility for old installations with no registry, but establishing a direct binding must establish usable registration at the same time. Test actual qualification packets, registered listener Stop flow and unrelated-task finalization.
+For registered listener tasks, retain all existing qualification and running-resident supervision behavior. With no registry, state=legacy retains the old hook path, not an exemption. A malformed or unsafe shared registry blocks Stop with a precise registry-integrity diagnosis because listener membership cannot then be established. This deliberate shared-integrity case is different from corrupt bridge lifecycle metadata. direct-set may create a valid registry with empty bridge_workers and listener_tasks when no bridge exists; it never registers the ordinary direct caller as a listener and never starts or requires one. Only listener.commit/prepareSupervision registers an intended listener task. Existing valid owner registration may be captured during initial registry bootstrap. Test actual qualification packets, registered listener Stop flow and unrelated-task finalization.
 
 ### 5. Diagnostics and deterministic skill routing
 
@@ -100,6 +102,26 @@ Update SKILL.md and standalone-dispatch.md: ordinary Codex consultation uses dir
 9. An unrelated direct task finalizes through Stop with malformed bridge lifecycle files, while registered listener qualification/supervision remains enforced.
 10. Missing/broken direct registration produces a precise direct configuration/integrity error, never a bridge-recovery instruction or automatic Chrome launch.
 11. Existing Python and Node suites, packaging/pin tests, syntax checks and CLI help pass. Public CLI fixture tests, not textual skill assertions alone, prove isolation.
+12. Fault injection before and after each registry/owner/pool write preserves disjointness. A failed bridge commit may conservatively retain reserved IDs/tasks but cannot grant a send, corrupt a prior direct binding or discard prior authority.
+
+## Crash ordering and legacy classification
+
+The registry is the authoritative destination reservation ledger. It is a single atomic JSON commit under state_lock. For bridge activation, replacement and enrollment, first atomically append/check target worker IDs and listener tasks, then write pool/owner state using existing transitions. If the later write fails, leave the conservative registry reservation intact. Never roll the registry back, infer the reservation away or write owner/pool first. A retry may reuse the same already-reserved bridge destination. Direct-set atomically changes the current direct pointer and appends its history in one registry write; reset clears only the current pointer, retaining history. Failed writes keep the previous complete registry. No multi-file transaction journal is needed because earlier reservations only restrict authority. Add fault injection at each boundary.
+
+Registration history is not deleted by ordinary worker reset, purge or uninstall. Operations that would erase the registry while registered routes exist must report that route history is retained or reject the unsupported destructive cleanup. A later separately scoped physical-retirement workflow may remove history; it is not part of this task. If a defensive size limit is reached, reject new registrations without pruning old evidence or invalidating established operation.
+
+| Stored receipt evidence | Classification and allowed use |
+| --- | --- |
+| execution_route=direct plus valid historical direct binding, exact worker and no bridge provenance | Direct; existing collection uses historical binding, new prepare uses current binding |
+| execution_route=bridge plus consistent existing resident/queue/pool provenance | Bridge; existing generation/claim guards apply |
+| No route, with consistent pool slot/generation or queue-claim provenance | Legacy bridge; retain exposed worker in registry, validate claim when required |
+| No route/provenance, matching a scalar binding witnessed with no resident/pool | Legacy standalone; original post-arm exchange is collect/complete-only using retained original worker/parent, with no new arm or continuation after registry establishment |
+| Old terminal receipt without determinable historical identity | Read-only diagnostic/cooldown evidence only; no continuation or new send authority inferred |
+| Unresolved receipt lacking determinable binding, contradictory fields, unknown route, mismatched direct binding, or mixed direct/bridge provenance | Integrity error; preserve evidence and deny affected admission |
+
+First registry creation captures valid existing scalar standalone identity only when no owner/pool claimed it, plus every determinable exposed bridge/direct destination. Never infer an old receipt's role from a newly replaced scalar configuration. Legacy installations with no registry retain existing behavior until explicit registry establishment. Account cooldown parsing reads all receipts regardless of classification.
+
+After registry establishment, a proven legacy standalone receipt remains immutable legacy provenance, not a new direct binding. Existing armed/submitted/pending/ambiguous/indeterminate exchange may be observed, completed, marked pending/ambiguous/403 or explicitly abandoned on its original worker. Prepared legacy work cannot arm; completed legacy work cannot authorize a continuation. Report legacy_collect_only or legacy_read_only with the exact receipt rather than silently rewriting it. New direct work requires its own fresh direct-bound receipt. This conservative migration changes old-send eligibility only after explicit route registration; installations without the registry keep existing legacy behavior.
 
 ## Testing and delivery
 
