@@ -45,6 +45,87 @@ class DirectRoutesTests(unittest.TestCase):
         self.cli("complete", rid, text=result)
         self.assertEqual(core.load_assignment(rid, self.paths)["status"], "complete")
 
+    def seed_receipt(self, rid, **fields):
+        with core.state_lock(self.paths) as locked:
+            core.atomic_write_json(core.assignment_path(rid, self.paths),
+                dict(schema_version=core.SCHEMA_VERSION, assignment_id=rid,
+                     created_at=core.utc_now(), **fields), _locked=locked)
+
+    def test_terminal_history_without_worker_remains_read_only_safety_evidence(self):
+        from codex_pro_dispatch import routes
+        self.paths.worker_file.unlink()  # Disposable old scalar fixture.
+        self.seed_receipt("old-worker", status="complete", worker_conversation_id="retired",
+                          parent_task_id="retired-parent")
+        self.seed_receipt("minimal", status="complete")
+        self.direct()
+        self.lifecycle()
+        with core.state_lock(self.paths) as locked:
+            for rid in ("old-worker", "minimal"):
+                value = core.load_assignment(rid, self.paths, _locked=locked)
+                self.assertEqual(routes.route(value, self.paths, locked), "historical")
+                with self.assertRaisesRegex(core.StateError, "legacy_read_only"):
+                    core._save_assignment(rid, value, self.paths, _locked=locked)
+        self.seed_receipt("minimal", status="complete", cooldown_until="malformed")
+        error = self.cli("status", "--route", "direct", success=False)
+        self.assertIn("Invalid cooldown receipt", error["error"])
+        self.cli("prepare", "--parent-task-id", "direct-parent", "--assignment-id", "blocked",
+                 "--native-controls-confirmed", text="Question", success=False)
+
+    def test_terminal_fallback_never_hides_explicit_or_partial_provenance(self):
+        from codex_pro_dispatch import routes
+        self.direct()
+        for fields in ({"execution_route": None}, {"execution_route": "unknown"},
+                       {"direct_binding_id": "unknown"}, {"queue_claim_token": "unknown"},
+                       {"owner_generation": 0}, {"worker_slot": "a"},
+                       {"safety_observer": "malformed"}):
+            with self.subTest(fields=fields):
+                self.seed_receipt("terminal-invalid", status="complete", **fields)
+                with core.state_lock(self.paths) as locked:
+                    with self.assertRaises(core.DispatchError):
+                        routes.route(core.load_assignment("terminal-invalid", self.paths, _locked=locked),
+                                     self.paths, locked)
+        self.seed_receipt("terminal-invalid", status="armed")
+        with core.state_lock(self.paths) as locked:
+            with self.assertRaises(core.DispatchError):
+                routes.route(core.load_assignment("terminal-invalid", self.paths, _locked=locked),
+                             self.paths, locked)
+
+    def test_fabricated_legacy_bridge_provenance_blocks_bootstrap_and_admission(self):
+        from codex_pro_dispatch import routes
+        for registered in (False, True):
+            if registered:
+                self.direct()
+            for fields in ({"queue_claim_token": "fabricated"}, {"owner_generation": 0},
+                           {"worker_slot": "slot"}, {"safety_observer": "a" * 64}):
+                with self.subTest(registered=registered, fields=fields):
+                    self.seed_receipt("legacy-forged", status="armed", worker_conversation_id="worker",
+                                      parent_task_id="old-parent", **fields)
+                    with core.state_lock(self.paths) as locked:
+                        with self.assertRaises(core.DispatchError):
+                            (core.active_assignments(self.paths, execution_route="direct", _locked=locked)
+                             if registered else routes.initial(self.paths, locked))
+                    core.assignment_path("legacy-forged", self.paths).unlink()
+
+    def test_valid_legacy_scalar_and_pool_bridge_provenance(self):
+        from codex_pro_dispatch import routes
+        from codex_pro_dispatch.queue import Queue
+        queue = Queue(self.paths)
+        queue.submit("scalar-old", b"Question", "client")
+        queue.claim("old-parent", True, "scalar-old")
+        with core.state_lock(self.paths) as locked:
+            value = core.load_assignment("scalar-old", self.paths, _locked=locked)
+            value.pop("execution_route")
+            core.atomic_write_json(core.assignment_path("scalar-old", self.paths), value, _locked=locked)
+            self.assertEqual(routes.route(value, self.paths, locked), "bridge")
+        core.abandon_assignment("scalar-old", reason="fixture retirement", paths=self.paths)
+        queue.release("scalar-old", "old-parent")
+        self.occupied_bridge()
+        with core.state_lock(self.paths) as locked:
+            value = core.load_assignment("bridge-0", self.paths, _locked=locked)
+            value.pop("execution_route")
+            core.atomic_write_json(core.assignment_path("bridge-0", self.paths), value, _locked=locked)
+            self.assertEqual(routes.route(value, self.paths, locked), "bridge")
+
     def test_public_cli_lifecycle_with_closed_bridge(self):
         self.bridge()
         self.direct()

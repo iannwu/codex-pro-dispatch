@@ -4,6 +4,7 @@ Use this reference for ordinary explicitly requested Codex consultations, direct
 collect-only recovery, and authorized continuations. Claude uses `claude-client`
 and its listener pool. Direct operation does not require listener startup, listener
 recovery, or Stop qualification.
+It is not the parked broker's activation recipe.
 
 The compact parent SKILL.md supplies the essential boundaries for every mode.
 All helper paths below are relative to the skill directory containing SKILL.md,
@@ -90,13 +91,15 @@ Exact tool names may vary, but every capability must be available in the current
 
 Resolve the bundled helper relative to this `SKILL.md`: use the absolute path to `scripts/pro-dispatch` inside the installed skill. A source-checkout install may also expose `pro-dispatch` on `PATH`. In every command below, use the absolute bundled path when `pro-dispatch` is not on `PATH`.
 
-After the worker exists, run:
+For a fresh root request, after the default direct worker exists, run:
 
 ```bash
 pro-dispatch doctor --route direct --native-controls-confirmed
 ```
 
 Proceed only when it exits zero and returns both `local_ok: true` and `native_controls_confirmed: true`. The flag is an assertion that this invocation completed the semantic capability check; it is not automatic tool discovery.
+
+For recovery or an explicit continuation, perform the same native capability preflight, then resolve the saved receipt and its retained binding. A missing or changed default does not block that original binding; the default-worker doctor gate above applies to fresh root requests.
 
 ## Private transient files
 

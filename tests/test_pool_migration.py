@@ -89,7 +89,9 @@ class PoolMigrationTests(unittest.TestCase):
         self.activate()
         after = self.snapshot()
         self.assertEqual({key: after[key] for key in before}, before)
-        self.assertEqual(set(after) - set(before), {"config/worker-pool.json"})
+        self.assertEqual(set(after) - set(before), {"config/worker-pool.json", "config/dispatch-routes.json"})
+        registry = json.loads(after["config/dispatch-routes.json"])
+        self.assertEqual(registry["bridge_workers"], ["new-a", "new-b", "retired-worker"])
         self.assertEqual(self.queue.collect("published")["answer"], answer)
         self.queue.cleanup("published", acknowledge=True)
         for rid in ("acknowledged", "released", "published"):

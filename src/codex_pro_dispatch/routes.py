@@ -117,11 +117,17 @@ def route(receipt, paths, locked, *, registry=...):
     if registry is ...:
         registry = read(paths, locked)
     name = receipt.get("execution_route")
-    if name not in {None, "direct", "bridge"}:
+    if "execution_route" in receipt and name not in {"direct", "bridge"}:
         raise core.StateError("Invalid receipt execution_route")
+    bridge = any(key in receipt for key in BRIDGE_FIELDS)
+    historical = (name is None and "execution_route" not in receipt
+                  and "direct_binding_id" not in receipt and not bridge
+                  and receipt.get("status") in core.TERMINAL_STATUSES)
+    if historical and (receipt.get("worker_conversation_id") is None
+                       or receipt.get("parent_task_id") is None):
+        return "historical"
     worker = core.validate_identifier(receipt.get("worker_conversation_id"), field="worker_conversation_id")
     core.validate_identifier(receipt.get("parent_task_id"), field="parent_task_id")
-    bridge = any(key in receipt for key in BRIDGE_FIELDS)
     if name == "direct":
         binding = core.validate_identifier(receipt.get("direct_binding_id"), field="direct_binding_id")
         direct = next((b for b in registry["direct_bindings"] if b["binding_id"] == binding), None) if registry else None
@@ -135,7 +141,7 @@ def route(receipt, paths, locked, *, registry=...):
     if name == "bridge" or bridge:
         if "safety_observer" in receipt and (not isinstance(receipt["safety_observer"], str) or not re.fullmatch(r"[a-f0-9]{64}", receipt["safety_observer"])):
             raise core.StateError("Invalid original safety observer")
-        if "worker_slot" in receipt and "owner_generation" not in receipt:
+        if ("worker_slot" in receipt) != ("owner_generation" in receipt):
             raise core.StateError("Incomplete bridge slot provenance")
         if "worker_slot" in receipt:
             core.validate_identifier(receipt["worker_slot"], field="worker_slot")
@@ -149,16 +155,15 @@ def route(receipt, paths, locked, *, registry=...):
             raise core.StateError("Bridge receipt lacks provenance")
         if registry and worker not in registry["bridge_workers"]:
             raise core.StateError("Bridge receipt worker is not registered")
-        if name == "bridge":
-            from .queue import Queue
-            request = core.validate_identifier(receipt.get("assignment_id"), field="assignment_id")
-            row = Queue(paths).load(request, _locked=locked)
-            if row["state"] in {"queued", "cancelled"}:
-                raise core.StateError("Bridge receipt lacks a retained queue association")
-            for key in ("parent_task_id", "worker_conversation_id", "queue_claim_token",
-                        "worker_slot", "owner_generation", "prompt_sha256", "wrapped_prompt_sha256", "result_protocol"):
-                if row.get(key) != receipt.get(key):
-                    raise core.StateError("Bridge receipt provenance differs from canonical claim")
+        from .queue import Queue
+        request = core.validate_identifier(receipt.get("assignment_id"), field="assignment_id")
+        row = Queue(paths).load(request, _locked=locked)
+        if row["state"] in {"queued", "cancelled"}:
+            raise core.StateError("Bridge receipt lacks a retained queue association")
+        for key in ("parent_task_id", "worker_conversation_id", "queue_claim_token",
+                    "worker_slot", "owner_generation", "prompt_sha256", "wrapped_prompt_sha256", "result_protocol"):
+            if row.get(key) != receipt.get(key):
+                raise core.StateError("Bridge receipt provenance differs from canonical claim")
         return "bridge"
     # Pre-registry standalone receipts retain their validated legacy binding.
     if registry:
@@ -166,6 +171,8 @@ def route(receipt, paths, locked, *, registry=...):
             if receipt.get("status") in core.TERMINAL_STATUSES:
                 return "historical"
             raise core.StateError("Invalid legacy receipt binding")
+    elif historical and not os.path.lexists(paths.worker_file):
+        return "historical"
     elif core.load_worker(paths, _locked=locked).conversation_id != worker:
         if receipt.get("status") in core.TERMINAL_STATUSES:
             return "historical"
