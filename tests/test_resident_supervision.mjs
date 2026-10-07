@@ -49,7 +49,7 @@ async function fixture(t, active = true) {
   await save(recordPath, authority);
   // The production module calls the actual helper interface. This isolated
   // helper permits only its existing read operations and no mutations.
-  await fs.writeFile(join(scripts, 'pro-dispatch'), `import json, pathlib, sys\nv=json.loads(pathlib.Path(__file__).with_name('fixture-authority.json').read_text())\na=sys.argv[1:]\nif a==['status','--current']: print(json.dumps(v['status']))\nelif a==['resident','inspect']: print(json.dumps({'ok':True,'owner':v['owner']}))\nelif a==['queue','status']: print(json.dumps(v['queue']))\nelse: raise SystemExit('Mutation attempted')\n`);
+  await fs.writeFile(join(scripts, 'pro-dispatch'), `import json, pathlib, sys\nv=json.loads(pathlib.Path(__file__).with_name('fixture-authority.json').read_text())\na=sys.argv[1:]\nif a==['status','--current']: print(json.dumps(v['status']))\nelif a==['resident','inspect']: print(json.dumps({'ok':True,'owner':v['owner']}))\nelif a==['queue','status']: print(json.dumps(v['queue']))\nelif a[:2]==['routes','stop-check']: print(json.dumps({'ok':True,'state':'legacy','paths':v['status'].get('paths',{})}))\nelif a[:2]==['routes','register-listener']: print(json.dumps({'ok':True,'state':'registered','paths':v['status'].get('paths',{})}))\nelse: raise SystemExit('Mutation attempted')\n`);
   await save(join(root, 'state/assignment.json'), {assignment_id: rid, status: 'armed', no_resend: true, submission_count: 0});
   await save(join(root, 'session/command-2.json'), {requestId: 'incident-unobserved-B', ordinal: 2});
   const guard = await import(pathToFileURL(join(root, relative)).href);
@@ -349,7 +349,7 @@ test('helper failure retains exit diagnostics and keeps Stop blocked without sta
   });
   const decision = await f.hook();
   assert.equal(decision.decision, 'block');
-  assert.match(decision.reason, /resident inspect/);
+  assert.match(decision.reason, /routes stop-check/);
   assert.match(decision.reason, /"code":23/);
   assert.deepEqual(await f.snapshot(), before);
 });
@@ -417,6 +417,10 @@ async function changeAfterFirstSnapshot(f, change, threshold = 3) {
   await fs.writeFile(join(scripts, 'pro-dispatch'), `import json, pathlib, sys
 p=pathlib.Path(__file__).parent
 args=sys.argv[1:]
+if args[:2]==['routes','stop-check']:
+ v=json.loads((p/'fixture-authority.json').read_text())
+ print(json.dumps({'ok':True,'state':'legacy','paths':v['status'].get('paths',{})}))
+ raise SystemExit(0)
 if args not in [['status','--current'],['resident','inspect'],['queue','status']]: raise SystemExit('Mutation attempted')
 c=p/'read-count'
 n=int(c.read_text())+1 if c.exists() else 1

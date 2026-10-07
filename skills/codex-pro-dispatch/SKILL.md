@@ -9,7 +9,7 @@ metadata:
 # Codex Pro Dispatch
 
 Use the official combined ChatGPT/Codex desktop app. The helper owns receipts; the native host supplies tools. Installation authorizes neither sends nor sessions.
-The user picks any available model and reasoning effort in the worker conversation; `worker set --confirm-worker` records that conversation, never a verified model.
+The user picks any available model and reasoning effort in the worker conversation; `worker direct-set --confirm-worker` records that conversation, never a verified model.
 
 Use the listener task only for listener operations. For ordinary coordination to an existing resident listener, call `send_message_to_thread` with only `threadId` and `prompt`; omit `model` and `thinking`. Override those settings only when the user explicitly requests changing that listener itself. A reviewer/builder model request or a ChatGPT worker model change does not authorize changing the listener.
 
@@ -21,7 +21,16 @@ copy; it never activates a listener, grants permissions, or authorizes a send.
 
 ### Native Codex owner
 
-For "start listener", "restart listener", a replacement Listener task, or new worker conversations,
+For an ordinary Codex consultation, use the independent direct native workflow in
+[standalone-dispatch.md](references/standalone-dispatch.md). It uses the explicitly
+configured direct Chat ID, distinct from all current and historical Claude bridge
+workers. Run the actual caller capability preflight, then `status --route direct`.
+A stopped or malformed bridge does not require listener recovery for direct work.
+Do not run listener startup or Stop qualification as direct preflight. A missing
+direct binding requires `worker direct-set`, never an inferred scalar worker or title.
+Claude uses `claude-client` and the registered listener pool.
+
+For "start listener", "restart listener", a replacement Listener task, or new bridge worker conversations,
 use [listener-start.md](references/listener-start.md) first. Its one constant
 `functions.exec` code runs the whole guarded startup; follow only each output's
 `action`. Let the runtime choose the transition; do not improvise stages, owner

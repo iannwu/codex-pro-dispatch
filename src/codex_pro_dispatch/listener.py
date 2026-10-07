@@ -30,7 +30,7 @@ def idle_blockers(paths, locked, owner):
                      or s["invocation"] is not None for s in owner["slots"]):
         blockers.append({"reason": "pool_not_idle", "next_action": "Use existing recovery for occupied slots"})
     claims = [r for r in Queue(paths).records(_locked=locked) if r["state"] == "claimed"]
-    active = core.active_assignments(paths, _locked=locked)
+    active = core.active_assignments(paths, execution_route="bridge", _locked=locked)
     requests = sorted({r["request_id"] for r in claims} | {a["assignment_id"] for a in active})
     if requests:
         blockers.append({"reason": "request_recovery_required", "request_ids": requests,

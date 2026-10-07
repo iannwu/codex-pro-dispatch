@@ -146,6 +146,10 @@ async function context(meta, trusted) {
 // Called only through the pinned activation recipe with actual native metadata.
 // Evidence is kept under the existing canonical state directory, not a new owner.
 export async function prepareSupervision(g, meta, trusted) {
+  const native = nativeIdentity(meta, trusted);
+  const registered = await cli(['routes', 'register-listener', '--parent-task-id', native.parent]);
+  if (registered.state !== 'registered' || registered.paths?.config_dir !== trusted.configDir ||
+      registered.paths?.state_dir !== trusted.stateDir) fail();
   const {identity, paths, owner, files} = await context(meta, trusted);
   if (owner?.inflight != null || owner?.slots?.some(slot => slot.invocation !== null)) fail();
   if (g.parkedSupervision?.parent === identity.parent && g.parkedSupervision?.turn === identity.turn) {
@@ -467,6 +471,12 @@ export async function stopDecision(event) {
   try {
     if (event?.hook_event_name !== 'Stop' || !id(event.session_id))
       return block('Invalid Stop identity; preserve resident state and do not advertise availability.');
+    let route;
+    try { route = await cli(['routes', 'stop-check', '--parent-task-id', event.session_id]); }
+    catch (error) { return block('Dispatch route registry integrity could not be verified. Preserve registration evidence. ' + error.message); }
+    if (!['registered', 'unrelated', 'legacy'].includes(route.state))
+      return block('Dispatch route registry selector returned invalid evidence.');
+    if (route.state === 'unrelated') return {};
     const {owner} = await cli(['resident', 'inspect']);
     if (!id(event.turn_id)) {
       if (!owner || owner.parent !== event.session_id) return {};
@@ -481,6 +491,7 @@ export async function stopDecision(event) {
       if (!owner || owner.parent !== event.session_id) return {};
       throw error;
     }
+    if (!same(status.paths, route.paths)) fail();
     const files = location(status.paths, event.session_id, event.turn_id);
     let challenge, terminal = null;
     try { challenge = await json(files.challenge); }

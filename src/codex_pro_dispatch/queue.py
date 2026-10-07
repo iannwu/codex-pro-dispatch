@@ -197,7 +197,7 @@ class Queue:
                 raise core.StateError("Multiple queue claims share one worker slot")
             used_slots[slot_id] = record["request_id"]
             used_workers[worker_id] = record["request_id"]
-        active = core.active_assignments(self.paths, _locked=_locked)
+        active = core.active_assignments(self.paths, execution_route="bridge", _locked=_locked)
         active_ids = {record["assignment_id"] for record in active}
         for assignment in active:
             worker_id = assignment.get("worker_conversation_id")
@@ -307,7 +307,7 @@ class Queue:
                 pass
             else:
                 raise core.StateError("Queued resume requires no dispatch receipt")
-            active = core.active_assignments(self.paths, _locked=locked)
+            active = core.active_assignments(self.paths, execution_route="bridge", _locked=locked)
             pool = core.load_worker_pool(self.paths, _locked=locked) \
                 if core.worker_pool_active(self.paths, _locked=locked) else None
             if pool is None and active:
@@ -695,7 +695,7 @@ class Queue:
                 r = target if target is not None else queued[0]
                 if os.path.lexists(core.assignment_path(r["request_id"], self.paths)):
                     raise core.StateError("Refusing preexisting dispatch assignment")
-                active = core.active_assignment(self.paths, _locked=locked)
+                active = core.active_assignment(self.paths, execution_route="bridge", _locked=locked)
                 if active:
                     raise core.BusyError("Another dispatch is unresolved",
                                          details={"assignment_id": active.get("assignment_id"),

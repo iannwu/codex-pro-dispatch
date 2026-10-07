@@ -185,6 +185,18 @@ def build_parser() -> argparse.ArgumentParser:
     worker_reset = worker_sub.add_parser("reset", help="Remove the configured worker")
     worker_reset.add_argument("--force", action="store_true")
 
+    direct_set = worker_sub.add_parser("direct-set", help="Configure the independent native Codex destination")
+    direct_set.add_argument("--conversation-id", required=True)
+    direct_set.add_argument("--expected-conversation-id")
+    direct_set.add_argument("--label", default="Codex Direct Pro")
+    direct_set.add_argument("--confirm-worker", action="store_true")
+    direct_set.add_argument("--native-controls-confirmed", action="store_true")
+    worker_sub.add_parser("direct-show", help="Show the independent direct binding")
+    worker_sub.add_parser("direct-reset", help="Clear current direct binding, retaining route history")
+    route_parser = subparsers.add_parser("routes", help="Read canonical route registration")
+    route_parser.add_argument("operation", choices=["stop-check", "register-listener"])
+    route_parser.add_argument("--parent-task-id", required=True)
+
     pool = subparsers.add_parser("worker-pool", help="Activate or inspect the explicit one/two-worker pool")
     pool.add_argument("operation", choices=["activate", "show"])
     pool.add_argument("--workers-file", help="JSON array of worker entries for explicit activation")
@@ -305,6 +317,8 @@ def build_parser() -> argparse.ArgumentParser:
     purge.add_argument("--yes", action="store_true")
     purge.add_argument("--force", action="store_true")
 
+    status.add_argument("--route", choices=["direct", "bridge"], default="bridge")
+    doctor.add_argument("--route", choices=["direct", "bridge"], default="bridge")
     return parser
 
 
@@ -404,7 +418,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             value = q.publish(args.request_id, args.parent_task_id, args.native_controls_confirmed, native)
         return {"ok": True, **value}
 
+    if args.command == "routes":
+        from . import routes
+        if args.operation == "register-listener":
+            from .core import state_lock
+            with state_lock(paths) as locked:
+                routes.register_bridge(paths, locked, tasks=[args.parent_task_id])
+        return routes.stop_check(paths, args.parent_task_id)
+
     if args.command == "worker":
+        if args.worker_command.startswith("direct-"):
+            from . import routes
+            if args.worker_command == "direct-set":
+                if not args.native_controls_confirmed:
+                    raise DispatchError("Direct worker setup requires the actual caller native host-capability preflight")
+                worker = routes.set_direct(paths, args.conversation_id, label=args.label,
+                                           confirm_worker=args.confirm_worker,
+                                           expected_conversation_id=args.expected_conversation_id)
+            elif args.worker_command == "direct-show":
+                from .core import state_lock
+                with state_lock(paths, create=False) as locked:
+                    registry = routes.read(paths, locked)
+                    worker = registry["direct_worker"] if registry else None
+                if worker is None:
+                    raise ConfigurationError("direct_worker_not_configured: run worker direct-set")
+            else:
+                return {"ok": True, "removed": routes.reset_direct(paths), "history_retained": True}
+            return {"ok": True, "worker": worker, "path": str(routes.path(paths))}
         if args.worker_command == "set":
             if not args.native_controls_confirmed:
                 raise DispatchError(
@@ -594,6 +634,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         return {"ok": True, "assignment": value}
 
+    if args.command in {"status", "doctor"} and args.route == "direct":
+        from . import routes
+        result = routes.status(paths)
+        if args.command == "doctor":
+            result["native_controls_confirmed"] = bool(args.native_controls_confirmed)
+            result["ok"] = result["ok"] and bool(args.native_controls_confirmed)
+        return result
+
     if args.command == "status":
         if args.current:
             if args.assignment_id:
@@ -604,7 +652,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             try:
                 with state_lock(paths, create=False) as locked:
                     pool = load_worker_pool(paths, _locked=locked) if worker_pool_active(paths, _locked=locked) else None
-                    active_values = active_assignments(paths, _locked=locked)
+                    active_values = active_assignments(paths, execution_route="bridge", _locked=locked)
                     value = {
                         "ok": True,
                         "worker": (worker_payload(load_worker(paths, _locked=locked))
@@ -645,9 +693,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         return {
             "ok": True,
             "worker": worker,
-            "active_assignment": (active_assignments(paths)[0]
-                                  if len(active_assignments(paths)) == 1 else None),
-            "active_assignments": active_assignments(paths),
+            "active_assignment": (active_assignments(paths, execution_route="bridge")[0]
+                                  if len(active_assignments(paths, execution_route="bridge")) == 1 else None),
+            "active_assignments": active_assignments(paths, execution_route="bridge"),
             "worker_pool": pool_value,
             "pool_status": (
                 worker_pool_runtime_status(load_worker_pool(paths), paths)
@@ -686,7 +734,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         except DispatchError as exc:
             checks["worker_pool_error"] = str(exc)
         try:
-            current = active_assignments(paths)
+            current = active_assignments(paths, execution_route="bridge")
             checks["active_assignment"] = current[0] if len(current) == 1 else None
             checks["active_assignments"] = current
             checks["active_cooldown"] = active_cooldown(paths)

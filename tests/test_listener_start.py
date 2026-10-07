@@ -23,6 +23,14 @@ class ListenerStartTests(unittest.TestCase):
         return {str(p): p.read_bytes() for root in (self.paths.config_dir, self.paths.state_dir)
                 for p in root.rglob("*") if p.is_file() and p.name != "state.lock"}
 
+    def assert_registry_reservation(self, before, after, workers, parent):
+        key = str(self.paths.config_dir / "dispatch-routes.json")
+        old, new = json.loads(before.pop(key)), json.loads(after.pop(key))
+        self.assertEqual(new["bridge_workers"], sorted(set(old["bridge_workers"]) | set(workers)))
+        self.assertEqual(new["listener_tasks"], sorted(set(old["listener_tasks"]) | {parent}))
+        for field in ("version", "direct_worker", "direct_bindings", "legacy_standalone_workers"):
+            self.assertEqual(old[field], new[field])
+
     def fresh(self):
         p = listener.plan(self.paths, ["worker-a", "worker-b"], "Isolated fixture has no old executors")
         return listener.commit(self.paths, p, "parent", "turn")["owner"]
@@ -54,6 +62,7 @@ class ListenerStartTests(unittest.TestCase):
         after = self.snapshot()
         key = str(self.paths.state_dir / "resident-owner.json")
         self.assertNotEqual(before.pop(key), after.pop(key))
+        self.assert_registry_reservation(before, after, ["new-01", "new-02"], "replacement")
         self.assertEqual(before, after)
         self.assertEqual(result["owner"]["generation"], owner["generation"]+1)
         self.assertEqual([w.conversation_id for w in core.load_worker_pool(self.paths).workers], ["new-01", "new-02"])
@@ -138,7 +147,8 @@ class ListenerStartTests(unittest.TestCase):
         original = core.atomic_write_json
         def write_then_fail(*args, **kwargs):
             original(*args, **kwargs)
-            raise OSError("lost acknowledgment after durable write")
+            if args[0].name == "resident-owner.json":
+                raise OSError("lost acknowledgment after durable owner write")
         with patch.object(core, "atomic_write_json", write_then_fail), self.assertRaises(OSError):
             listener.commit(self.paths, p, "replacement", "turn")
         generation = self.owner()["generation"]
@@ -216,6 +226,7 @@ class ListenerStartTests(unittest.TestCase):
         p = listener.plan(self.paths, ["new-01"])
         listener.commit(self.paths, p, "replacement", "turn")
         after = self.snapshot()
+        self.assert_registry_reservation(before, after, ["new-01"], "replacement")
         for name in before:
             if not name.endswith("resident-owner.json"): self.assertEqual(before[name], after[name])
 
@@ -383,6 +394,7 @@ class ListenerStartTests(unittest.TestCase):
         after = self.snapshot()
         before.pop(str(self.paths.state_dir / "resident-owner.json"))
         after.pop(str(self.paths.state_dir / "resident-owner.json"))
+        self.assert_registry_reservation(before, after, ["fresh"], "replacement")
         self.assertEqual(before, after)
 
     def test_observed_reboot_rejects_overlap_new_evidence_and_unavailable_boot(self):

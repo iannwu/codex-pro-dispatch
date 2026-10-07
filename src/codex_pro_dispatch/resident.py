@@ -454,6 +454,11 @@ def write(paths, locked, v, *, physical=None):
         validate_pool_owner(v, pool)
         if len((json.dumps(v, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")) > 4 * 1024 * 1024:
             raise core.StateError("Resident authority size limit reached; preserve exposed destinations and use physical recovery")
+    from . import routes
+    workers = ([s["worker_conversation_id"] for s in v["slots"]]
+               if v.get("version") in (3, 4) else [v["worker"]])
+    workers += v.get("send_fence", {}).get("unexcluded_workers", [])
+    routes.register_bridge(paths, locked, workers, [v["parent"]])
     core.atomic_write_json(path, v, _locked=locked)
 
 
@@ -508,7 +513,7 @@ def _commit_handoff(paths, locked, v, credentials):
            or slot["invocation"] is not None for slot in v["slots"]):
         raise core.BusyError("Resident slots must be idle before handoff")
     from .queue import Queue, read_private
-    if (core.active_assignments(paths, _locked=locked)
+    if (core.active_assignments(paths, execution_route="bridge", _locked=locked)
             or any(row["state"] == "claimed" for row in Queue(paths).records(_locked=locked))):
         raise core.BusyError("Active requests must finish before handoff")
     if v.get("session") is None:
@@ -743,7 +748,7 @@ def _takeover_quiescent(paths, locked, owner):
             or os.path.lexists(paths.state_dir / "native-client")
             or os.path.lexists(paths.state_dir / "wake.sock")
             or _recovery_marker(paths, owner) is not None
-            or core.active_assignments(paths, _locked=locked)
+            or core.active_assignments(paths, execution_route="bridge", _locked=locked)
             or core.active_cooldown(paths, _locked=locked)
             or any(row["state"] == "claimed" for row in Queue(paths).records(_locked=locked))):
         return False
@@ -782,7 +787,7 @@ def _takeover_from_native(paths, packet):
         broker = Queue(paths)
         try:
             records = {row["request_id"]: row for row in broker.records(_locked=locked)}
-            active = {row["assignment_id"]: row for row in core.active_assignments(paths, _locked=locked)}
+            active = {row["assignment_id"]: row for row in core.active_assignments(paths, execution_route="bridge", _locked=locked)}
             for rid, receipt in active.items():
                 row = records.get(rid)
                 if (row is None or row.get("state") not in {"claimed", "published"}
@@ -1228,7 +1233,7 @@ def admit(paths, locked, v, c):
     broker.validate_submission(record["requestId"], prompt, record["clientSessionId"])
     if hashlib.sha256(prompt).hexdigest() != record["promptSha256"]:
         raise core.StateError("Prompt changed before admission")
-    if (v["inflight"] is not None or core.active_assignment(paths, _locked=locked)
+    if (v["inflight"] is not None or core.active_assignment(paths, execution_route="bridge", _locked=locked)
             or core.active_cooldown(paths, _locked=locked)
             or any(r["state"] == "claimed" or r["request_id"] == record["requestId"]
                    for r in broker.records(_locked=locked))
@@ -1437,7 +1442,7 @@ def _pool_admit(paths, locked, v, c):
     capacity = len(v["slots"])
     occupied = sum(1 for item in v["slots"] if item["request"] is not None)
     claimed = [r for r in broker.records(_locked=locked) if r["state"] == "claimed"]
-    active = core.active_assignments(paths, _locked=locked)
+    active = core.active_assignments(paths, execution_route="bridge", _locked=locked)
     # Same requestId already queued is a duplicate rendezvous, not native
     # submit-then-begin. Parked-client submit happens after ready-N.
     if (occupied >= capacity or len(claimed) >= capacity or len(active) >= capacity
@@ -1970,7 +1975,7 @@ def claim_serve_existing(paths, locked, v, c, *, replace_unused=False):
             raise core.BusyError("Serve-existing recovery receipt is not completed and fenced")
         recovered.append(slot["request"])
     if (v.get("inflight") is not None
-            or core.active_assignments(paths, _locked=locked)
+            or core.active_assignments(paths, execution_route="bridge", _locked=locked)
             or core.active_cooldown(paths, _locked=locked)
             or any(row["state"] == "claimed" and row["request_id"] not in recovered
                    for row in broker.records(_locked=locked))
@@ -2049,7 +2054,7 @@ def control(action, credentials, paths=None):
             raise core.ConfigurationError("Expected resident generation required")
         if action in {"start", "enroll"}:
             from .queue import Queue, read_private
-            active = core.active_assignment(paths, _locked=locked)
+            active = core.active_assignment(paths, execution_route="bridge", _locked=locked)
             broker = Queue(paths)
             queue = broker.records(_locked=locked)
             selected = None
@@ -2171,7 +2176,7 @@ def control(action, credentials, paths=None):
         if action == "begin":
             if v["inflight"] is not None:
                 raise core.BusyError("Resident invocation already reserved")
-            active = core.active_assignment(paths, _locked=locked)
+            active = core.active_assignment(paths, execution_route="bridge", _locked=locked)
             if active and active["assignment_id"] != c["request"]:
                 raise core.BusyError("Another request remains unresolved")
             v["inflight"] = f
