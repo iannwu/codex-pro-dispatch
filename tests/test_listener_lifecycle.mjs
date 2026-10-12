@@ -284,7 +284,8 @@ test('constant bootstrap runs one execution to live admission; a repeat start ob
 });
 
 // Conservative host: a yield without a pending call cannot deliver anything.
-// Wall-clock timings are scaled by 10; native startup itself runs unchanged.
+// Native startup runs unchanged. Short-call and qualification timers are scaled
+// by 10; the 60000 call stays pending until finalize is yielded.
 // The short-call case models a lost finalize: startup outlives the first call
 // and the model does not open another call while that finalize is buffered.
 for (const initialWait of [60000, 1000]) test('pending-call delivery with initial wait ' + initialWait, async t => {
@@ -320,12 +321,13 @@ for (const initialWait of [60000, 1000]) test('pending-call delivery with initia
     };
   }
   const code = (await bootstrap()).replace('"yield_time_ms":60000', '"yield_time_ms":' + initialWait);
-  wait(initialWait / 10);
+  if (initialWait === 60000) pending = true;
+  else wait(initialWait / 10);
   const running = new AF('tools', 'text', 'yield_control', code)(h.tools, value => {
     h.text(value); buffered.push(value);
   }, async () => {
     flushes++; assert.equal(h.inflight(), 0);
-    if (initialWait === 1000) assert.equal(pending, false, 'early-return host has no pending call for finalize');
+    assert.equal(pending, initialWait === 60000, 'pending call must match the delivery scenario');
     deliver();
   });
   const outcome = await Promise.race([h.until(v => v?.state === 'ready' && v.action === 'wait'),
