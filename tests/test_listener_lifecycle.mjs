@@ -285,6 +285,8 @@ test('constant bootstrap runs one execution to live admission; a repeat start ob
 
 // Conservative host: a yield without a pending call cannot deliver anything.
 // Wall-clock timings are scaled by 10; native startup itself runs unchanged.
+// The short-call case models a lost finalize: startup outlives the first call
+// and the model does not open another call while that finalize is buffered.
 for (const initialWait of [60000, 1000]) test('pending-call delivery with initial wait ' + initialWait, async t => {
   const f = await fixture(t), home = await installedHome(f);
   const h = host(f, P, 'turn-buffered', {stopHook: false,
@@ -294,11 +296,14 @@ for (const initialWait of [60000, 1000]) test('pending-call delivery with initia
     realTimeout(callback, delay === 120000 ? 12000 : delay, ...args));
   let pending = false, pendingTimer, modelTimer, completed = false, flushes = 0;
   const buffered = [], batches = [], hooks = [];
+  let returned;
+  const firstReturn = new Promise(resolve => { returned = resolve; });
   function deliver() {
     if (!pending) return;
     pending = false; clearTimeout(pendingTimer);
     const batch = buffered.splice(0); batches.push(batch);
-    if (completed) return;
+    returned();
+    if (completed || initialWait === 1000) return;
     modelTimer = realTimeout(() => {
       const last = batch.at(-1);
       if (last?.action === 'finalize') hooks.push(hook(P, 'turn-buffered'));
@@ -307,11 +312,22 @@ for (const initialWait of [60000, 1000]) test('pending-call delivery with initia
   }
   function wait(ms) { pending = true; pendingTimer = realTimeout(deliver, ms); }
   t.after(() => { completed = true; clearTimeout(pendingTimer); clearTimeout(modelTimer); });
+  if (initialWait === 1000) {
+    const nativeCall = h.tools.mcp__node_repl__js;
+    h.tools.mcp__node_repl__js = async input => {
+      if (input.code.includes('prepareResidentSupervision(')) await firstReturn;
+      return nativeCall(input);
+    };
+  }
   const code = (await bootstrap()).replace('"yield_time_ms":60000', '"yield_time_ms":' + initialWait);
   wait(initialWait / 10);
   const running = new AF('tools', 'text', 'yield_control', code)(h.tools, value => {
     h.text(value); buffered.push(value);
-  }, async () => { flushes++; assert.equal(h.inflight(), 0); deliver(); });
+  }, async () => {
+    flushes++; assert.equal(h.inflight(), 0);
+    if (initialWait === 1000) assert.equal(pending, false, 'early-return host has no pending call for finalize');
+    deliver();
+  });
   const outcome = await Promise.race([h.until(v => v?.state === 'ready' && v.action === 'wait'),
     running.then(() => h.events.at(-1))]);
   completed = true; clearTimeout(pendingTimer); clearTimeout(modelTimer);
@@ -325,7 +341,12 @@ for (const initialWait of [60000, 1000]) test('pending-call delivery with initia
     const stopped = await run(process.execPath, [activation, 'resident-stop', outcome.session_directory]);
     assert.equal(stopped.exit_code, 0, stopped.output);
   } else {
-    assert.equal(outcome.reason, 'qualification_timeout', 'old early return must reproduce the timeout');
+    assert.equal(outcome.reason, 'qualification_timeout', 'an undelivered finalize cannot qualify');
+    const finalize = h.events.find(value => value?.action === 'finalize');
+    assert(finalize, 'startup must emit finalize');
+    assert(buffered.includes(finalize), 'finalize remains buffered');
+    assert(!batches.some(batch => batch.includes(finalize)), 'no pending call delivered finalize');
+    assert(!h.events.some(value => value?.state === 'ready'));
     assert.equal(hooks.length, 0);
     assert.equal(JSON.parse(await fs.readFile(f.owner, 'utf8')).session, null);
   }
