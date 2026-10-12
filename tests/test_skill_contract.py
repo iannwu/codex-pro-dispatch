@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import sys
 import unittest
 from pathlib import Path
 
@@ -22,6 +24,32 @@ BUNDLED_HELPER = ROOT / "skills" / "codex-pro-dispatch" / "scripts" / "pro-dispa
 
 
 class SkillContractTests(unittest.TestCase):
+    def test_native_setup_commands_configure_the_independent_direct_route(self) -> None:
+        sys.path.insert(0, str(ROOT / "src"))
+        from codex_pro_dispatch.cli import build_parser
+
+        protocol = NATIVE_PROTOCOL.read_text(encoding="utf-8")
+        acceptance = (ROOT / "docs/acceptance.md").read_text(encoding="utf-8")
+        sections = {
+            "native setup": protocol.split("## Worker setup\n", 1)[1].split("## Submission sequence\n", 1)[0],
+            "acceptance setup": acceptance.split("## A. Setup\n", 1)[1].split("### A2.", 1)[0],
+        }
+        parser = build_parser()
+        for name, text in sections.items():
+            worker_commands = set()
+            for command in re.findall(r"`(pro-dispatch [^`\n]+)`", text):
+                with self.subTest(section=name, command=command):
+                    args = parser.parse_args(shlex.split(command)[1:])
+                    if args.command == "worker":
+                        self.assertIn(args.worker_command, {"direct-set", "direct-show"})
+                        worker_commands.add(args.worker_command)
+                        if args.worker_command == "direct-set":
+                            self.assertTrue(args.confirm_worker)
+                            self.assertTrue(args.native_controls_confirmed)
+                    elif args.command == "doctor":
+                        self.assertEqual(args.route, "direct")
+            self.assertEqual(worker_commands, {"direct-set", "direct-show"}, name)
+
     def test_skill_has_valid_minimal_frontmatter(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\n"))
@@ -141,6 +169,9 @@ class SkillContractTests(unittest.TestCase):
             "open the worker by its exact conversation ID",
             "`worker direct-reset` refuses unresolved work and preserves binding history.",
             "Purge is unsupported once the route registry exists.",
+            "Older helpers cannot interpret direct receipts alongside a pool",
+            "retain the current direct-capable version for collect-only recovery",
+            "never downgrade or delete evidence to unblock work.",
             "## Same-worker continuation",
             "--continuation-of '<completed-assignment-id>'",
             "Collect when the user returns to ChatGPT/Codex, unless the user explicitly permits interruption",

@@ -297,6 +297,9 @@ Purge is unsupported once the route registry exists. Legacy force flags never
 authorize deleting registered route history, unreadable safety receipts, or queue
 claims. Preserve evidence when a guard refuses; do not remove or rename records
 to make it pass. Absence of readable submission evidence never proves no send.
+Older helpers cannot interpret direct receipts alongside a pool; while direct
+work is unresolved, retain the current direct-capable version for collect-only
+recovery and never downgrade or delete evidence to unblock work.
 
 ## v1.2 bounded long-result overlay
 

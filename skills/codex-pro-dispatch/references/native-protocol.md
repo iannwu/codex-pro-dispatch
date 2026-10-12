@@ -24,12 +24,15 @@ Do not treat these assumptions as satisfied automatically. Complete the six-capa
 
 1. The user opens one dedicated Chat conversation.
 2. The user chooses the model and reasoning effort in that conversation.
-3. Resolve and save its stable conversation ID with `worker set --confirm-worker`.
-4. The stored marker (`user-confirmed-worker`, or `user-confirmed-pro` from a
-   legacy `--confirm-pro` setup) records the user's confirmation of the
-   conversation, not a machine-verified model.
+3. Resolve its stable conversation ID and, after this invocation's native preflight, run `pro-dispatch worker direct-set --conversation-id <exact-chat-id> --confirm-worker --native-controls-confirmed`.
+4. Verify the exact ID with `pro-dispatch worker direct-show`. The stored marker
+   `user-confirmed-worker` records the user's confirmation of the conversation,
+   not a machine-verified model.
 
 A worker title is a label only. Conversation identity comes from the stable ID.
+The direct worker must be distinct from all current and historical Claude bridge
+workers. Claude uses its listener pool; direct setup and dispatch do not require
+listener startup or Stop qualification.
 
 ## Submission sequence
 
