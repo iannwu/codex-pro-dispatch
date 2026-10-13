@@ -9,7 +9,7 @@ metadata:
 # Codex Pro Dispatch
 
 Use the official combined ChatGPT/Codex desktop app. The helper owns receipts; the native host supplies tools. Installation authorizes neither sends nor sessions.
-The user picks any available model and reasoning effort in the worker conversation; `worker set --confirm-worker` records that conversation, never a verified model.
+The default setup is 2×2: two native Codex chats, `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`, plus two separate Claude listener chats, `Pro Dispatch Claude 01` and `Pro Dispatch Claude 02`. The user chooses the four chats once and selects the model and reasoning effort in each. `worker direct-pool-set --confirm-worker` records exact Codex conversation IDs, never a verified model. Existing single-worker installations remain supported.
 
 Use the listener task only for listener operations. For ordinary coordination to an existing resident listener, call `send_message_to_thread` with only `threadId` and `prompt`; omit `model` and `thinking`. Override those settings only when the user explicitly requests changing that listener itself. A reviewer/builder model request or a ChatGPT worker model change does not authorize changing the listener.
 
@@ -21,19 +21,37 @@ copy; it never activates a listener, grants permissions, or authorizes a send.
 
 ### Native Codex owner
 
+For an ordinary Codex consultation, use the independent direct native workflow in
+[standalone-dispatch.md](references/standalone-dispatch.md). It uses the explicitly
+configured direct Chat IDs, distinct from all current and historical Claude bridge
+workers. Run the actual caller capability preflight, then `status --route direct`.
+A stopped or malformed bridge does not require listener recovery for direct work.
+Do not run listener startup or Stop qualification as direct preflight. A missing
+direct configuration requires `worker direct-pool-set`, never an inferred scalar worker or title. Read the authoritative ordered `workers` list, not scalar `worker`, which is null for a pair. Preparation selects the first available chat under the canonical state lock; use the returned receipt’s exact worker ID for every native operation. A busy pair returns `direct_pool_busy`; do not queue, retry silently, borrow a Claude chat, or start a listener. Explicit continuations retain the original chat and binding.
+Claude uses `claude-client` and the registered listener pool.
+
+Configure the Codex pair and Claude pair as independent operations and report each result. Failed bridge activation must not undo or block valid direct configuration. Use the supported listener start/replace procedure for the Claude pair; never edit owner or pool files. A shared 403 cooldown still blocks both routes. Status reports capacity before cooldown and exposes `availability` and `active_cooldown` independently.
+
+For "start listener", "restart listener", a replacement Listener task, or new bridge worker conversations,
+use [listener-start.md](references/listener-start.md) first. Its one constant
+`functions.exec` code runs the whole guarded startup; follow only each output's
+`action`. Let the runtime choose the transition; do not improvise stages, owner
+recovery, or pool edits. This procedure takes precedence over the older same-pool
+setup, takeover, and multi-stage activation recipes below.
+
 For standalone dispatch, recovery, or an explicitly authorized continuation, read [standalone-dispatch.md](references/standalone-dispatch.md) and [native-protocol.md](references/native-protocol.md)
 before acting. Repository work also requires [github-verification.md](references/github-verification.md).
 
 For an explicitly authorized finite parked session, read [native-request-broker.md](references/native-request-broker.md). Use only its reviewed native activation recipe when present and qualified for the current host.
 If it is absent, report that gate; do not improvise a launcher or use the standalone instructions as a parked activation fallback.
 
-For explicit resident setup or clean restart, also read the resident section in [native-activation.md](references/native-activation.md). Resolve the physical installed paths and complete the actual client's access preflight before opening.
+Only for diagnostics or compatibility with an older resident packet, read the resident section in [native-activation.md](references/native-activation.md); never use its multi-stage recipe to start, restart, or replace a listener. Resolve the physical installed paths and complete the actual client's access preflight before opening.
 Resident mode is opt-in; reopen recovery is collector-only; automatic startup is unsupported.
 Fresh resident activation and unused serve-existing require the installed synchronous Stop hook. Review and trust `.codex/hooks.json` for project use or `hooks/hooks.json` for plugin use in the actual host. Execute calls.qualify first. Wait until resident_supervision_probe_required is visible; only then attempt one final response while that qualification cell is pending. The hook must block it and return control to functions.wait on that exact cell. Only successful completion in the same native task and turn permits calls.open or calls.serve. A missing hook, failed probe, or changed native turn is a host limitation, not permission to serve. This one-time, no-dispatch probe is not a periodic heartbeat. Never run it over an active or armed serving invocation. Post-arm continuation additionally requires the retained qualification from this native runtime and keeps every existing exact eligibility check. Never manufacture qualification or recovery evidence.
 Before qualification, verify that the Listener task itself exposes the packet's declared `functions.exec` executor and `functions.wait` continuation. A coordinator having those tools does not qualify a delegated Listener turn. Missing tools mean `unsupported_listener_surface`: do not qualify, acquire a generation, open, or translate an outer packet body into direct `mcp__node_repl__js` calls. Save one packet privately and use `packet-call` with its raw SHA-256 when exact extraction is needed; pass its short opaque `arguments` unchanged to the declared executor. The bootstrap loads the exact pinned stage inside that executor, so the model does not transcribe its native body during activation.
 Explicit recover-start after physical-quiescence can fence a crash or reboot that left no graceful transport-audit, without treating absence as unsent. An explicit pool may use one or two conversations on one listener after live overlap qualification. Never replay consumed open/serve calls. Check `resident-status`, never race listeners.
 
-When the user asks a new task to replace the current resident listener owner, read [new-owner-handoff.md](references/new-owner-handoff.md). Use the installed `resident-takeover-packet` first: native identity plus one host-idle check fences
+For older same-pool recovery explicitly selected by the startup result, read [new-owner-handoff.md](references/new-owner-handoff.md). The installed `resident-takeover-packet` uses native identity plus one host-idle check to fence
 the old generation, cancels unarmed work, and preserves collect-only recovery. Relay is an optional fallback only for an active old task. Takeover is not readiness.
 
 ## Repository access through ChatGPT
@@ -80,7 +98,7 @@ Advertise only the qualified finite availability window. Admission expiry does n
 slices or create replacement request IDs.
 
 Resident service does not navigate or forward routine progress to development tasks. Keep the resident owner turn active: share setup in commentary once, then automatically `functions.wait` on the original serve cell after every yield until completion. Do not finalize a running resident turn, ask for periodic confirmation, or treat a yielded cell as a daemon.
-The lifecycle receipt is not readiness; client admission checks still apply. Report a host limitation if active-turn continuation is unavailable. Standalone policy: Restore the exact parent Codex task using official
+The lifecycle receipt is not readiness; client admission checks still apply. If the Stop hook says the listener was served by an earlier turn, follow "Recover after the serving turn ended" in [listener-start.md](references/listener-start.md). Report a host limitation if active-turn continuation is otherwise unavailable. Standalone policy: Restore the exact parent Codex task using official
 navigation; report it separately from answer validity and foreground verification. Do not use voice-only capture in a text task.
 
 On an error, preserve the request ID and collect-only state. Inspect native diagnostics; confirmed unusual-activity HTTP 403 requires the existing shared 30-minute cooldown. Do not reduce it to a generic transport retry.

@@ -1,5 +1,11 @@
 # Restore the listener from the replacement task
 
+For ordinary startup, replacement, or changed worker IDs, begin with
+[listener-start.md](listener-start.md). The older same-pool recipe below does
+not replace destination configuration or prove legacy execution quiescence.
+Schema-4 owner rotations also enforce the persistent send fence; host idle
+alone cannot bypass its completion-barrier requirement.
+
 Use the installed `parked-activation.mjs resident-takeover-packet` as the primary
 path. Resolve the physical installed runtime and read its native activation
 reference. The shell packet accepts no replacement identity. Execute

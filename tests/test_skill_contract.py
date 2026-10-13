@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import sys
 import unittest
 from pathlib import Path
 
@@ -22,6 +24,33 @@ BUNDLED_HELPER = ROOT / "skills" / "codex-pro-dispatch" / "scripts" / "pro-dispa
 
 
 class SkillContractTests(unittest.TestCase):
+    def test_native_setup_commands_configure_the_independent_direct_route(self) -> None:
+        sys.path.insert(0, str(ROOT / "src"))
+        from codex_pro_dispatch.cli import build_parser
+
+        protocol = NATIVE_PROTOCOL.read_text(encoding="utf-8")
+        acceptance = (ROOT / "docs/acceptance.md").read_text(encoding="utf-8")
+        sections = {
+            "native setup": protocol.split("## Worker setup\n", 1)[1].split("## Submission sequence\n", 1)[0],
+            "acceptance setup": acceptance.split("## A. Setup\n", 1)[1].split("### A2.", 1)[0],
+        }
+        parser = build_parser()
+        for name, text in sections.items():
+            worker_commands = set()
+            for command in re.findall(r"`(pro-dispatch [^`\n]+)`", text):
+                with self.subTest(section=name, command=command):
+                    args = parser.parse_args(shlex.split(command)[1:])
+                    if args.command == "worker":
+                        self.assertIn(args.worker_command, {"direct-pool-set", "direct-show"})
+                        worker_commands.add(args.worker_command)
+                        if args.worker_command == "direct-pool-set":
+                            self.assertTrue(args.confirm_worker)
+                            self.assertTrue(args.native_controls_confirmed)
+                            self.assertEqual(len(args.conversation_id), 2)
+                    elif args.command == "doctor":
+                        self.assertEqual(args.route, "direct")
+            self.assertEqual(worker_commands, {"direct-pool-set", "direct-show"}, name)
+
     def test_skill_has_valid_minimal_frontmatter(self) -> None:
         text = SKILL.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\n"))
@@ -139,7 +168,11 @@ class SkillContractTests(unittest.TestCase):
             "Wait using the worker conversation's native metadata or timestamp",
             "Do not repeatedly reopen the worker while it is generating",
             "open the worker by its exact conversation ID",
-            "`worker reset --force` and `purge --yes --force` are break-glass operations",
+            "`worker direct-reset` refuses unresolved work and preserves binding history.",
+            "Purge is unsupported once the route registry exists.",
+            "Older helpers cannot interpret direct receipts alongside a pool",
+            "retain the current direct-capable version for collect-only recovery",
+            "never downgrade or delete evidence to unblock work.",
             "## Same-worker continuation",
             "--continuation-of '<completed-assignment-id>'",
             "Collect when the user returns to ChatGPT/Codex, unless the user explicitly permits interruption",
@@ -186,6 +219,26 @@ class SkillContractTests(unittest.TestCase):
             "OpenAI request ID when one is available",
         ]:
             self.assertIn(phrase, text)
+
+    def test_first_hook_approval_names_the_cli_route(self) -> None:
+        # Verified 2026-09-27: bundled codex-cli 0.158.0-alpha.2 ships the /hooks
+        # browser and the startup "Hooks need review" prompt; the official hooks
+        # page names /hooks in the CLI. A desktop /hooks menu is not verified.
+        readme = README.read_text(encoding="utf-8")
+        for phrase in [
+            "### Approve the hook once in the Codex CLI",
+            "https://learn.chatgpt.com/docs/hooks",
+            "`/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`",
+            "**Hooks need review**, choose **Review hooks**",
+            "Trust only the resident Stop hook",
+            "run `pro-dispatch listener check`",
+            "Nothing in this\nproject writes that approval for you.",
+        ]:
+            self.assertIn(phrase, readme)
+        self.assertNotIn("review and trust the hook with `/hooks`", readme)
+        start = (SKILL.parent / "references" / "listener-start.md").read_text(encoding="utf-8")
+        self.assertIn("in the Codex CLI's `/hooks`", start)
+        self.assertIn("Do not promise a desktop `/hooks` menu", start)
 
     def test_openai_yaml_mentions_explicit_skill_name(self) -> None:
         text = OPENAI_YAML.read_text(encoding="utf-8")

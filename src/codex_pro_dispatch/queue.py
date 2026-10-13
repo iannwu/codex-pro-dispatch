@@ -197,7 +197,7 @@ class Queue:
                 raise core.StateError("Multiple queue claims share one worker slot")
             used_slots[slot_id] = record["request_id"]
             used_workers[worker_id] = record["request_id"]
-        active = core.active_assignments(self.paths, _locked=_locked)
+        active = core.active_assignments(self.paths, execution_route="bridge", _locked=_locked)
         active_ids = {record["assignment_id"] for record in active}
         for assignment in active:
             worker_id = assignment.get("worker_conversation_id")
@@ -307,7 +307,7 @@ class Queue:
                 pass
             else:
                 raise core.StateError("Queued resume requires no dispatch receipt")
-            active = core.active_assignments(self.paths, _locked=locked)
+            active = core.active_assignments(self.paths, execution_route="bridge", _locked=locked)
             pool = core.load_worker_pool(self.paths, _locked=locked) \
                 if core.worker_pool_active(self.paths, _locked=locked) else None
             if pool is None and active:
@@ -433,7 +433,7 @@ class Queue:
             if caller is not None and (caller.get("collector_only") is True or caller.get("takeover_settlement") is True):
                 raise core.StateError("Collector-only recovery cannot claim or send")
             owner = resident.read(self.paths, locked)
-            if owner is not None and owner.get("version") == 3:
+            if owner is not None and owner.get("version") in (3, 4):
                 if caller is None or not resident.matches(owner, caller):
                     raise core.StateError("Pool claim requires the current serving resident invocation")
             elif owner is not None:
@@ -474,7 +474,7 @@ class Queue:
                 return self.receipt(record, _locked=locked)
 
             target = self.load(request_id, _locked=locked) if request_id is not None else None
-            if owner is not None and owner.get("version") == 3:
+            if owner is not None and owner.get("version") in (3, 4):
                 selected_id = target["request_id"] if target is not None else None
                 for item in owner["slots"]:
                     if not item.get("request") or item["request"] == selected_id:
@@ -540,7 +540,7 @@ class Queue:
             if selected["state"] != "queued":
                 raise core.StateError("Requested item is not claimable")
             reserved = None
-            if owner is not None and owner.get("version") == 3 and caller is not None:
+            if owner is not None and owner.get("version") in (3, 4) and caller is not None:
                 reserved = next(
                     (item for item in owner["slots"]
                      if item.get("request") == selected["request_id"]
@@ -695,7 +695,7 @@ class Queue:
                 r = target if target is not None else queued[0]
                 if os.path.lexists(core.assignment_path(r["request_id"], self.paths)):
                     raise core.StateError("Refusing preexisting dispatch assignment")
-                active = core.active_assignment(self.paths, _locked=locked)
+                active = core.active_assignment(self.paths, execution_route="bridge", _locked=locked)
                 if active:
                     raise core.BusyError("Another dispatch is unresolved",
                                          details={"assignment_id": active.get("assignment_id"),

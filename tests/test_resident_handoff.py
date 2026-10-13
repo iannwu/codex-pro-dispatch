@@ -72,6 +72,12 @@ class HandoffTests(unittest.TestCase):
         return {str(p): p.read_bytes() for root in (self.paths.config_dir, self.paths.state_dir)
                 for p in root.rglob("*") if p.is_file() and p.name != "state.lock"}
 
+    def assert_registry_append(self, before, after):
+        key = str(self.paths.config_dir / "dispatch-routes.json")
+        old, new = json.loads(before.pop(key)), json.loads(after.pop(key))
+        self.assertEqual(new.pop("listener_tasks"), sorted(set(old.pop("listener_tasks")) | {self.target}))
+        self.assertEqual(old, new)
+
     def test_handoff_preserves_evidence_and_fences_old_parent(self):
         owner, credentials, directory = self.closed()
         Queue(self.paths).submit("queued", b"preserve me", "client")
@@ -80,6 +86,7 @@ class HandoffTests(unittest.TestCase):
         after = self.snapshot()
         owner_path = str(self.paths.state_dir / "resident-owner.json")
         self.assertNotEqual(before.pop(owner_path), after.pop(owner_path))
+        self.assert_registry_append(before, after)
         self.assertEqual(before, after)
         new = result["owner"]
         self.assertEqual(new["parent"], self.target)
@@ -213,6 +220,7 @@ class HandoffTests(unittest.TestCase):
         after = self.snapshot()
         before.pop(str(self.paths.state_dir / "resident-owner.json"))
         after.pop(str(self.paths.state_dir / "resident-owner.json"))
+        self.assert_registry_append(before, after)
         self.assertEqual(before, after)
         self.assertEqual(cooldown, core.active_cooldown(self.paths))
         started = resident.control("start", new, self.paths)["owner"]

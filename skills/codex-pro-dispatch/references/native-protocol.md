@@ -22,27 +22,32 @@ Do not treat these assumptions as satisfied automatically. Complete the six-capa
 
 ## Worker setup
 
-1. The user opens one dedicated Chat conversation.
-2. The user chooses the model and reasoning effort in that conversation.
-3. Resolve and save its stable conversation ID with `worker set --confirm-worker`.
-4. The stored marker (`user-confirmed-worker`, or `user-confirmed-pro` from a
-   legacy `--confirm-pro` setup) records the user's confirmation of the
-   conversation, not a machine-verified model.
+1. The user selects two dedicated Codex Chat conversations, normally `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`, and two separate Claude chats, `Pro Dispatch Claude 01` and `Pro Dispatch Claude 02`.
+2. The user chooses the model and reasoning effort in each conversation.
+3. Resolve the two Codex IDs in preference order and, after this invocation’s native preflight, run `pro-dispatch worker direct-pool-set --conversation-id <chat-01-id> --conversation-id <chat-02-id> --confirm-worker --native-controls-confirmed`.
+4. Verify the exact ordered `workers` list with `pro-dispatch worker direct-show`. For a pair, scalar `worker` is null and `worker_count` is two. The stored marker
+   `user-confirmed-worker` records the user's confirmation of the conversation,
+   not a machine-verified model.
 
 A worker title is a label only. Conversation identity comes from the stable ID.
+Each direct worker must be distinct from all current and historical Claude bridge
+workers. Claude uses its listener pool; direct setup and dispatch do not require
+listener startup or Stop qualification.
+
+Configure the Claude pair separately through [listener-start.md](listener-start.md), using both `--worker-1` and `--worker-2`. Report each route’s result separately; failed listener activation does not invalidate a Codex pair. Existing singleton setups use `worker direct-set` and remain supported. Replacing a direct pair requires repeated `--expected-conversation-id` values matching the entire current ordered list and no unresolved direct work. Identical configuration with matching expectations is read-only, including while jobs are active. Reset retains binding history.
 
 ## Submission sequence
 
 1. Capture the parent Codex task ID before leaving it.
 2. Prepare the assignment with `pro-dispatch prepare`.
-3. Resolve the configured worker by ID.
+3. Resolve the worker ID returned by this assignment’s prepared receipt. Prefer the first configured available chat; never select independently outside preparation.
 4. Immediately before sending, run `pro-dispatch arm '<assignment-id>'`. Do not send unless it succeeds.
 5. Make at most one native send attempt for `wrapped_prompt`. After `arm`, the assignment is permanently collect-only if the app crashes or the send outcome is uncertain. An interruption before transport can therefore result in zero sends; this is deliberate fail-closed behavior.
 6. After confirmation, select the native user message whose first line contains the exact current assignment marker, then save its bytes as UTF-8 without reconstructing or editing them. An older completed turn returned while the new turn is active is not the current read-back. Wait for the matching message or use collect-only recovery.
 7. Run `pro-dispatch submitted '<assignment-id>' --sent-prompt-file '<native-read-back-file>'` so the helper compares the read-back bytes with the prepared `wrapped_prompt` hash.
 8. If the hash differs, keep the helper's `indeterminate` collect-only state and never resend. If confirmation itself is indeterminate, record `indeterminate` and switch to collection-only recovery.
 
-The helper intentionally blocks a second unresolved assignment.
+Each unresolved receipt reserves its exact chat, including prepared, armed and uncertain work. Two direct jobs may coexist on different chats. When direct capacity is exhausted, `direct_pool_busy` lists the existing assignments; it does not queue or send. An explicit continuation uses its original retained binding, even after reconfiguration, and returns `direct_worker_busy` if that exact chat is occupied. It also consumes the global two-job direct limit. Restart never releases a receipt or grants another send.
 
 ## Waiting
 
@@ -57,7 +62,7 @@ If the native send reports `systemError`, first inspect any error payload expose
 ## Collection
 
 1. Open the worker by exact conversation ID.
-2. Wait until the loaded conversation ID equals the configured worker ID.
+2. Wait until the loaded conversation ID equals this receipt’s worker ID, including a retired binding.
 3. If outbound verification is incomplete, locate the existing user message by assignment marker and run `pro-dispatch submitted --sent-prompt-file` on its exact native read-back. This is verification, not a new send. If the first temporary file added exactly one trailing newline and the receipt reports `readback_correction_allowed: true`, re-extract the same native message without that artifact and verify it once more. Never normalize or retry other mismatches.
 4. Save the complete unedited inner native history JSON at `maxOutputCharsPerItem: 20000`, and use `complete --native-read-file`. Require `thread.status.type == "idle"`; preserve omitted truncation as unknown.
 5. Validate the current bounded envelope: the result marker begins at byte zero, the exact end marker is the final byte sequence, and explicit truncation is rejected. Apply the v1.2 control and chunk rules below.

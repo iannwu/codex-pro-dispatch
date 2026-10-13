@@ -217,6 +217,33 @@ class ReleasePackagingTests(unittest.TestCase):
         self.assertEqual(self.records(), before)
         self.assertEqual(self.cli("queue", "collect", "package-A")["state"], "cancelled")
 
+    def test_installed_pair_configures_and_reserves_two_native_destinations(self):
+        self.script(self.checkout, "install.sh")
+        configured = self.cli("worker", "direct-pool-set", "--conversation-id", "package-codex-01",
+                              "--conversation-id", "package-codex-02", "--confirm-worker", "--native-controls-confirmed")
+        self.assertEqual(configured["worker_count"], 2)
+        self.assertIsNone(configured["worker"])
+        self.assertEqual([w["label"] for w in configured["workers"]],
+                         ["Pro Dispatch - Codex 01", "Pro Dispatch - Codex 02"])
+        workers = []
+        for rid in ("package-direct-01", "package-direct-02"):
+            prepared = self.cli("prepare", "--parent-task-id", "package-parent", "--assignment-id", rid,
+                                "--native-controls-confirmed", body="Packaging question")
+            workers.append(prepared["worker_conversation_id"])
+            self.cli("arm", rid)
+        self.assertEqual(workers, ["package-codex-01", "package-codex-02"])
+        status = self.cli("status", "--route", "direct")
+        self.assertEqual(status["availability"], "busy")
+        self.assertEqual(status["remaining_capacity"], 0)
+        self.assertEqual(len(status["active_assignments"]), 2)
+        self.assertIsNone(status["active_assignment"])
+        result = self.process([sys.executable, self.bin_link, "prepare", "--parent-task-id", "package-parent",
+                               "--assignment-id", "package-third", "--native-controls-confirmed"], "Question")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("direct_pool_busy", json.loads(result.stderr)["error"])
+        before = self.records()
+        self.script(self.checkout, "uninstall.sh")
+        self.assertEqual(self.records(), before)
 
 if __name__ == "__main__":
     unittest.main()

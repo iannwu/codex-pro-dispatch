@@ -24,10 +24,11 @@ class CurrentStatusTests(unittest.TestCase):
         core.save_worker("unit-pro", confirm_pro=True, paths=self.paths)
         with core.state_lock(self.paths) as locked:
             for i in range(64):
-                core._save_assignment("history-" + str(i), {
+                core.atomic_write_json(core.assignment_path("history-" + str(i), self.paths), {
+                    "schema_version": core.SCHEMA_VERSION, "assignment_id": "history-" + str(i),
                     "status": "complete", "created_at": "2026-01-01T00:00:00Z",
                     "fixture_padding": "x" * 4096,
-                }, self.paths, _locked=locked)
+                }, _locked=locked)
 
     def call(self, *args, code=0):
         result = subprocess.run(
@@ -67,7 +68,7 @@ class CurrentStatusTests(unittest.TestCase):
             value = core.load_assignment("history-0", self.paths, _locked=locked)
             value["cooldown_until"] = (dt.datetime.now(dt.timezone.utc)
                 + dt.timedelta(minutes=30)).isoformat()
-            core._save_assignment("history-0", value, self.paths, _locked=locked)
+            core.atomic_write_json(core.assignment_path("history-0", self.paths), value, _locked=locked)
         before = self.records()
         output, current = self.call("status", "--current")
         self.assertLessEqual(len(output.stdout.encode()), 8192)
@@ -111,7 +112,8 @@ class CurrentStatusTests(unittest.TestCase):
                 value = core.load_assignment(rid, self.paths, _locked=locked)
                 value["status"] = "armed"
                 value["no_resend"] = True
-                core._save_assignment(rid, value, self.paths, _locked=locked)
+                value.update(worker_conversation_id="unit-pro", parent_task_id="unit-parent")
+                core.atomic_write_json(core.assignment_path(rid, self.paths), value, _locked=locked)
         before = self.records()
         output, value = self.call("status", "--current", code=4)
         self.assertEqual(value["details"], {"cause": "StateError"})

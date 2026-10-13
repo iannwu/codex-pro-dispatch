@@ -2,6 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from codex_pro_dispatch import core as c
+from codex_pro_dispatch.queue import Queue
 
 class CorePortTests(unittest.TestCase):
     def setUp(self):
@@ -12,8 +13,16 @@ class CorePortTests(unittest.TestCase):
         c.save_worker("unit-pro", confirm_pro=True, paths=self.p)
 
     def test_shared_token(self):
+        queue = Queue(self.p)
+        queue.submit("request", b"unit", "client")
         with c.state_lock(self.p) as token:
-            a = c.prepare_assignment("unit", parent_task_id="parent", paths=self.p,
+            row = queue.load("request", _locked=token)
+            row.update(state="claimed", parent_task_id="parent", worker_conversation_id="unit-pro",
+                       queue_claim_token="claim", result_protocol=c.BOUNDED_RESULT_PROTOCOL,
+                       prompt_sha256=c.sha256_text("unit"),
+                       wrapped_prompt_sha256=c.sha256_text(c.wrap_prompt("unit", "request")))
+            queue.save(row, _locked=token)
+            a = c.prepare_assignment("unit", assignment_id="request", parent_task_id="parent", paths=self.p,
                                      queue_claim_token="claim", _locked=token)
             c.arm_assignment(a.assignment_id, self.p, _locked=token)
             with self.assertRaises(c.StateError):

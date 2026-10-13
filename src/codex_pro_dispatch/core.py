@@ -131,6 +131,7 @@ class WorkerPool:
     workers: tuple[WorkerPoolEntry, ...]
     legacy_worker_sha256: str | None
     file_sha256: str
+    authority_path: str | None = None
 
 
 # Both markers record that the user confirmed the intended worker conversation.
@@ -252,7 +253,7 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def validate_identifier(value: str, *, field: str) -> str:
-    if not IDENTIFIER_PATTERN.fullmatch(value):
+    if not isinstance(value, str) or not IDENTIFIER_PATTERN.fullmatch(value):
         raise ConfigurationError(
             f"{field} must use only letters, digits, dot, underscore, colon, and hyphen",
             details={field: value},
@@ -669,7 +670,7 @@ def _snapshot(function):
 def reservation_guard(runtime, token, assignment_id=None, parent=None, claim=None, operation=None):
     token.validate(runtime)
     if assignment_id is not None:
-        from .resident import guard
+        from .routes import guard
         guard(runtime, token, assignment_id, operation=operation)
     if os.path.lexists(runtime.state_dir / "native-client"):
         raise StateError("Unsupported native-client storage; preserve it")
@@ -707,10 +708,10 @@ def save_worker(
     confirmation = "user-confirmed-worker" if confirm_worker else "user-confirmed-pro"
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
-        legacy_worker_mutation_guard(runtime)
+        legacy_worker_mutation_guard(runtime, _locked=locked)
         from .resident import guard
         guard(runtime, locked, configuration=True)
-        current = active_assignment(runtime, _locked=locked)
+        current = active_assignment(runtime, execution_route="bridge", _locked=locked)
         if current:
             raise BusyError(
                 "Cannot replace the worker while an assignment is unresolved",
@@ -749,6 +750,11 @@ def save_worker(
             model_confirmation=confirmation,
             configured_at=utc_now(),
         )
+        from . import routes
+        if routes.read(runtime, locked) is not None:
+            registry = routes.register_bridge(runtime, locked, [conversation_id])
+            registry["legacy_standalone_workers"] = sorted(set(registry["legacy_standalone_workers"]) | {conversation_id})
+            atomic_write_json(routes.path(runtime), routes.validate(registry), _locked=locked)
         atomic_write_json(
             runtime.worker_file,
             {
@@ -867,7 +873,7 @@ def _pool_from_value(value: Mapping[str, Any], *, file_sha256: str) -> WorkerPoo
     )
 
 
-def _load_worker_pool_unlocked(runtime: RuntimePaths, *, _locked) -> WorkerPool:
+def _load_legacy_pool(runtime: RuntimePaths, *, _locked) -> WorkerPool:
     _locked.validate(runtime)
     raw = _authority_file_bytes(runtime.worker_pool_file)
     try:
@@ -886,23 +892,68 @@ def _load_worker_pool_unlocked(runtime: RuntimePaths, *, _locked) -> WorkerPool:
     return pool
 
 
+def authority_snapshot(paths: RuntimePaths, *, _locked):
+    """Decode one authority snapshot without recursive loaders or nested locks."""
+    _locked.validate(paths)
+    owner_path = paths.state_dir / "resident-owner.json"
+    owner = read_json(owner_path) if os.path.lexists(owner_path) else None
+    if owner is not None and (type(owner.get("version")) is not int
+                              or owner["version"] not in (1, 2, 3, 4)):
+        raise StateError("Unsupported resident owner; preserve evidence")
+    if owner is not None and owner["version"] == 4:
+        raw = owner.get("worker_pool_json")
+        if not isinstance(raw, str):
+            raise StateError("Missing embedded worker pool")
+        try:
+            payload = decode(raw.encode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("pool object required")
+            pool = _pool_from_value(payload, file_sha256=sha256_text(raw))
+        except (ValueError, UnicodeError, TypeError) as exc:
+            raise StateError("Invalid embedded worker pool") from exc
+        if pool.legacy_worker_sha256 != _sha256_authority_file(paths.worker_file):
+            raise StateError("Legacy worker migration witness changed")
+        qualification = owner.get("qualification")
+        if not isinstance(qualification, dict) or "pool_witness_sha256" not in qualification:
+            raise StateError("Missing listener migration witness")
+        witness = qualification["pool_witness_sha256"]
+        if witness != _sha256_authority_file(paths.worker_pool_file):
+            raise StateError("Legacy pool migration witness changed")
+    else:
+        pool = (_load_legacy_pool(paths, _locked=_locked)
+                if os.path.lexists(paths.worker_pool_file) else None)
+    if owner is not None and owner["version"] in (3, 4):
+        if pool is None:
+            raise StateError("Resident owner has no worker pool")
+        from .resident import validate_pool_owner
+        validate_pool_owner(owner, pool)
+    if pool is not None:
+        pool = WorkerPool(pool.workers, pool.legacy_worker_sha256, pool.file_sha256,
+                          str(owner_path if owner and owner["version"] == 4 else paths.worker_pool_file))
+    return owner, pool
+
+
+def _load_worker_pool_unlocked(runtime: RuntimePaths, *, _locked):
+    pool = authority_snapshot(runtime, _locked=_locked)[1]
+    if pool is None:
+        raise ConfigurationError(f"Missing worker pool: {runtime.worker_pool_file}")
+    return pool
+
+
 @_snapshot
 def load_worker_pool(paths: RuntimePaths | None = None, *, _locked=None) -> WorkerPool:
-    runtime = paths or default_paths()
-    if not os.path.lexists(runtime.worker_pool_file):
-        raise ConfigurationError(f"Missing worker pool: {runtime.worker_pool_file}")
-    return _load_worker_pool_unlocked(runtime, _locked=_locked)
+    return _load_worker_pool_unlocked(paths or default_paths(), _locked=_locked)
 
 
+@_snapshot
 def worker_pool_active(paths: RuntimePaths | None = None, *, _locked=None) -> bool:
-    runtime = paths or default_paths()
-    return os.path.lexists(runtime.worker_pool_file)
+    return authority_snapshot(paths or default_paths(), _locked=_locked)[1] is not None
 
 
 @_snapshot
 def configured_workers(paths: RuntimePaths | None = None, *, _locked=None) -> tuple[WorkerPoolEntry, ...]:
     runtime = paths or default_paths()
-    if os.path.lexists(runtime.worker_pool_file):
+    if worker_pool_active(runtime, _locked=_locked):
         return _load_worker_pool_unlocked(runtime, _locked=_locked).workers
     worker = load_worker(runtime, _locked=_locked)
     return (WorkerPoolEntry(
@@ -916,6 +967,7 @@ def configured_workers(paths: RuntimePaths | None = None, *, _locked=None) -> tu
 
 def worker_pool_payload(pool: WorkerPool) -> dict[str, Any]:
     return {
+        "authority_path": pool.authority_path,
         "schema_version": 1,
         "legacy_worker_sha256": pool.legacy_worker_sha256,
         "file_sha256": pool.file_sha256,
@@ -957,7 +1009,7 @@ def worker_pool_runtime_status(
         if worker not in configured or slot != configured[worker]:
             raise StateError("Pool status found an unbound queue claim")
         occupied.add(slot)
-    for record in active_assignments(runtime, _locked=_locked):
+    for record in active_assignments(runtime, execution_route="bridge", _locked=_locked):
         worker = record.get("worker_conversation_id")
         slot = record.get("worker_slot") or configured.get(worker)
         if worker not in configured or slot != configured[worker]:
@@ -967,7 +1019,7 @@ def worker_pool_runtime_status(
     owner = resident.read(runtime, _locked)
     if owner is None:
         readiness = "enrollment_required"
-    elif owner.get("version") != 3:
+    elif owner.get("version") not in (3, 4):
         readiness = "legacy_owner_requires_explicit_migration"
     elif any(item["phase"] == "cancel_pending" for item in owner["slots"]):
         readiness = "takeover_settlement_required"
@@ -991,10 +1043,10 @@ def worker_pool_runtime_status(
     }
 
 
-def legacy_worker_mutation_guard(runtime: RuntimePaths) -> None:
-    if os.path.lexists(runtime.worker_pool_file):
+def legacy_worker_mutation_guard(runtime: RuntimePaths, *, _locked) -> None:
+    if worker_pool_active(runtime, _locked=_locked):
         raise StateError(
-            "Worker pool is active; legacy scalar-worker mutation is fenced"
+            "Worker pool is active; use listener start for destination changes"
         )
 
 
@@ -1038,8 +1090,8 @@ def activate_worker_pool(
     from .native_storage import read_evidence
     with state_lock(runtime, token=_locked, create=False) as locked:
         reservation_guard(runtime, locked)
-        if os.path.lexists(runtime.worker_pool_file):
-            raise BusyError("Worker pool is already active; no rewrite is allowed")
+        if worker_pool_active(runtime, _locked=locked):
+            raise BusyError("Worker pool is already active; use listener start for destination changes")
         actual_legacy = _sha256_authority_file(runtime.worker_file)
         if actual_legacy != expected_legacy_sha256:
             raise StateError("Expected legacy worker hash differs; activation writes nothing")
@@ -1080,7 +1132,10 @@ def activate_worker_pool(
             worker = record.get("worker_conversation_id")
             if worker and worker not in retained:
                 raise StateError("Unresolved queue worker is not retained by pool")
+        from . import routes
         for assignment in list_assignments(runtime, _locked=locked):
+            if routes.route(assignment, runtime, locked) == "direct":
+                continue
             if assignment.get("status") in ACTIVE_STATUSES and (
                 assignment.get("worker_conversation_id") not in retained
             ):
@@ -1088,7 +1143,7 @@ def activate_worker_pool(
         owner_path = runtime.state_dir / "resident-owner.json"
         if os.path.lexists(owner_path):
             owner = read_json(owner_path)
-            if owner.get("version") == 3:
+            if owner.get("version") in (3, 4):
                 raise StateError("Schema-3 resident owner requires the worker pool")
             if owner.get("version") in {1, 2} and (
                 owner.get("inflight") is not None
@@ -1107,6 +1162,8 @@ def activate_worker_pool(
             "workers": [worker_entry_payload(entry) for entry in entries],
             "legacy_worker_sha256": actual_legacy,
         }
+        from . import routes
+        routes.register_bridge(runtime, locked, [entry.conversation_id for entry in entries])
         atomic_write_json(runtime.worker_pool_file, payload, _locked=locked)
         raw = _authority_file_bytes(runtime.worker_pool_file)
         return _pool_from_value(payload, file_sha256=hashlib.sha256(raw).hexdigest())
@@ -1144,8 +1201,14 @@ def _save_assignment(
     operation=None,
 ) -> Path:
     _locked.validate(paths or default_paths())
-    from .resident import guard
-    guard(paths or default_paths(), _locked, assignment_id, operation=operation)
+    from .routes import guard, IMMUTABLE
+    runtime = paths or default_paths()
+    path = assignment_path(assignment_id, runtime)
+    if os.path.lexists(path):
+        original = load_assignment(assignment_id, runtime, _locked=_locked)
+        if any(original.get(key) != value.get(key) for key in IMMUTABLE):
+            raise StateError("Immutable receipt route or identity changed")
+    guard(runtime, _locked, assignment_id, value=value, operation=operation)
     from .resident import invocation
     caller = invocation.get()
     expected_parent = (caller.get("request_parent", caller.get("parent")) if isinstance(caller, dict)
@@ -1214,7 +1277,7 @@ def redact_stored_diagnostics(paths: RuntimePaths | None = None,
                 )
             redacted, changed = _redact_diagnostic_fields(value)
             if changed:
-                from .resident import guard
+                from .routes import guard
                 guard(runtime, locked, assignment_id)
                 atomic_write_json(path, redacted, _locked=locked)
                 redacted_count += 1
@@ -1223,49 +1286,56 @@ def redact_stored_diagnostics(paths: RuntimePaths | None = None,
 
 @_snapshot
 def active_assignments(paths: RuntimePaths | None = None,
-    *,
-    _locked=None,
+    *, execution_route=None, _locked=None,
 ) -> list[dict[str, Any]]:
     runtime = paths or default_paths()
-    active = [
-        value for value in list_assignments(runtime, _locked=_locked)
-        if value.get("status") in ACTIVE_STATUSES
-    ]
-    if os.path.lexists(runtime.worker_pool_file):
-        pool = _load_worker_pool_unlocked(runtime, _locked=_locked)
-        configured = {worker.conversation_id: worker.slot for worker in pool.workers}
-        seen_workers: set[str] = set()
-        seen_slots: set[str] = set()
-        for index, original in enumerate(active):
-            value = dict(original)
-            worker = value.get("worker_conversation_id")
-            slot = value.get("worker_slot") or configured.get(worker)
-            if worker not in configured or not isinstance(slot, str) or configured[worker] != slot:
-                raise StateError(
-                    "Active pool receipt is not bound to a configured worker slot",
-                    details={"assignment_id": value.get("assignment_id")},
-                )
-            if worker in seen_workers or slot in seen_slots:
-                raise StateError("Multiple active assignments share one worker slot")
-            seen_workers.add(worker)
-            seen_slots.add(slot)
-            active[index] = value
-        if len(active) > len(pool.workers):
-            raise StateError("Active assignment count exceeds worker pool capacity")
-    elif len(active) > 1:
-        raise StateError(
-            "Multiple active assignments exist",
-            details={"assignment_ids": [value.get("assignment_id") for value in active]},
-        )
-    return active
+    from . import routes
+    registry = routes.read(runtime, _locked)
+    values = list_assignments(runtime, _locked=_locked)
+    classified = [(value, routes.route(value, runtime, _locked, registry=registry)) for value in values]
+    active = [(value, route) for value, route in classified if value["status"] in ACTIVE_STATUSES]
+    direct = [value for value, route in active if route == "direct"]
+    bridge = [value for value, route in active if route != "direct"]
+    if len(direct) > 2:
+        raise StateError("Direct assignment count exceeds two-worker capacity")
+    if len({value["worker_conversation_id"] for value in direct}) != len(direct):
+        raise StateError("Multiple unresolved direct assignments share one conversation")
+    # Direct operation validates canonical receipts without consulting lifecycle.
+    # Exact bridge slot authority is still required for every bridge operation.
+    if execution_route != "direct":
+        if worker_pool_active(runtime, _locked=_locked):
+            pool = _load_worker_pool_unlocked(runtime, _locked=_locked)
+            configured = {worker.conversation_id: worker.slot for worker in pool.workers}
+            seen_workers, seen_slots = set(), set()
+            for value in bridge:
+                worker = value.get("worker_conversation_id")
+                slot = value.get("worker_slot") or configured.get(worker)
+                if worker not in configured or configured[worker] != slot:
+                    raise StateError("Active pool receipt is not bound to a configured worker slot",
+                                     details={"assignment_id": value.get("assignment_id")})
+                if worker in seen_workers or slot in seen_slots:
+                    raise StateError("Multiple active assignments share one worker slot")
+                seen_workers.add(worker); seen_slots.add(slot)
+            if len(bridge) > len(pool.workers):
+                raise StateError("Active assignment count exceeds worker pool capacity")
+        elif len(bridge) > 1:
+            raise StateError("Multiple active assignments exist",
+                             details={"assignment_ids": [v["assignment_id"] for v in bridge]})
+    else:
+        # Registry membership and receipt provenance remain shared safety data.
+        workers = [v["worker_conversation_id"] for v in bridge]
+        slots = [v["worker_slot"] for v in bridge if "worker_slot" in v]
+        if len(workers) != len(set(workers)) or len(slots) != len(set(slots)) or len(bridge) > 2:
+            raise StateError("Invalid bridge receipt occupancy")
+    return direct if execution_route == "direct" else bridge if execution_route == "bridge" else [v for v, _ in active]
 
 
 @_snapshot
 def active_assignment(paths: RuntimePaths | None = None,
-    *,
+    *, execution_route=None,
     _locked=None,
 ) -> dict[str, Any] | None:
-    active = active_assignments(paths, _locked=_locked)
+    active = active_assignments(paths, execution_route=execution_route, _locked=_locked)
     if len(active) > 1:
         raise StateError(
             "Multiple active assignments exist",
@@ -1288,9 +1358,9 @@ def active_cooldown(
     current = current.astimezone(dt.timezone.utc)
     active: list[tuple[dt.datetime, dict[str, Any]]] = []
     for value in list_assignments(paths, _locked=_locked):
-        cooldown_until = value.get("cooldown_until")
-        if not cooldown_until:
+        if "cooldown_until" not in value:
             continue
+        cooldown_until = value["cooldown_until"]
         try:
             parsed_until = _parse_utc(
                 str(cooldown_until), field="cooldown_until"
@@ -1370,11 +1440,46 @@ def prepare_assignment(
 
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
-        from .resident import guard
-        guard(runtime, locked, resolved_id)
-        from . import resident
+        from . import resident, routes
         caller = resident.invocation.get()
-        if os.path.lexists(runtime.worker_pool_file):
+        registry = routes.read(runtime, locked)
+        direct_workers = registry["direct_workers"] if registry else []
+        direct = None
+        ordinary = caller is None and queue_claim_token is None
+        # Validate shared receipt integrity before configuration, cooldown or
+        # occupancy diagnoses, without reading the bridge lifecycle.
+        direct_active = active_assignments(runtime, execution_route="direct", _locked=locked) if ordinary else []
+        direct_cooldown = active_cooldown(runtime, _locked=locked) if ordinary else None
+        if continuation_of:
+            prior = load_assignment(continuation_of, runtime, _locked=locked)
+            if routes.route(prior, runtime, locked) == "direct":
+                if caller is not None or queue_claim_token is not None:
+                    raise StateError("Resident invocation cannot continue direct work")
+                direct = next(b for b in registry["direct_bindings"] if b["binding_id"] == prior["direct_binding_id"])
+        if registry is not None and not direct_workers and direct is None and ordinary:
+            raise ConfigurationError("direct_worker_not_configured: run worker direct-pool-set")
+        selected_route = "direct" if ordinary and (direct is not None or direct_workers) else "bridge"
+        if selected_route == "direct":
+            if worker_config is not None or worker_slot is not None or owner_generation is not None:
+                raise StateError("Direct preparation cannot supply bridge provenance")
+            if continuation_of and direct is not None:
+                if prior["status"] != "complete" or prior["parent_task_id"] != parent_task_id:
+                    raise StateError("Continuation requires a completed prior assignment owned by this parent")
+            details = routes.capacity(registry, direct_active)
+            if direct_cooldown:
+                raise CooldownError("Native ChatGPT HTTP 403 cooldown is still active",
+                                    details={**direct_cooldown, **details, "active_cooldown": direct_cooldown})
+            if direct is not None and any(value["worker_conversation_id"] == direct["conversation_id"] for value in direct_active):
+                raise BusyError("direct_worker_busy: original continuation conversation is unresolved", details=details)
+            if len(direct_active) >= 2 or direct is None and not details["available_workers"]:
+                raise BusyError("direct_pool_busy: all direct capacity is reserved", details=details)
+            if direct is None:
+                direct = details["available_workers"][0]
+            worker = WorkerConfig(**{k: direct[k] for k in ("conversation_id", "label", "model_confirmation", "configured_at")})
+        elif worker_pool_active(runtime, _locked=locked):
+            if caller is None and queue_claim_token is None:
+                raise ConfigurationError("direct_worker_not_configured: run worker direct-set")
+            resident.guard(runtime, locked, resolved_id)
             pool = _load_worker_pool_unlocked(runtime, _locked=locked)
             owner = resident.read(runtime, locked)
             selected = worker_config
@@ -1387,7 +1492,7 @@ def prepare_assignment(
             if worker_slot is not None and selected.slot != worker_slot:
                 raise StateError("Selected worker slot differs from the pool claim")
             worker = selected
-            if owner is not None and owner.get("version") == 3:
+            if owner is not None and owner.get("version") in (3, 4):
                 if (not isinstance(caller, dict) or caller.get("collector_only") is True
                         or (caller.get("takeover_settlement") is True
                             and resident.settlement_operation.get() != "prepare_cancel")):
@@ -1402,7 +1507,9 @@ def prepare_assignment(
         else:
             if worker_config is not None or worker_slot is not None:
                 raise StateError("Worker slots require an active worker pool")
+            resident.guard(runtime, locked, resolved_id)
             worker = load_worker(runtime, _locked=locked)
+            selected_route = "bridge" if queue_claim_token is not None or caller is not None else "legacy"
         if isinstance(caller, dict) and caller.get("takeover_settlement") is True:
             from .queue import Queue
             stored = Queue(runtime).load(resolved_id, _locked=locked)
@@ -1419,9 +1526,9 @@ def prepare_assignment(
                 "Assignment ID already exists; refusing a possible duplicate submission",
                 details={"assignment_id": resolved_id},
             )
-        existing_active = active_assignments(runtime, _locked=locked)
-        if existing_active:
-            if not os.path.lexists(runtime.worker_pool_file) or any(
+        existing_active = direct_active if selected_route == "direct" else active_assignments(runtime, execution_route="bridge", _locked=locked)
+        if existing_active and selected_route != "direct":
+            if not worker_pool_active(runtime, _locked=locked) or any(
                 value.get("worker_conversation_id") == worker.conversation_id
                 for value in existing_active
             ) or len(existing_active) >= 2:
@@ -1434,7 +1541,7 @@ def prepare_assignment(
                         "status": value.get("status"),
                     },
                 )
-        cooldown = active_cooldown(runtime, _locked=locked)
+        cooldown = direct_cooldown if selected_route == "direct" else active_cooldown(runtime, _locked=locked)
         if cooldown:
             raise CooldownError(
                 "Native ChatGPT HTTP 403 cooldown is still active",
@@ -1453,6 +1560,13 @@ def prepare_assignment(
                         "status": previous.get("status"),
                     },
                 )
+            previous_route = routes.route(previous, runtime, locked)
+            if registry is not None and previous_route in {"legacy", "historical"}:
+                raise StateError("legacy_read_only: continuation requires a new explicit direct assignment")
+            if previous_route != selected_route:
+                raise StateError("Continuation route differs from original receipt")
+            if selected_route == "direct" and previous.get("direct_binding_id") != direct["binding_id"]:
+                raise StateError("Continuation direct binding differs from original receipt")
             if previous.get("worker_conversation_id") != worker.conversation_id:
                 raise StateError(
                     "Continuation worker does not match the configured worker",
@@ -1463,6 +1577,7 @@ def prepare_assignment(
         if len(wrapped.encode("utf-16-le")) // 2 >= 20000:
             raise ConfigurationError("Wrapped prompt reaches the native read limit; use a smaller prompt or a pinned repository reference")
         receipt: dict[str, Any] = {
+            "assignment_id": resolved_id,
             "status": "prepared",
             "created_at": utc_now(),
             "worker_conversation_id": worker.conversation_id,
@@ -1475,6 +1590,10 @@ def prepare_assignment(
             "response_marker": result_marker(resolved_id),
             "result_protocol": BOUNDED_RESULT_PROTOCOL,
         }
+        if selected_route != "legacy":
+            receipt["execution_route"] = selected_route
+        if selected_route == "direct":
+            receipt["direct_binding_id"] = direct["binding_id"]
         if continuation_of:
             receipt["continuation_of"] = continuation_of
         if queue_claim_token is not None:
@@ -1483,6 +1602,8 @@ def prepare_assignment(
             receipt["worker_slot"] = worker.slot
         if owner_generation is not None:
             receipt["owner_generation"] = owner_generation
+        if selected_route == "bridge" and isinstance(caller, dict) and not caller.get("takeover_settlement") and not caller.get("collector_only"):
+            receipt["safety_observer"] = routes.observer_identity(caller, receipt, resolved_id)
         if isinstance(caller, dict) and caller.get("takeover_settlement") is True:
             if any(receipt.get(key) != stored.get(key) for key in (
                     "prompt_sha256", "wrapped_prompt_sha256", "result_protocol")):
@@ -1524,11 +1645,13 @@ def _transition(
                 details={"assignment_id": assignment_id, "status": current},
             )
         if target == "armed":
-            if os.path.lexists(runtime.worker_pool_file):
+            from . import routes
+            receipt_route = routes.route(value, runtime, locked)
+            if receipt_route != "direct" and worker_pool_active(runtime, _locked=locked):
                 raise StateError(
                     "Pool assignments require the slot-specific arm-for-send operation"
                 )
-            active_assignment(runtime, _locked=locked)  # Reject multiple unresolved assignments.
+            active_assignments(runtime, execution_route="direct" if receipt_route == "direct" else "bridge", _locked=locked)
             if active_cooldown(runtime, _locked=locked):
                 raise CooldownError("Native unusual-activity cooldown blocks arming")
         value["status"] = target
@@ -1625,7 +1748,7 @@ def arm_for_send(
         if sha256_text(wrapped) != record.get("wrapped_prompt_sha256") or \
                 sha256_text(wrapped) != receipt.get("wrapped_prompt_sha256"):
             raise StateError("arm-for-send wrapped prompt changed")
-        active = active_assignments(runtime, _locked=locked)
+        active = active_assignments(runtime, execution_route="bridge", _locked=locked)
         if not any(value.get("assignment_id") == request_id for value in active):
             raise StateError("arm-for-send receipt is not active")
         if active_cooldown(runtime, _locked=locked):
@@ -1814,6 +1937,30 @@ def mark_indeterminate(
     )
 
 
+def _safety_observer_guard(runtime, locked, assignment_id, receipt):
+    from . import routes
+    try:
+        routes.guard(runtime, locked, assignment_id, value=receipt, operation="unusual-activity")
+    except (DispatchError, OSError, ValueError):
+        routes.original_observer(runtime, locked, receipt)
+
+
+def _save_safety_observation(assignment_id, original, value, runtime, locked):
+    """One narrow write, never a general guard bypass or ownership transition."""
+    allowed = {"status", "last_error_kind", "last_error_sha256", "submission_may_have_occurred",
+               "no_resend", "native_http_status", "native_error_kind", "cooldown_seconds",
+               "cooldown_started_at", "cooldown_until", "openai_request_id"}
+    if any(original.get(key) != value.get(key) for key in set(original) | set(value) if key not in allowed):
+        raise StateError("Safety observation cannot change receipt authority")
+    if value.get("status") != "indeterminate" or value.get("no_resend") is not True or value.get("native_http_status") != 403:
+        raise StateError("Invalid safety observation")
+    if load_assignment(assignment_id, runtime, _locked=locked) != original:
+        raise StateError("Safety observation receipt changed")
+    _safety_observer_guard(runtime, locked, assignment_id, original)
+    payload = dict(value, updated_at=utc_now())
+    atomic_write_json(assignment_path(assignment_id, runtime), payload, _locked=locked)
+
+
 def mark_unusual_activity_403(
     assignment_id: str,
     *,
@@ -1834,8 +1981,11 @@ def mark_unusual_activity_403(
     runtime = paths or default_paths()
     allowed = {"armed", "submitted", "pending", "ambiguous", "indeterminate"}
     with state_lock(runtime, token=_locked) as locked:
-        reservation_guard(runtime, locked, assignment_id)
+        reservation_guard(runtime, locked)
+        active_cooldown(runtime, _locked=locked)
         value = load_assignment(assignment_id, runtime, _locked=locked)
+        from . import routes
+        routes.route(value, runtime, locked)
         _reject_legacy_active_assignment(value, operation="unusual-activity")
         current = str(value["status"])
         if current not in allowed:
@@ -1844,10 +1994,12 @@ def mark_unusual_activity_403(
                 details={"assignment_id": assignment_id, "status": current},
             )
 
+        _safety_observer_guard(runtime, locked, assignment_id, value)
+        original = dict(value)
         if value.get("native_error_kind") == "openai-unusual-activity":
             if cleaned_request_id and not value.get("openai_request_id"):
                 value["openai_request_id"] = cleaned_request_id
-                _save_assignment(assignment_id, value, runtime, _locked=locked)
+                _save_safety_observation(assignment_id, original, value, runtime, locked)
             return value
 
         started = dt.datetime.now(dt.timezone.utc)
@@ -1870,7 +2022,7 @@ def mark_unusual_activity_403(
         )
         if cleaned_request_id:
             value["openai_request_id"] = cleaned_request_id
-        _save_assignment(assignment_id, value, runtime, _locked=locked)
+        _save_safety_observation(assignment_id, original, value, runtime, locked)
         return value
 
 
@@ -2175,11 +2327,11 @@ def reset_worker(
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
-        legacy_worker_mutation_guard(runtime)
+        legacy_worker_mutation_guard(runtime, _locked=locked)
         from .resident import guard
         guard(runtime, locked, configuration=True)
         if not force:
-            current = active_assignment(runtime, _locked=locked)
+            current = active_assignment(runtime, execution_route="bridge", _locked=locked)
             if current:
                 raise BusyError(
                     "Cannot reset the worker while an assignment is unresolved",
@@ -2202,13 +2354,16 @@ def purge_local_state(
     runtime = paths or default_paths()
     with state_lock(runtime, token=_locked) as locked:
         reservation_guard(runtime, locked)
-        legacy_worker_mutation_guard(runtime)
+        from . import routes
+        if routes.read(runtime, locked) is not None:
+            raise StateError("Route registration history is retained; purge is unsupported")
+        legacy_worker_mutation_guard(runtime, _locked=locked)
         from .resident import guard
         guard(runtime, locked, configuration=True)
         if os.path.lexists(runtime.state_dir / "queue"):
             raise StateError("Cannot purge while queue records exist; preserve queue receipts")
         if not force:
-            current = active_assignment(runtime, _locked=locked)
+            current = active_assignment(runtime, execution_route="bridge", _locked=locked)
             if current:
                 raise BusyError(
                     "Cannot purge local state while an assignment is unresolved",

@@ -1,7 +1,9 @@
 # Standalone native dispatch reference
 
-Read this reference only for an explicitly requested standalone dispatch,
-standalone collect-only recovery, or separately authorized continuation.
+Use this reference for ordinary explicitly requested Codex consultations, direct
+collect-only recovery, and authorized continuations. Claude uses `claude-client`
+and its listener pool. Direct operation does not require listener startup, listener
+recovery, or Stop qualification.
 It is not the parked broker's activation recipe.
 
 The compact parent SKILL.md supplies the essential boundaries for every mode.
@@ -89,13 +91,15 @@ Exact tool names may vary, but every capability must be available in the current
 
 Resolve the bundled helper relative to this `SKILL.md`: use the absolute path to `scripts/pro-dispatch` inside the installed skill. A source-checkout install may also expose `pro-dispatch` on `PATH`. In every command below, use the absolute bundled path when `pro-dispatch` is not on `PATH`.
 
-After the worker exists, run:
+For a fresh root request, after the default direct worker exists, run:
 
 ```bash
-pro-dispatch doctor --native-controls-confirmed
+pro-dispatch doctor --route direct --native-controls-confirmed
 ```
 
 Proceed only when it exits zero and returns both `local_ok: true` and `native_controls_confirmed: true`. The flag is an assertion that this invocation completed the semantic capability check; it is not automatic tool discovery.
+
+For recovery or an explicit continuation, perform the same native capability preflight, then resolve the saved receipt and its retained binding. A missing or changed default does not block that original binding; the default-worker doctor gate above applies to fresh root requests.
 
 ## Private transient files
 
@@ -105,24 +109,46 @@ The helper's receipt store never retains prompt or response bodies. Temporary fi
 
 ## Before the first dispatch
 
-If no worker is configured, read [references/native-protocol.md](native-protocol.md), then:
-
-1. Ask the user to create or select one dedicated Chat conversation.
-2. Ask the user to choose the model and reasoning effort in that conversation.
-3. Resolve that conversation's stable ID with native conversation controls.
-4. Save it:
+The default 2×2 setup is an explicit one-time choice of two exact Codex Chat IDs and two separate Claude listener Chat IDs. Direct setup cannot
+reuse current or historically exposed bridge workers. The registry keeps binding
+history across resets and bridge rotations. Use `worker direct-show` to inspect it:
 
 ```bash
-pro-dispatch worker set \
-  --conversation-id '<conversation-id>' \
-  --label 'Codex Pro Dispatch Worker' \
+pro-dispatch worker direct-pool-set --conversation-id CODEX_01_ID --conversation-id CODEX_02_ID --confirm-worker --native-controls-confirmed
+```
+
+The default Codex labels are `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`. Labels only guide setup; ordered exact IDs define selection. `direct-show`, status and doctor expose `workers` as the authoritative list. Scalar `worker` is null for a pair.
+
+Replacement requires repeated `--expected-conversation-id` arguments matching the complete current ordered list and
+no unresolved direct work. An identical request with matching expectations is read-only even while busy. `worker direct-reset` clears the whole current list, has no force bypass and retains
+history. An explicit continuation follows its original retained binding, even if
+the current direct default changes. Native sends still use exact IDs and the
+validation below. Old standalone receipts that predate route registration remain
+collect-only; start fresh work using the explicit direct configuration.
+
+
+If no worker is configured, read [references/native-protocol.md](native-protocol.md), then:
+
+1. Have the user create or select two dedicated Codex Chat conversations.
+2. Have the user choose the model and reasoning effort in each conversation.
+3. Resolve their stable IDs with native conversation controls.
+4. Save them in preference order:
+
+```bash
+pro-dispatch worker direct-pool-set \
+  --conversation-id '<codex-01-id>' \
+  --conversation-id '<codex-02-id>' \
   --confirm-worker \
   --native-controls-confirmed
 ```
 
-Do not infer the selected model from the conversation title. `--confirm-pro`
-remains accepted as a legacy alias; a worker already saved with it keeps its
-`user-confirmed-pro` marker and needs no reconfiguration.
+Do not infer the selected model from the conversation title. Direct setup uses
+`--confirm-worker`. Legacy `worker set --confirm-pro` remains available for old
+standalone installations; it does not configure the independent direct route.
+
+Existing singleton direct setups remain supported through `worker direct-set`. It refuses to collapse a configured pair with `direct_pool_configured`. Configure the separate Claude chats, normally `Pro Dispatch Claude 01` and `Pro Dispatch Claude 02`, through the supported [listener start/replace workflow](listener-start.md) with both worker IDs. Report direct configuration and bridge activation independently. Do not manually edit owner or pool files.
+
+Fresh preparation chooses the first available configured chat under the same lock that saves its receipt. Every active status reserves that conversation. If both chats or the global two-job direct limit are occupied, report `direct_pool_busy` with assignment IDs, chat IDs and statuses. Do not send, queue, silently retry, borrow a Claude worker, or start a listener. Shared cooldown takes precedence over busy admission; status still exposes capacity and cooldown independently. An uncertain job on 01 permits fresh work on free 02, while the uncertain receipt remains collect-only on 01.
 
 ## Normal dispatch
 
@@ -261,31 +287,26 @@ It does not store ChatGPT cookies, account credentials, repository source, or fu
 Useful commands:
 
 ```bash
-pro-dispatch worker show
-pro-dispatch status
+pro-dispatch worker direct-show
+pro-dispatch status --route direct
 pro-dispatch recover '<assignment-id>'
 pro-dispatch unusual-activity '<assignment-id>' --request-id '<id>' --reason-file '<reason-file>'
 pro-dispatch abandon '<assignment-id>' --reason-file '<reason-file>'
-pro-dispatch worker reset
-pro-dispatch doctor --native-controls-confirmed
+pro-dispatch worker direct-reset
+pro-dispatch doctor --route direct --native-controls-confirmed
 ```
 
 If native conversation controls are unavailable, stop with the exact blocker. Do not silently substitute another transport.
 
-`worker reset --force` and `purge --yes --force` are break-glass operations. They can erase recovery identity or receipts for unresolved work, destroying the workflow's no-resend evidence. Never use them during normal operation; require explicit user authorization and explain that recovery guarantees will be lost.
-
-The reduced broker runtime intentionally tightens this contract: neither force
-flag overrides unreadable or unclassifiable receipts, unsupported native-client
-state, or storage-integrity failures. Legacy forced-corruption deletion is no
-longer supported. Preserve the existing configuration and receipts when the
-guard refuses an operation; do not remove or rename records to make it pass.
-The absence of readable submission evidence is not evidence that no send
-occurred.
-
-Force retains its existing standalone overrides only when the integrity and
-foreign-state guards pass. Any queue storage additionally blocks purge,
-including with force. A corruption refusal requires separately reviewed recovery,
-not another transport, automatic abandonment, rearming, or a replacement request.
+`worker direct-reset` refuses unresolved work and preserves binding history.
+Purge is unsupported once the route registry exists. Legacy force flags never
+authorize deleting registered route history, unreadable safety receipts, or queue
+claims. Preserve evidence when a guard refuses; do not remove or rename records
+to make it pass. Absence of readable submission evidence never proves no send.
+Older helpers cannot interpret direct receipts alongside a pool; while direct
+work is unresolved, retain the current direct-capable version for collect-only
+recovery and never downgrade or delete evidence to unblock work.
+Registry version 1 is normalized in memory on reads; the next actual configuration mutation atomically writes version 2 without rewriting receipts or retained binding IDs. Never run a version-1-only helper against version-2 canonical state or restore an older snapshot over newer receipts. Prefer a forward fix; a downgrade requires separately verified lossless conversion after work is settled.
 
 ## v1.2 bounded long-result overlay
 

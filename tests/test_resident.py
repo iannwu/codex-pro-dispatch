@@ -111,12 +111,13 @@ class ResidentTests(unittest.TestCase):
             self.claim()
         for action in [lambda: core.arm_assignment("request", self.paths),
                        lambda: core.reset_worker(force=True, paths=self.paths),
-                       lambda: core.purge_local_state(force=True, paths=self.paths),
                        lambda: core.save_worker("other", confirm_pro=True,
                                                 expected_conversation_id="worker", paths=self.paths),
                        lambda: self.q.release("request", "parent")]:
             with self.assertRaises(core.BusyError):
                 action()
+        with self.assertRaisesRegex(core.StateError, "Route registration history is retained"):
+            core.purge_local_state(force=True, paths=self.paths)
         self.assertEqual(core.load_assignment("request", self.paths)["status"], "prepared")
 
     def test_client_commands_still_work_during_reservation(self):

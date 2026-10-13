@@ -11,7 +11,7 @@ Dispatch work from Codex or Claude Code to ChatGPT through the official native M
 Codex Pro Dispatch supports:
 
 - ChatGPT Pro or Sol with the reasoning level you choose in ChatGPT
-- up to two configured workers; concurrent dispatch requires live qualification
+- a default 2×2 setup: two Codex chats and two separate Claude listener chats; live concurrency is verified separately
 - recovery across interruptions and listener restarts after live qualification
 - durable request identity and inspectable results
 
@@ -23,7 +23,7 @@ Claude Code -> Codex listener -> ChatGPT
 ```
 
 From Codex, the current task dispatches work directly to a dedicated ChatGPT
-worker conversation and collects the result back into the originating task.
+worker conversation and collects the result back into the originating task. Fresh requests choose the first available chat from the configured ordered Codex pair, with at most one unresolved job per chat and two direct jobs overall.
 
 From Claude Code, a local request goes through a resident Codex listener. The
 listener performs the native ChatGPT dispatch and returns the collected result
@@ -61,10 +61,10 @@ Restart the desktop app if the plugin does not appear.
 In a Codex task, paste:
 
 ```text
-Use $codex-pro-dispatch to check compatibility and set up my dedicated ChatGPT worker.
+Use $codex-pro-dispatch to check compatibility and set up my two Codex ChatGPT workers.
 ```
 
-Codex checks compatibility, helps you create or choose a dedicated ChatGPT conversation, and asks you to pick the model and reasoning effort you want in it. It saves the conversation ID so future requests return to the same conversation, and runs a local health check. Model selection is confirmed by you, not automatically verified by the plugin.
+Codex checks compatibility and helps you select `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`, then choose the model and reasoning effort in each. Setup saves their exact IDs atomically with `worker direct-pool-set` and runs a local health check. Existing singleton installations remain supported. Model selection is confirmed by you, not automatically verified by the plugin. Claude uses the separate `Pro Dispatch Claude 01` and `Pro Dispatch Claude 02` pair through the supported listener start/replace workflow. Each route is configured independently.
 
 Once setup is complete, try a review using text already in your Codex task:
 
@@ -92,9 +92,41 @@ shell permission, or authorize a send. See the [Claude client guide](skills/code
 `./install.sh` links the helper and global skill and merges the required
 synchronous Stop hook into `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`).
 The hook pins the physical source-checkout `resident-supervision.mjs`; keep that
-checkout in place. After installation, fully restart the Codex desktop app,
-review and trust the hook with `/hooks`, and start a new Listener task before
-resident qualification. The packaged plugin continues to use its bundled hook.
+checkout in place. After installation, approve the hook once in the Codex CLI
+(below), then open a new Listener task before resident qualification. The packaged plugin continues to use its bundled hook.
+Listener startup uses the source installation whenever `~/.local/bin/pro-dispatch`
+exists, and otherwise the installed plugin. Keep only one of them: two resident
+Stop hooks block startup.
+
+### Approve the hook once in the Codex CLI
+
+Codex runs a new or changed hook only after a person reviews and trusts its
+exact definition. The supported place to do that is the interactive Codex CLI's
+`/hooks` browser ([Codex hooks documentation](https://learn.chatgpt.com/docs/hooks)).
+Do not rely on a `/hooks` menu in the desktop app; it is not verified here.
+
+1. In Terminal, from the Listener workspace, start the CLI bundled with the
+   desktop app: `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`.
+   It shares `~/.codex` (or `$CODEX_HOME`) with the desktop app and launches the
+   same binary that `pro-dispatch listener check` asks.
+2. If it opens with **Hooks need review**, choose **Review hooks**. Otherwise
+   type `/hooks`.
+3. Trust only the resident Stop hook, whose command ends in
+   `resident-supervision.mjs stop`. A source install lists it from
+   `~/.codex/hooks.json`; a plugin install lists it under the plugin. Choose
+   **Trust all and continue** only if you reviewed every listed hook.
+4. Quit the CLI and run `pro-dispatch listener check`. It must report the hook
+   as `trusted`. That shows configuration only, not a running listener.
+5. Open a new Listener task and say "start listener".
+
+If the check reports `trusted` but the hook still does not run in that new
+task, a manual desktop-app restart followed by another new task is a fallback.
+Do not restart the app automatically while other work may be active.
+
+Codex stores the approval as a hash of the definition under `[hooks.state]` in
+`~/.codex/config.toml` (or `$CODEX_HOME/config.toml`). Reinstalling an unchanged definition keeps it; a changed
+definition shows as `modified` and needs the same review again. Nothing in this
+project writes that approval for you.
 
 Resident service keeps a dedicated Codex task turn active until shutdown. Codex
 shares the session details once, then automatically waits on the original serve
@@ -205,7 +237,7 @@ cd codex-pro-dispatch
 ./install.sh
 ```
 
-This creates symlinks at `~/.local/bin/pro-dispatch` and `~/.agents/skills/codex-pro-dispatch`, and safely adds one pinned synchronous Stop hook to `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`). Existing unrelated hooks are preserved. Malformed configuration or another resident-supervision hook causes installation to stop without replacing it. Keep that checkout in place while installed. Add `~/.local/bin` to your `PATH` if needed. Fully restart the Codex desktop app, review and trust the hook with `/hooks`, and start a new Listener task before qualification. The installer does not use `sudo`, install dependencies, start a daemon, or launch at login.
+This creates symlinks at `~/.local/bin/pro-dispatch` and `~/.agents/skills/codex-pro-dispatch`, and safely adds one pinned synchronous Stop hook to `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`). Existing unrelated hooks are preserved. Malformed configuration or another resident-supervision hook causes installation to stop without replacing it. Keep that checkout in place while installed. Add `~/.local/bin` to your `PATH` if needed. [Approve the hook once in the Codex CLI](#approve-the-hook-once-in-the-codex-cli), then open a new Listener task before qualification. The installer does not use `sudo`, install dependencies, start a daemon, or launch at login.
 
 To remove the plugin package while retaining recovery records:
 

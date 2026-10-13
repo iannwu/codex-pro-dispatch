@@ -2,6 +2,9 @@
 
 ## Required resident Stop qualification
 
+To start, restart, or replace a listener, use [listener-start.md](listener-start.md);
+the stage recipe below is for diagnostics and older packets only.
+
 Fresh resident activation and unused serve-existing now require the trusted
 `.codex/hooks.json` project hook or packaged `hooks/hooks.json` plugin hook and `calls.qualify`
 before `calls.open` or `calls.serve`. Execute that decoded call verbatim in the

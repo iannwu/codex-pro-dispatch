@@ -2,6 +2,14 @@
 
 All notable changes to Codex Pro Dispatch are documented here.
 
+## [Unreleased]
+
+- Add an explicit direct Codex worker with independent dispatch and recovery while
+  Claude bridge workers are occupied or their listener lifecycle is unavailable.
+  Retain route history, shared account cooldowns, and at-most-once send guards.
+- Scope Stop supervision to registered listener tasks and preserve original
+  bridge HTTP 403 observations after lifecycle loss.
+
 ## [1.3.1] - 2026-09-18
 
 ### Fixed

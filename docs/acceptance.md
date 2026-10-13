@@ -19,30 +19,33 @@ The 2026-08-24 development run is historical evidence only. It was not performed
 ### A0. Host capability preflight
 
 - Confirm the six semantic capabilities in [compatibility.md](compatibility.md).
-- Run `pro-dispatch doctor` without an assertion and confirm it fails closed.
+- Run `pro-dispatch doctor --route direct` without an assertion and confirm it fails closed.
 - Run `pro-dispatch prepare --parent-task-id acceptance-preflight --assignment-id acceptance-preflight` without `--native-controls-confirmed` and confirm it fails before reading stdin.
-- After the semantic check, configure the worker and run `pro-dispatch doctor --native-controls-confirmed`.
+- After the semantic check, configure the direct worker and run `pro-dispatch doctor --route direct --native-controls-confirmed`.
 
 Expected:
 
 - a missing native capability stops before worker or assignment state is written
-- unasserted `doctor` exits nonzero and reports `native_controls_confirmed: false`
+- unasserted direct `doctor` exits nonzero and reports `native_controls_confirmed: false`
 - unasserted `prepare` exits nonzero without reading the prompt and creates no assignment receipt
 - the asserted health check succeeds only when local state is healthy
 
 ### A1. Worker configuration
 
-- Create one dedicated Chat conversation.
-- Choose the model and reasoning effort for it.
-- Resolve its stable conversation ID.
-- Run `pro-dispatch worker set --conversation-id <id> --confirm-worker --native-controls-confirmed`.
+- Select two dedicated Codex chats, normally `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`, distinct from all current and historical Claude bridge workers.
+- Choose the model and reasoning effort in each.
+- Resolve their stable conversation IDs in preference order.
+- Run `pro-dispatch worker direct-pool-set --conversation-id <codex-01-id> --conversation-id <codex-02-id> --confirm-worker --native-controls-confirmed`.
 
 Expected:
 
-- `worker show` returns the exact ID with `model_confirmation: user-confirmed-worker`.
-- The config file is mode `0600`.
+- `pro-dispatch worker direct-show` returns both exact IDs in `workers` with `model_confirmation: user-confirmed-worker`; scalar `worker` is null and `worker_count` is two.
+- The route registry is mode `0600` and retains separate direct bindings and bridge destinations.
 - The conversation is reported as user-confirmed; the model is not machine-verified.
-- An existing worker saved with the legacy `--confirm-pro` still loads unchanged.
+- Existing legacy scalar worker and bridge pool configuration remain unchanged.
+- Configure the separate Claude pair through supported listener start/replace with both worker flags. Report each route’s result separately.
+- Dispatch and collect one identifiable native request in each of the four chats, checking each outbound request/result association. Verify Codex direct while the listener is stopped. Record live concurrency separately from fixture concurrency and report host limitations.
+- Existing singleton direct setup through `worker direct-set` still passes its full lifecycle.
 
 ### A2. Resident owner liveness
 
@@ -97,6 +100,10 @@ PASS. Those gates stay NOT RUN or BLOCKED until a disposable live qualification
 is authorized.
 
 ## B. One-turn roundtrip
+
+Run this direct roundtrip with the Claude bridge listener unavailable. No owner
+acquisition, listener startup, or Stop qualification should be needed. Canonical
+receipt integrity and account cooldowns still apply to both routes.
 
 Submit:
 
