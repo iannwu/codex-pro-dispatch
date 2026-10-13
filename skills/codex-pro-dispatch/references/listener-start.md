@@ -96,7 +96,7 @@ or exact request IDs) and acquires nothing. The hook asks once per turn; after a
 ## Destination setup
 
 Use this only when the user asks for different worker chats or no pool is
-configured. Discover the requested ChatGPT conversations with native task tools
+configured. The recommended Claude pair is `Pro Dispatch Claude 01` and `Pro Dispatch Claude 02`, separate from the native Codex pair `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`. Existing single-worker listeners remain supported. Discover the requested ChatGPT conversations with native task tools
 and resolve titles to exact IDs; if titles are ambiguous, ask which ID. Then run
 `pro-dispatch listener start --worker-1 <exact-id> [--worker-2 <exact-id>]`
 from this task's working directory and pass its returned `arguments.code`
@@ -104,6 +104,8 @@ unchanged to `functions.exec`. The same composed execution follows, with the
 same three actions. `--client-root` selects the private client root, default
 `~/.cpd-client`. `--codex /absolute/path` must name an explicitly verified
 Listener host, never a guessed PATH alternative.
+
+Use both worker flags for the default pair. Configure the Codex pair separately with `worker direct-pool-set` after its native preflight, and report both route results. Failed bridge activation must not undo or block a valid Codex pair. Current and historical destinations cannot cross routes. Never edit owner or pool JSON to enroll chats.
 
 ## Configuration diagnostic
 

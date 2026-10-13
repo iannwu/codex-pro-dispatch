@@ -11,7 +11,7 @@ Dispatch work from Codex or Claude Code to ChatGPT through the official native M
 Codex Pro Dispatch supports:
 
 - ChatGPT Pro or Sol with the reasoning level you choose in ChatGPT
-- up to two configured workers; concurrent dispatch requires live qualification
+- a default 2×2 setup: two Codex chats and two separate Claude listener chats; live concurrency is verified separately
 - recovery across interruptions and listener restarts after live qualification
 - durable request identity and inspectable results
 
@@ -23,7 +23,7 @@ Claude Code -> Codex listener -> ChatGPT
 ```
 
 From Codex, the current task dispatches work directly to a dedicated ChatGPT
-worker conversation and collects the result back into the originating task.
+worker conversation and collects the result back into the originating task. Fresh requests choose the first available chat from the configured ordered Codex pair, with at most one unresolved job per chat and two direct jobs overall.
 
 From Claude Code, a local request goes through a resident Codex listener. The
 listener performs the native ChatGPT dispatch and returns the collected result
@@ -61,10 +61,10 @@ Restart the desktop app if the plugin does not appear.
 In a Codex task, paste:
 
 ```text
-Use $codex-pro-dispatch to check compatibility and set up my dedicated ChatGPT worker.
+Use $codex-pro-dispatch to check compatibility and set up my two Codex ChatGPT workers.
 ```
 
-Codex checks compatibility, helps you create or choose a dedicated ChatGPT conversation, and asks you to pick the model and reasoning effort you want in it. It saves the conversation ID so future requests return to the same conversation, and runs a local health check. Model selection is confirmed by you, not automatically verified by the plugin.
+Codex checks compatibility and helps you select `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`, then choose the model and reasoning effort in each. Setup saves their exact IDs atomically with `worker direct-pool-set` and runs a local health check. Existing singleton installations remain supported. Model selection is confirmed by you, not automatically verified by the plugin. Claude uses the separate `Pro Dispatch Claude 01` and `Pro Dispatch Claude 02` pair through the supported listener start/replace workflow. Each route is configured independently.
 
 Once setup is complete, try a review using text already in your Codex task:
 

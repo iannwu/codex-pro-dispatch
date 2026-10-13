@@ -329,7 +329,7 @@ class DirectRoutesTests(unittest.TestCase):
                                 listener.commit(paths, packet, "listener", "turn")
                         with core.state_lock(paths) as locked:
                             registry = routes.read(paths, locked)
-                        self.assertEqual(registry["direct_worker"], direct)
+                        self.assertEqual(registry["direct_workers"], [direct])
                         reserved = boundary != "dispatch-routes.json" or after
                         self.assertEqual("worker-b" in registry["bridge_workers"], reserved)
                         authority = paths.worker_pool_file if destination == "worker-pool.json" else paths.state_dir / destination

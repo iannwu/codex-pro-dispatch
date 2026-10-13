@@ -9,7 +9,7 @@ metadata:
 # Codex Pro Dispatch
 
 Use the official combined ChatGPT/Codex desktop app. The helper owns receipts; the native host supplies tools. Installation authorizes neither sends nor sessions.
-The user picks any available model and reasoning effort in the worker conversation; `worker direct-set --confirm-worker` records that conversation, never a verified model.
+The default setup is 2×2: two native Codex chats, `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`, plus two separate Claude listener chats, `Pro Dispatch Claude 01` and `Pro Dispatch Claude 02`. The user chooses the four chats once and selects the model and reasoning effort in each. `worker direct-pool-set --confirm-worker` records exact Codex conversation IDs, never a verified model. Existing single-worker installations remain supported.
 
 Use the listener task only for listener operations. For ordinary coordination to an existing resident listener, call `send_message_to_thread` with only `threadId` and `prompt`; omit `model` and `thinking`. Override those settings only when the user explicitly requests changing that listener itself. A reviewer/builder model request or a ChatGPT worker model change does not authorize changing the listener.
 
@@ -23,12 +23,14 @@ copy; it never activates a listener, grants permissions, or authorizes a send.
 
 For an ordinary Codex consultation, use the independent direct native workflow in
 [standalone-dispatch.md](references/standalone-dispatch.md). It uses the explicitly
-configured direct Chat ID, distinct from all current and historical Claude bridge
+configured direct Chat IDs, distinct from all current and historical Claude bridge
 workers. Run the actual caller capability preflight, then `status --route direct`.
 A stopped or malformed bridge does not require listener recovery for direct work.
 Do not run listener startup or Stop qualification as direct preflight. A missing
-direct binding requires `worker direct-set`, never an inferred scalar worker or title.
+direct configuration requires `worker direct-pool-set`, never an inferred scalar worker or title. Read the authoritative ordered `workers` list, not scalar `worker`, which is null for a pair. Preparation selects the first available chat under the canonical state lock; use the returned receipt’s exact worker ID for every native operation. A busy pair returns `direct_pool_busy`; do not queue, retry silently, borrow a Claude chat, or start a listener. Explicit continuations retain the original chat and binding.
 Claude uses `claude-client` and the registered listener pool.
+
+Configure the Codex pair and Claude pair as independent operations and report each result. Failed bridge activation must not undo or block valid direct configuration. Use the supported listener start/replace procedure for the Claude pair; never edit owner or pool files. A shared 403 cooldown still blocks both routes. Status reports capacity before cooldown and exposes `availability` and `active_cooldown` independently.
 
 For "start listener", "restart listener", a replacement Listener task, or new bridge worker conversations,
 use [listener-start.md](references/listener-start.md) first. Its one constant

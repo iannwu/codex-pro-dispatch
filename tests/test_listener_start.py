@@ -28,7 +28,7 @@ class ListenerStartTests(unittest.TestCase):
         old, new = json.loads(before.pop(key)), json.loads(after.pop(key))
         self.assertEqual(new["bridge_workers"], sorted(set(old["bridge_workers"]) | set(workers)))
         self.assertEqual(new["listener_tasks"], sorted(set(old["listener_tasks"]) | {parent}))
-        for field in ("version", "direct_worker", "direct_bindings", "legacy_standalone_workers"):
+        for field in ("version", "direct_workers", "direct_bindings", "legacy_standalone_workers"):
             self.assertEqual(old[field], new[field])
 
     def fresh(self):

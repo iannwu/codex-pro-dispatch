@@ -109,16 +109,18 @@ The helper's receipt store never retains prompt or response bodies. Temporary fi
 
 ## Before the first dispatch
 
-Direct setup is an explicit one-time choice of an exact native Chat ID. It cannot
+The default 2×2 setup is an explicit one-time choice of two exact Codex Chat IDs and two separate Claude listener Chat IDs. Direct setup cannot
 reuse current or historically exposed bridge workers. The registry keeps binding
 history across resets and bridge rotations. Use `worker direct-show` to inspect it:
 
 ```bash
-pro-dispatch worker direct-set --conversation-id EXACT_CHAT_ID --label "Codex Direct Pro" --confirm-worker --native-controls-confirmed
+pro-dispatch worker direct-pool-set --conversation-id CODEX_01_ID --conversation-id CODEX_02_ID --confirm-worker --native-controls-confirmed
 ```
 
-Replacement requires `--expected-conversation-id` with the exact current ID and
-no unresolved direct work. `worker direct-reset` has no force bypass and retains
+The default Codex labels are `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`. Labels only guide setup; ordered exact IDs define selection. `direct-show`, status and doctor expose `workers` as the authoritative list. Scalar `worker` is null for a pair.
+
+Replacement requires repeated `--expected-conversation-id` arguments matching the complete current ordered list and
+no unresolved direct work. An identical request with matching expectations is read-only even while busy. `worker direct-reset` clears the whole current list, has no force bypass and retains
 history. An explicit continuation follows its original retained binding, even if
 the current direct default changes. Native sends still use exact IDs and the
 validation below. Old standalone receipts that predate route registration remain
@@ -127,15 +129,15 @@ collect-only; start fresh work using the explicit direct configuration.
 
 If no worker is configured, read [references/native-protocol.md](native-protocol.md), then:
 
-1. Ask the user to create or select one dedicated Chat conversation.
-2. Ask the user to choose the model and reasoning effort in that conversation.
-3. Resolve that conversation's stable ID with native conversation controls.
-4. Save it:
+1. Have the user create or select two dedicated Codex Chat conversations.
+2. Have the user choose the model and reasoning effort in each conversation.
+3. Resolve their stable IDs with native conversation controls.
+4. Save them in preference order:
 
 ```bash
-pro-dispatch worker direct-set \
-  --conversation-id '<conversation-id>' \
-  --label 'Codex Pro Dispatch Worker' \
+pro-dispatch worker direct-pool-set \
+  --conversation-id '<codex-01-id>' \
+  --conversation-id '<codex-02-id>' \
   --confirm-worker \
   --native-controls-confirmed
 ```
@@ -143,6 +145,10 @@ pro-dispatch worker direct-set \
 Do not infer the selected model from the conversation title. Direct setup uses
 `--confirm-worker`. Legacy `worker set --confirm-pro` remains available for old
 standalone installations; it does not configure the independent direct route.
+
+Existing singleton direct setups remain supported through `worker direct-set`. It refuses to collapse a configured pair with `direct_pool_configured`. Configure the separate Claude chats, normally `Pro Dispatch Claude 01` and `Pro Dispatch Claude 02`, through the supported [listener start/replace workflow](listener-start.md) with both worker IDs. Report direct configuration and bridge activation independently. Do not manually edit owner or pool files.
+
+Fresh preparation chooses the first available configured chat under the same lock that saves its receipt. Every active status reserves that conversation. If both chats or the global two-job direct limit are occupied, report `direct_pool_busy` with assignment IDs, chat IDs and statuses. Do not send, queue, silently retry, borrow a Claude worker, or start a listener. Shared cooldown takes precedence over busy admission; status still exposes capacity and cooldown independently. An uncertain job on 01 permits fresh work on free 02, while the uncertain receipt remains collect-only on 01.
 
 ## Normal dispatch
 
@@ -300,6 +306,7 @@ to make it pass. Absence of readable submission evidence never proves no send.
 Older helpers cannot interpret direct receipts alongside a pool; while direct
 work is unresolved, retain the current direct-capable version for collect-only
 recovery and never downgrade or delete evidence to unblock work.
+Registry version 1 is normalized in memory on reads; the next actual configuration mutation atomically writes version 2 without rewriting receipts or retained binding IDs. Never run a version-1-only helper against version-2 canonical state or restore an older snapshot over newer receipts. Prefer a forward fix; a downgrade requires separately verified lossless conversion after work is settled.
 
 ## v1.2 bounded long-result overlay
 

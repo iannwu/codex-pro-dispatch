@@ -1296,8 +1296,10 @@ def active_assignments(paths: RuntimePaths | None = None,
     active = [(value, route) for value, route in classified if value["status"] in ACTIVE_STATUSES]
     direct = [value for value, route in active if route == "direct"]
     bridge = [value for value, route in active if route != "direct"]
-    if len(direct) > 1:
-        raise StateError("Multiple unresolved direct assignments exist")
+    if len(direct) > 2:
+        raise StateError("Direct assignment count exceeds two-worker capacity")
+    if len({value["worker_conversation_id"] for value in direct}) != len(direct):
+        raise StateError("Multiple unresolved direct assignments share one conversation")
     # Direct operation validates canonical receipts without consulting lifecycle.
     # Exact bridge slot authority is still required for every bridge operation.
     if execution_route != "direct":
@@ -1441,19 +1443,38 @@ def prepare_assignment(
         from . import resident, routes
         caller = resident.invocation.get()
         registry = routes.read(runtime, locked)
-        direct = registry["direct_worker"] if registry else None
+        direct_workers = registry["direct_workers"] if registry else []
+        direct = None
+        ordinary = caller is None and queue_claim_token is None
+        # Validate shared receipt integrity before configuration, cooldown or
+        # occupancy diagnoses, without reading the bridge lifecycle.
+        direct_active = active_assignments(runtime, execution_route="direct", _locked=locked) if ordinary else []
+        direct_cooldown = active_cooldown(runtime, _locked=locked) if ordinary else None
         if continuation_of:
             prior = load_assignment(continuation_of, runtime, _locked=locked)
             if routes.route(prior, runtime, locked) == "direct":
                 if caller is not None or queue_claim_token is not None:
                     raise StateError("Resident invocation cannot continue direct work")
                 direct = next(b for b in registry["direct_bindings"] if b["binding_id"] == prior["direct_binding_id"])
-        if registry is not None and direct is None and caller is None and queue_claim_token is None:
-            raise ConfigurationError("direct_worker_not_configured: run worker direct-set")
-        selected_route = "direct" if caller is None and queue_claim_token is None and direct else "bridge"
+        if registry is not None and not direct_workers and direct is None and ordinary:
+            raise ConfigurationError("direct_worker_not_configured: run worker direct-pool-set")
+        selected_route = "direct" if ordinary and (direct is not None or direct_workers) else "bridge"
         if selected_route == "direct":
             if worker_config is not None or worker_slot is not None or owner_generation is not None:
                 raise StateError("Direct preparation cannot supply bridge provenance")
+            if continuation_of and direct is not None:
+                if prior["status"] != "complete" or prior["parent_task_id"] != parent_task_id:
+                    raise StateError("Continuation requires a completed prior assignment owned by this parent")
+            details = routes.capacity(registry, direct_active)
+            if direct_cooldown:
+                raise CooldownError("Native ChatGPT HTTP 403 cooldown is still active",
+                                    details={**direct_cooldown, **details, "active_cooldown": direct_cooldown})
+            if direct is not None and any(value["worker_conversation_id"] == direct["conversation_id"] for value in direct_active):
+                raise BusyError("direct_worker_busy: original continuation conversation is unresolved", details=details)
+            if len(direct_active) >= 2 or direct is None and not details["available_workers"]:
+                raise BusyError("direct_pool_busy: all direct capacity is reserved", details=details)
+            if direct is None:
+                direct = details["available_workers"][0]
             worker = WorkerConfig(**{k: direct[k] for k in ("conversation_id", "label", "model_confirmation", "configured_at")})
         elif worker_pool_active(runtime, _locked=locked):
             if caller is None and queue_claim_token is None:
@@ -1505,9 +1526,9 @@ def prepare_assignment(
                 "Assignment ID already exists; refusing a possible duplicate submission",
                 details={"assignment_id": resolved_id},
             )
-        existing_active = active_assignments(runtime, execution_route="direct" if selected_route == "direct" else "bridge", _locked=locked)
-        if existing_active:
-            if selected_route == "direct" or not worker_pool_active(runtime, _locked=locked) or any(
+        existing_active = direct_active if selected_route == "direct" else active_assignments(runtime, execution_route="bridge", _locked=locked)
+        if existing_active and selected_route != "direct":
+            if not worker_pool_active(runtime, _locked=locked) or any(
                 value.get("worker_conversation_id") == worker.conversation_id
                 for value in existing_active
             ) or len(existing_active) >= 2:
@@ -1520,7 +1541,7 @@ def prepare_assignment(
                         "status": value.get("status"),
                     },
                 )
-        cooldown = active_cooldown(runtime, _locked=locked)
+        cooldown = direct_cooldown if selected_route == "direct" else active_cooldown(runtime, _locked=locked)
         if cooldown:
             raise CooldownError(
                 "Native ChatGPT HTTP 403 cooldown is still active",
@@ -1630,7 +1651,7 @@ def _transition(
                 raise StateError(
                     "Pool assignments require the slot-specific arm-for-send operation"
                 )
-            active_assignment(runtime, execution_route="direct" if receipt_route == "direct" else "bridge", _locked=locked)
+            active_assignments(runtime, execution_route="direct" if receipt_route == "direct" else "bridge", _locked=locked)
             if active_cooldown(runtime, _locked=locked):
                 raise CooldownError("Native unusual-activity cooldown blocks arming")
         value["status"] = target

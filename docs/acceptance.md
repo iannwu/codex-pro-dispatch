@@ -32,17 +32,20 @@ Expected:
 
 ### A1. Worker configuration
 
-- Create one dedicated direct Chat conversation, distinct from all current and historical Claude bridge workers.
-- Choose the model and reasoning effort for it.
-- Resolve its stable conversation ID.
-- Run `pro-dispatch worker direct-set --conversation-id <id> --confirm-worker --native-controls-confirmed`.
+- Select two dedicated Codex chats, normally `Pro Dispatch - Codex 01` and `Pro Dispatch - Codex 02`, distinct from all current and historical Claude bridge workers.
+- Choose the model and reasoning effort in each.
+- Resolve their stable conversation IDs in preference order.
+- Run `pro-dispatch worker direct-pool-set --conversation-id <codex-01-id> --conversation-id <codex-02-id> --confirm-worker --native-controls-confirmed`.
 
 Expected:
 
-- `pro-dispatch worker direct-show` returns the exact ID with `model_confirmation: user-confirmed-worker`.
+- `pro-dispatch worker direct-show` returns both exact IDs in `workers` with `model_confirmation: user-confirmed-worker`; scalar `worker` is null and `worker_count` is two.
 - The route registry is mode `0600` and retains separate direct bindings and bridge destinations.
 - The conversation is reported as user-confirmed; the model is not machine-verified.
 - Existing legacy scalar worker and bridge pool configuration remain unchanged.
+- Configure the separate Claude pair through supported listener start/replace with both worker flags. Report each route’s result separately.
+- Dispatch and collect one identifiable native request in each of the four chats, checking each outbound request/result association. Verify Codex direct while the listener is stopped. Record live concurrency separately from fixture concurrency and report host limitations.
+- Existing singleton direct setup through `worker direct-set` still passes its full lifecycle.
 
 ### A2. Resident owner liveness
 

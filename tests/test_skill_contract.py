@@ -41,14 +41,15 @@ class SkillContractTests(unittest.TestCase):
                 with self.subTest(section=name, command=command):
                     args = parser.parse_args(shlex.split(command)[1:])
                     if args.command == "worker":
-                        self.assertIn(args.worker_command, {"direct-set", "direct-show"})
+                        self.assertIn(args.worker_command, {"direct-pool-set", "direct-show"})
                         worker_commands.add(args.worker_command)
-                        if args.worker_command == "direct-set":
+                        if args.worker_command == "direct-pool-set":
                             self.assertTrue(args.confirm_worker)
                             self.assertTrue(args.native_controls_confirmed)
+                            self.assertEqual(len(args.conversation_id), 2)
                     elif args.command == "doctor":
                         self.assertEqual(args.route, "direct")
-            self.assertEqual(worker_commands, {"direct-set", "direct-show"}, name)
+            self.assertEqual(worker_commands, {"direct-pool-set", "direct-show"}, name)
 
     def test_skill_has_valid_minimal_frontmatter(self) -> None:
         text = SKILL.read_text(encoding="utf-8")

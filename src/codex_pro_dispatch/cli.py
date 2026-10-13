@@ -191,8 +191,14 @@ def build_parser() -> argparse.ArgumentParser:
     direct_set.add_argument("--label", default="Codex Direct Pro")
     direct_set.add_argument("--confirm-worker", action="store_true")
     direct_set.add_argument("--native-controls-confirmed", action="store_true")
-    worker_sub.add_parser("direct-show", help="Show the independent direct binding")
-    worker_sub.add_parser("direct-reset", help="Clear current direct binding, retaining route history")
+    direct_pool_set = worker_sub.add_parser("direct-pool-set", help="Configure the default two Codex chats atomically, separate from the two Claude listener chats")
+    direct_pool_set.add_argument("--conversation-id", required=True, action="append")
+    direct_pool_set.add_argument("--expected-conversation-id", action="append")
+    direct_pool_set.add_argument("--label", action="append")
+    direct_pool_set.add_argument("--confirm-worker", action="store_true")
+    direct_pool_set.add_argument("--native-controls-confirmed", action="store_true")
+    worker_sub.add_parser("direct-show", help="Show the ordered independent direct workers")
+    worker_sub.add_parser("direct-reset", help="Clear all current direct workers, retaining route history")
     route_parser = subparsers.add_parser("routes", help="Read canonical route registration")
     route_parser.add_argument("operation", choices=["stop-check", "register-listener"])
     route_parser.add_argument("--parent-task-id", required=True)
@@ -429,22 +435,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "worker":
         if args.worker_command.startswith("direct-"):
             from . import routes
-            if args.worker_command == "direct-set":
+            if args.worker_command in {"direct-set", "direct-pool-set"}:
                 if not args.native_controls_confirmed:
                     raise DispatchError("Direct worker setup requires the actual caller native host-capability preflight")
-                worker = routes.set_direct(paths, args.conversation_id, label=args.label,
-                                           confirm_worker=args.confirm_worker,
-                                           expected_conversation_id=args.expected_conversation_id)
+                if args.worker_command == "direct-pool-set":
+                    workers = routes.set_direct_pool(paths, args.conversation_id, labels=args.label,
+                                                    confirm_worker=args.confirm_worker,
+                                                    expected_conversation_ids=args.expected_conversation_id)
+                else:
+                    workers = [routes.set_direct(paths, args.conversation_id, label=args.label,
+                                                 confirm_worker=args.confirm_worker,
+                                                 expected_conversation_id=args.expected_conversation_id)]
             elif args.worker_command == "direct-show":
-                from .core import state_lock
-                with state_lock(paths, create=False) as locked:
-                    registry = routes.read(paths, locked)
-                    worker = registry["direct_worker"] if registry else None
-                if worker is None:
-                    raise ConfigurationError("direct_worker_not_configured: run worker direct-set")
+                return {**routes.status(paths), "path": str(routes.path(paths))}
             else:
                 return {"ok": True, "removed": routes.reset_direct(paths), "history_retained": True}
-            return {"ok": True, "worker": worker, "path": str(routes.path(paths))}
+            return {"ok": bool(workers), "workers": workers, "worker_count": len(workers),
+                    "worker": workers[0] if len(workers) == 1 else None, "path": str(routes.path(paths))}
         if args.worker_command == "set":
             if not args.native_controls_confirmed:
                 raise DispatchError(

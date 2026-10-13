@@ -11,6 +11,7 @@ from . import core
 BRIDGE_FIELDS = frozenset({"queue_claim_token", "worker_slot", "owner_generation", "safety_observer"})
 IMMUTABLE = ("execution_route", "direct_binding_id", "worker_conversation_id", "parent_task_id",
              "queue_claim_token", "worker_slot", "owner_generation", "safety_observer")
+DIRECT_LABELS = ("Pro Dispatch - Codex 01", "Pro Dispatch - Codex 02")
 
 
 def path(paths):
@@ -27,8 +28,14 @@ def _ids(values, field):
 
 
 def validate(value):
-    if (not isinstance(value, dict) or set(value) != {"version", "direct_worker", "direct_bindings", "legacy_standalone_workers", "bridge_workers", "listener_tasks"}
-            or type(value["version"]) is not int or value["version"] != 1):
+    fields = {"version", "direct_bindings", "legacy_standalone_workers", "bridge_workers", "listener_tasks"}
+    if not isinstance(value, dict) or type(value.get("version")) is not int:
+        raise core.StateError("dispatch_routes_invalid: schema")
+    if value["version"] == 1 and set(value) == fields | {"direct_worker"}:
+        # Normalize in memory only. Read commands never rewrite legacy bytes.
+        value = {key: item for key, item in value.items() if key != "direct_worker"} | {
+            "version": 2, "direct_workers": [] if value["direct_worker"] is None else [value["direct_worker"]]}
+    elif value["version"] != 2 or set(value) != fields | {"direct_workers"}:
         raise core.StateError("dispatch_routes_invalid: schema")
     _ids(value["bridge_workers"], "bridge_workers")
     _ids(value["listener_tasks"], "listener_tasks")
@@ -53,8 +60,13 @@ def validate(value):
         core._parse_utc(worker["configured_at"], field="configured_at")
         if worker["conversation_id"] in value["bridge_workers"] or worker["conversation_id"] in value["legacy_standalone_workers"]:
             raise core.StateError("dispatch_route_overlap")
-    if value["direct_worker"] is not None and value["direct_worker"] not in bindings:
+    current = value["direct_workers"]
+    if not isinstance(current, list) or len(current) > 2:
+        raise core.StateError("direct_worker_invalid: active worker count")
+    if any(worker not in bindings for worker in current):
         raise core.StateError("direct_worker_invalid: current binding not retained")
+    if len({worker["conversation_id"] for worker in current}) != len(current):
+        raise core.StateError("direct_worker_invalid: duplicate active conversation")
     return value
 
 
@@ -96,7 +108,7 @@ def initial(paths, locked):
             raise core.StateError("Unresolved receipt lacks determinable legacy binding")
         if classification == "bridge" or receipt["status"] in core.ACTIVE_STATUSES:
             workers.add(receipt["worker_conversation_id"])
-    return validate({"version": 1, "direct_worker": None,
+    return validate({"version": 2, "direct_workers": [],
                      "direct_bindings": [], "legacy_standalone_workers": standalone,
                      "bridge_workers": sorted(workers), "listener_tasks": sorted(tasks)})
 
@@ -201,9 +213,13 @@ def guard(paths, locked, assignment_id, *, value=None, operation=None):
     return name
 
 
-def set_direct(paths, conversation_id, *, label="Codex Direct Pro", confirm_worker=False,
-               expected_conversation_id=None):
-    core.validate_identifier(conversation_id, field="conversation_id")
+def _configure_direct(paths, conversation_ids, labels, expected_ids, *, confirm_worker, singleton=False):
+    _ids(conversation_ids, "conversation_id")
+    _ids(expected_ids, "expected_conversation_id")
+    if len(labels) != len(conversation_ids) or any(
+            not isinstance(label, str) or not label.strip() or len(label) > 120 for label in labels):
+        raise core.ConfigurationError("Direct configuration requires one nonempty label per conversation")
+    labels = [label.strip() for label in labels]
     if not confirm_worker:
         raise core.ConfigurationError("Direct worker requires --confirm-worker")
     from .resident import invocation
@@ -211,21 +227,46 @@ def set_direct(paths, conversation_id, *, label="Codex Direct Pro", confirm_work
         raise core.StateError("Direct configuration requires an ordinary native caller")
     with core.state_lock(paths) as locked:
         registry = read(paths, locked) or initial(paths, locked)
-        current = registry["direct_worker"]
-        if current and expected_conversation_id != current["conversation_id"]:
-            raise core.StateError("Direct replacement requires exact expected_conversation_id")
-        if expected_conversation_id is not None and (not current or current["conversation_id"] != expected_conversation_id):
-            raise core.StateError("Direct worker does not match expected_conversation_id")
-        for receipt in core.list_assignments(paths, _locked=locked):
-            if route(receipt, paths, locked, registry=registry) == "direct" and receipt["status"] in core.ACTIVE_STATUSES:
-                raise core.BusyError("Direct worker has unresolved work", details={"assignment_id": receipt["assignment_id"]})
-        if current and conversation_id == current["conversation_id"]:
+        current = registry["direct_workers"]
+        if singleton and len(current) == 2:
+            raise core.ConfigurationError("direct_pool_configured: use worker direct-pool-set")
+        if expected_ids != [worker["conversation_id"] for worker in current]:
+            raise core.StateError("Direct replacement requires exact ordered expected_conversation_id list")
+        # Validate all canonical receipts before diagnosing busy or idempotence.
+        active = core.active_assignments(paths, execution_route="direct", _locked=locked)
+        requested = list(zip(conversation_ids, labels))
+        if requested == [(worker["conversation_id"], worker["label"]) for worker in current]:
             return current
-        worker = {"binding_id": secrets.token_hex(16), "conversation_id": conversation_id,
-                  "label": label.strip(), "model_confirmation": "user-confirmed-worker", "configured_at": core.utc_now()}
-        updated = validate(dict(registry, direct_worker=worker, direct_bindings=[*registry["direct_bindings"], worker]))
+        workers = []
+        added = []
+        for conversation_id, label in requested:
+            worker = next((w for w in current if w["conversation_id"] == conversation_id and w["label"] == label), None)
+            if worker is None:
+                worker = {"binding_id": secrets.token_hex(16), "conversation_id": conversation_id,
+                          "label": label, "model_confirmation": "user-confirmed-worker", "configured_at": core.utc_now()}
+                added.append(worker)
+            workers.append(worker)
+        updated = validate(dict(registry, direct_workers=workers, direct_bindings=[*registry["direct_bindings"], *added]))
+        if active:
+            raise core.BusyError("Direct workers have unresolved work", details=capacity(registry, active))
         core.atomic_write_json(path(paths), updated, _locked=locked)
-        return worker
+        return workers
+
+
+def set_direct(paths, conversation_id, *, label="Codex Direct Pro", confirm_worker=False,
+               expected_conversation_id=None):
+    return _configure_direct(paths, [conversation_id], [label],
+                             [] if expected_conversation_id is None else [expected_conversation_id],
+                             confirm_worker=confirm_worker, singleton=True)[0]
+
+
+def set_direct_pool(paths, conversation_ids, *, labels=None, confirm_worker=False,
+                    expected_conversation_ids=None):
+    if len(conversation_ids) != 2 or labels is not None and len(labels) != 2:
+        raise core.ConfigurationError("direct_pool_invalid: requires exactly two conversation IDs and zero or two labels")
+    return _configure_direct(paths, conversation_ids, list(DIRECT_LABELS) if labels is None else labels,
+                             [] if expected_conversation_ids is None else expected_conversation_ids,
+                             confirm_worker=confirm_worker)
 
 
 def reset_direct(paths):
@@ -236,12 +277,12 @@ def reset_direct(paths):
         registry = read(paths, locked)
         if not registry:
             return False
-        for receipt in core.list_assignments(paths, _locked=locked):
-            if route(receipt, paths, locked, registry=registry) == "direct" and receipt["status"] in core.ACTIVE_STATUSES:
-                raise core.BusyError("Direct worker has unresolved work", details={"assignment_id": receipt["assignment_id"]})
-        if registry["direct_worker"] is None:
+        active = core.active_assignments(paths, execution_route="direct", _locked=locked)
+        if active:
+            raise core.BusyError("Direct workers have unresolved work", details=capacity(registry, active))
+        if not registry["direct_workers"]:
             return False
-        core.atomic_write_json(path(paths), dict(registry, direct_worker=None), _locked=locked)
+        core.atomic_write_json(path(paths), dict(registry, direct_workers=[]), _locked=locked)
         return True
 
 
@@ -266,17 +307,41 @@ def stop_check(paths, parent):
             "paths": {"config_dir": str(paths.config_dir), "state_dir": str(paths.state_dir)}}
 
 
+def capacity(registry, active):
+    """Capacity before account cooldown, including retained retired bindings."""
+    workers = registry["direct_workers"] if registry else []
+    occupied = {value["worker_conversation_id"] for value in active}
+    available = [worker for worker in workers if worker["conversation_id"] not in occupied]
+    remaining = min(len(available), max(0, 2 - len(active)))
+    return {"worker_count": len(workers), "workers": workers,
+            "worker": workers[0] if len(workers) == 1 else None,
+            "active_assignment": active[0] if len(active) == 1 else None,
+            "active_assignments": active, "available_workers": available,
+            "remaining_capacity": remaining,
+            "availability": "not_configured" if not workers else "ready" if remaining else "busy"}
+
+
 def status(paths):
-    with core.state_lock(paths, create=False) as locked:
-        registry = read(paths, locked)
-        worker = registry["direct_worker"] if registry else None
-        active = core.active_assignments(paths, execution_route="direct", _locked=locked)
-        cooldown = core.active_cooldown(paths, _locked=locked)
-        return {"ok": worker is not None, "local_ok": worker is not None, "execution_route": "direct", "worker": worker,
-                "active_assignment": active[0] if active else None, "active_assignments": active,
-                "active_cooldown": cooldown,
-                "next_action": "worker direct-set --conversation-id <exact-chat-id> --confirm-worker --native-controls-confirmed" if worker is None else
-                               "collect existing assignment" if active else "perform actual caller native preflight"}
+    try:
+        with core.state_lock(paths, create=False) as locked:
+            registry = read(paths, locked)
+            active = core.active_assignments(paths, execution_route="direct", _locked=locked)
+            cooldown = core.active_cooldown(paths, _locked=locked)
+    except FileNotFoundError:
+        from .native_storage import Directory
+        for directory in (paths.config_dir, paths.state_dir):
+            if os.path.lexists(directory):
+                with Directory(directory.absolute()) as checked:
+                    if os.listdir(checked.fd):
+                        raise core.StateError("dispatch_routes_integrity: canonical lock is missing")
+        registry, active, cooldown = None, [], None
+    details = capacity(registry, active)
+    return {"ok": bool(details["worker_count"]), "local_ok": bool(details["worker_count"]),
+            "execution_route": "direct", **details,
+            "active_cooldown": cooldown,
+            "next_action": "worker direct-pool-set --conversation-id <chat-01-id> --conversation-id <chat-02-id> --confirm-worker --native-controls-confirmed" if not details["worker_count"] else
+                           "wait for account cooldown" if cooldown else
+                           "collect existing assignment" if not details["remaining_capacity"] else "perform actual caller native preflight"}
 
 
 def observer_identity(caller, receipt, request):
