@@ -129,6 +129,174 @@ class ListenerStartTests(unittest.TestCase):
             listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
         self.assertEqual(before, self.snapshot())
 
+    def settled_pair(self):
+        old = self.fresh()
+        directory, _ = self._bind_session(old)
+        (directory / "waiting-3.fixture").mkdir(mode=0o700)
+        (directory / "wake.sock").touch(mode=0o600)
+        q = Queue(self.paths)
+        callers = []
+        for suffix in ("a", "b"):
+            rid = "settled-" + suffix
+            q.submit(rid, b"one send", "client")
+            c = dict(old, request=rid, invocation="call-" + suffix)
+            token = resident.invocation.set(c)
+            try:
+                claim = q.claim("parent", True, rid)
+                c["slot"] = claim["worker_slot"]
+                callers.append(dict(c))
+                core.arm_for_send(c["slot"], rid, old["generation"], c["invocation"], self.paths)
+                core.mark_submitted(rid, claim["wrapped_prompt"], self.paths)
+                history = json.dumps({
+                    "schemaVersion": 1,
+                    "thread": {"id": claim["worker_conversation_id"], "kind": "chatgpt",
+                               "status": {"type": "idle"}},
+                    "turns": [{"id": "turn-" + rid, "items": [
+                        {"id": "turn-" + rid, "type": "userMessage", "content": [
+                            {"type": "text", "text": claim["wrapped_prompt"]}]},
+                        {"id": "answer-" + rid, "type": "agentMessage", "text":
+                         core.result_marker(rid) + "\nanswer\n" + core.end_marker(rid)},
+                    ]}],
+                }).encode()
+                q.publish(rid, "parent", confirmed=True, native_read=history)
+                q.cleanup(rid, acknowledge=True)
+            finally:
+                resident.invocation.reset(token)
+        for c in callers:
+            resident.control("end", c, self.paths)
+        return old, directory, callers
+
+    def test_settled_pair_restarts_same_chat_and_fences_old_calls(self):
+        old, directory, callers = self.settled_pair()
+        self.assertTrue(self.owner()["send_fence"]["armed_since_barrier"])
+        before = self.snapshot()
+        p = listener.plan(self.paths, ["worker-a", "worker-b"])
+        result = listener.commit(self.paths, p, "parent", "later-turn")
+        self.assertEqual(result["reason"], "owner_acquired")
+        owner = self.owner()
+        self.assertEqual(owner["generation"], old["generation"] + 1)
+        proof = owner["qualification"]["last_exclusion"]
+        self.assertEqual(proof["kind"], "reconciled_send_ledger")
+        self.assertEqual([r["request_id"] for r in proof["receipts"]], ["settled-a", "settled-b"])
+        self.assertEqual(owner["send_fence"]["unexcluded_workers"], [])
+        after = self.snapshot()
+        before.pop(str(self.paths.state_dir / "resident-owner.json"))
+        after.pop(str(self.paths.state_dir / "resident-owner.json"))
+        self.assertEqual(before, after)
+        self.assertTrue((directory / "wake.sock").exists())
+        c = callers[0]
+        with self.assertRaisesRegex(core.StateError, "replaced"):
+            resident.control("begin", c, self.paths)
+        token = resident.invocation.set(c)
+        try:
+            with core.state_lock(self.paths) as locked, self.assertRaisesRegex(core.StateError, "changed"):
+                resident.reserve_slot(self.paths, locked, c["slot"], c["request"], "worker-a", old["generation"])
+            with self.assertRaisesRegex(core.BusyError, "replaced"):
+                core.arm_for_send(c["slot"], c["request"], old["generation"], c["invocation"], self.paths)
+        finally:
+            resident.invocation.reset(token)
+
+    def test_settled_ledger_rejects_uncertainty_and_missing_evidence(self):
+        self.settled_pair()
+        path = core.assignment_path("settled-b", self.paths)
+        original = core.read_json(path)
+        cases = [{"status": status} for status in ("armed", "abandoned", "failed", "indeterminate", "unknown")]
+        cases += [{"submission_count": n} for n in (0, 2, True, "1")]
+        cases += [{key: value} for key, value in (
+            ("outbound_prompt_verified", False), ("no_resend", False),
+            ("sent_prompt_sha256", "0" * 64), ("armed_at", None),
+            ("completed_at", None), ("response_sha256", None),
+            ("worker_slot", "slot-a"), ("owner_generation", 99))]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                with core.state_lock(self.paths) as locked:
+                    core.atomic_write_json(path, dict(original, **changes), _locked=locked)
+                before = self.snapshot()
+                with self.assertRaises(core.DispatchError):
+                    listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+                self.assertEqual(before, self.snapshot())
+        with core.state_lock(self.paths) as locked:
+            core.atomic_write_json(path, original, _locked=locked)
+        # Simulated lost receipt: the other complete receipt is insufficient.
+        retained = path.with_suffix(".retained")
+        path.rename(retained)
+        before = self.snapshot()
+        with self.assertRaisesRegex(core.StateError, "join_required"):
+            listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+        self.assertEqual(before, self.snapshot())
+        retained.rename(path)
+        with self.assertRaises(core.StateError):
+            core.purge_local_state(force=True, paths=self.paths)
+
+    def test_older_completed_history_cannot_account_for_current_sticky_fence(self):
+        self.settled_pair()
+        listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+        with core.state_lock(self.paths) as locked:
+            owner = resident.read(self.paths, locked)
+            owner["send_fence"]["armed_since_barrier"] = True
+            resident.write(self.paths, locked, owner)
+        before = self.snapshot()
+        with self.assertRaisesRegex(core.StateError, "join_required"):
+            listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "third-turn")
+        self.assertEqual(before, self.snapshot())
+
+    def test_settled_ledger_rejects_missing_queue_and_malformed_receipt(self):
+        self.settled_pair()
+        qpath = Queue(self.paths).path("settled-b")
+        retained = qpath.with_suffix(".retained")
+        qpath.rename(retained)
+        before = self.snapshot()
+        with self.assertRaises(core.StateError):
+            listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+        self.assertEqual(before, self.snapshot())
+        retained.rename(qpath)
+        path = core.assignment_path("settled-b", self.paths)
+        with core.state_lock(self.paths) as locked:
+            core.atomic_write_json(path, {"schema_version": 999}, _locked=locked)
+        before = self.snapshot()
+        with self.assertRaises(core.DispatchError):
+            listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+        self.assertEqual(before, self.snapshot())
+
+    def test_abandoned_issued_send_stays_exposed_after_end_and_release(self):
+        old, _, _ = self.settled_pair()
+        q = Queue(self.paths)
+        q.submit("abandoned", b"paused send", "client")
+        c = dict(old, request="abandoned", invocation="paused-call")
+        token = resident.invocation.set(c)
+        try:
+            claim = q.claim("parent", True, "abandoned")
+            c["slot"] = claim["worker_slot"]
+            core.arm_for_send(c["slot"], c["request"], old["generation"], c["invocation"], self.paths)
+            with self.assertRaises(core.BusyError) as caught:
+                listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+            self.assertIn("request_recovery_required", str(caught.exception.details))
+            core.abandon_assignment("abandoned", reason="test recovery", paths=self.paths)
+            q.release("abandoned", "parent")
+            resident.control("end", c, self.paths)
+        finally:
+            resident.invocation.reset(token)
+        before = self.snapshot()
+        with self.assertRaisesRegex(core.StateError, "join_required"):
+            listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+        self.assertEqual(before, self.snapshot())
+        with self.assertRaises(core.StateError):
+            core.purge_local_state(force=True, paths=self.paths)
+
+    def test_settled_proof_keeps_historical_exposures(self):
+        self.settled_pair()
+        # Simulate retained exposure from an earlier destination rotation.
+        with core.state_lock(self.paths) as locked:
+            owner = resident.read(self.paths, locked)
+            owner["send_fence"]["unexcluded_workers"] = ["retired-worker"]
+            core.atomic_write_json(self.paths.state_dir / "resident-owner.json", owner, _locked=locked)
+        listener.commit(self.paths, listener.plan(self.paths, ["worker-a", "worker-b"]), "parent", "later-turn")
+        self.assertEqual(self.owner()["send_fence"]["unexcluded_workers"], ["retired-worker"])
+        before = self.snapshot()
+        with self.assertRaisesRegex(core.StateError, "destination_exposed"):
+            listener.commit(self.paths, listener.plan(self.paths, ["retired-worker"]), "parent", "third-turn")
+        self.assertEqual(before, self.snapshot())
+
     def test_concurrent_starts_single_cas_winner_and_retry(self):
         self.fresh()
         p = listener.plan(self.paths, ["new-01"])

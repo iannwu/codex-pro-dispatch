@@ -87,8 +87,12 @@ finish, the Stop hook says the listener was served by an earlier turn. Then run
 the Start code above once in the current turn and follow its actions; that is
 the whole recovery. Do not wait on the old cell. The runtime replaces the owner
 when its send fence permits reuse of those chats, or when different chats satisfy
-the existing exclusion checks. For this idle, never-armed case, the replacement
-fences the old execution whether or not it still runs.
+the existing exclusion checks. Reuse also works when the retained queue and
+receipt ledgers prove every prior send on those chats completed exactly once
+with verified outbound bytes, and no work or recovery is active. Missing,
+released, abandoned, or uncertain send evidence still blocks reuse. The
+replacement fences future arms by the old generation whether or not it still
+runs; it does not claim the old execution has stopped.
 Otherwise it reports the blocker (for example `original_execution_join_required`
 or exact request IDs) and acquires nothing. The hook asks once per turn; after a
 `stop` action, report it and end the turn.
@@ -170,9 +174,12 @@ likewise needs a factual observation that no old native executor exists. There
 is no reboot automation.
 
 For a schema-4 listener that has armed work, use the original generated graceful
-stop and wait for its original continuation to record the join. If that
-execution is inaccessible, physical termination is the fallback. Profile-2 listeners can also be replaced with disjoint fresh worker chats even
-when an old execution cannot be joined. The runtime retains every exposed old
+stop and wait for its original continuation to record the join when available.
+If that execution is inaccessible, a profile-2 listener can reuse the same chats
+when the runtime proves the fully reconciled send ledger described above.
+Otherwise, physical termination is the fallback. Profile-2 listeners can also
+be replaced with disjoint fresh worker chats when an old execution cannot be
+joined. The runtime retains every exposed old
 destination and rejects its later reuse without physical recovery. A valid join
 excludes only the current session, never earlier exposed destinations. The
 runtime makes this decision; do not compute or edit the set yourself. Legacy
