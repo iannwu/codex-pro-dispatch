@@ -174,9 +174,12 @@ likewise needs a factual observation that no old native executor exists. There
 is no reboot automation.
 
 For a schema-4 listener that has armed work, use the original generated graceful
-stop and wait for its original continuation to record the join. If that
-execution is inaccessible, physical termination is the fallback. Profile-2 listeners can also be replaced with disjoint fresh worker chats even
-when an old execution cannot be joined. The runtime retains every exposed old
+stop and wait for its original continuation to record the join when available.
+If that execution is inaccessible, a profile-2 listener can reuse the same chats
+when the runtime proves the fully reconciled send ledger described above.
+Otherwise, physical termination is the fallback. Profile-2 listeners can also
+be replaced with disjoint fresh worker chats when an old execution cannot be
+joined. The runtime retains every exposed old
 destination and rejects its later reuse without physical recovery. A valid join
 excludes only the current session, never earlier exposed destinations. The
 runtime makes this decision; do not compute or edit the set yourself. Legacy
