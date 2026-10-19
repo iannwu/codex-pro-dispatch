@@ -87,8 +87,12 @@ finish, the Stop hook says the listener was served by an earlier turn. Then run
 the Start code above once in the current turn and follow its actions; that is
 the whole recovery. Do not wait on the old cell. The runtime replaces the owner
 when its send fence permits reuse of those chats, or when different chats satisfy
-the existing exclusion checks. For this idle, never-armed case, the replacement
-fences the old execution whether or not it still runs.
+the existing exclusion checks. Reuse also works when the retained queue and
+receipt ledgers prove every prior send on those chats completed exactly once
+with verified outbound bytes, and no work or recovery is active. Missing,
+released, abandoned, or uncertain send evidence still blocks reuse. The
+replacement fences future arms by the old generation whether or not it still
+runs; it does not claim the old execution has stopped.
 Otherwise it reports the blocker (for example `original_execution_join_required`
 or exact request IDs) and acquires nothing. The hook asks once per turn; after a
 `stop` action, report it and end the turn.

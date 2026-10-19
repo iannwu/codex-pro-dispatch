@@ -359,8 +359,68 @@ def _observed_reboot(paths, locked, owner, target_workers):
             "owner_sha256": hashlib.sha256(owner_raw).hexdigest()}
 
 
+def reconciled_send_ledger(paths, locked, owner):
+    """Prove issued sends settled, not that the old execution has stopped.
+
+    Queue claims precede arming and remain after acknowledgement. Cross-check
+    both retained ledgers: a missing receipt must not hide an issued send.
+    Purge is forbidden while route registration or resident ownership exists.
+    This deliberately rejects incomplete or legacy evidence, including released
+    requests. Generation rotation under this same lock fences future arms.
+    """
+    from .queue import Queue
+    from .listener import idle_blockers
+    locked.validate(paths)
+    if idle_blockers(paths, locked, owner):
+        return None
+    workers = {s["worker_conversation_id"]: s["slot"] for s in owner["slots"]}
+    broker = Queue(paths)
+    records = {r["request_id"]: r for r in broker.records(_locked=locked)}
+    receipts = core.list_assignments(paths, _locked=locked)
+    # Validate every retained claim on these destinations, even if its receipt
+    # disappeared. Queued/cancelled requests without an association never armed.
+    for record in records.values():
+        if record.get("worker_conversation_id") in workers:
+            if (record["state"] not in {"published", "acknowledged"}
+                    or broker.receipt(record, _locked=locked) is None):
+                return None
+    evidence = []
+    current_generation = False
+    for receipt in receipts:
+        worker = receipt.get("worker_conversation_id")
+        if worker not in workers:
+            continue
+        rid = receipt["assignment_id"]
+        record = records.get(rid)
+        if (record is None or record["state"] not in {"published", "acknowledged"}
+                or broker.receipt(record, _locked=locked) != receipt
+                or receipt.get("worker_slot") != workers[worker]
+                or type(receipt.get("owner_generation")) is not int
+                or not 0 < receipt["owner_generation"] <= owner["generation"]
+                or receipt.get("status") != "complete"
+                or type(receipt.get("submission_count")) is not int
+                or receipt["submission_count"] != 1
+                or receipt.get("outbound_prompt_verified") is not True
+                or receipt.get("no_resend") is not True
+                or receipt.get("result_marker_validated") is not True
+                or any(not isinstance(receipt.get(k), str) or not receipt[k]
+                       for k in ("armed_at", "submitted_at", "completed_at",
+                                 "outbound_prompt_verified_at"))
+                or any(not isinstance(receipt.get(k), str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", receipt[k])
+                       for k in ("wrapped_prompt_sha256", "response_sha256", "payload_sha256"))
+                or receipt.get("sent_prompt_sha256") != receipt["wrapped_prompt_sha256"]):
+            return None
+        current_generation |= receipt["owner_generation"] == owner["generation"]
+        evidence.append({"request_id": rid, "receipt_sha256": core._sha256_authority_file(
+            core.assignment_path(rid, paths))})
+    if not current_generation:
+        return None
+    return sorted(evidence, key=lambda item: item["request_id"])
+
+
 def exclusion_proof(paths, locked, owner, physical=None, target_workers=None):
-    """One bounded lineage barrier. Terminal receipts are never execution joins."""
+    """One bounded lineage barrier: join, settled sends, or excluded destinations."""
     locked.validate(paths)
     if physical is not None:
         expected = hashlib.sha256(core._authority_file_bytes(
@@ -386,18 +446,25 @@ def exclusion_proof(paths, locked, owner, physical=None, target_workers=None):
     targets = set(target_workers) if target_workers is not None else prior_workers
     exposed = set(owner["send_fence"]["unexcluded_workers"])
     joined = None
+    reconciled = None
     if owner["send_fence"]["armed_since_barrier"]:
         try:
             joined = original_join(paths, locked, owner)
         except core.DispatchError:
-            # A missing or invalid join excludes nothing. Keep every destination.
-            exposed.update(prior_workers)
+            try:
+                reconciled = reconciled_send_ledger(paths, locked, owner)
+            except (core.DispatchError, OSError, ValueError, KeyError, TypeError):
+                reconciled = None
+            if reconciled is None:
+                exposed.update(prior_workers)
     overlap = sorted(targets & exposed)
     if overlap:
         raise core.StateError("original_execution_join_required: destination_exposed; use fresh chats or physical recovery",
                               details={"exposed_workers": overlap})
-    return {"kind": "original_execution_join" if joined else "destination_exclusion",
-            "unexcluded_workers": sorted(exposed), **({"joined": joined} if joined else {})}
+    return {"kind": ("original_execution_join" if joined else
+                     "reconciled_send_ledger" if reconciled else "destination_exclusion"),
+            "unexcluded_workers": sorted(exposed), **({"joined": joined} if joined else {}),
+            **({"receipts": reconciled} if reconciled else {})}
 
 
 def original_join(paths, locked, owner):
