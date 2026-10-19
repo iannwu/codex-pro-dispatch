@@ -70,7 +70,9 @@ For resident candidates, use a disposable native session before any live send:
 
 Record native-host results separately from synthetic tests. Nonrenewal does not
 prove host cancellation, kernel-loss cleanup or recovery after a laptop reboot.
-Missing closure evidence remains a blocker, never permission to take over.
+Missing closure evidence is never proof of physical termination or permission
+to take over. Reuse requires the runtime’s explicit exclusion or reconciled-send
+proof; uncertain sends remain blocked.
 
 ### A3. Canonical resident ownership
 
